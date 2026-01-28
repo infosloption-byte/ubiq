@@ -1,75 +1,67 @@
 @import "tailwindcss";
 
 @theme {
-  --font-sans: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif;
-  --font-mono: source-code-pro, Menlo, Monaco, Consolas, 'Courier New', monospace;
+  /* Define the Deep Space Color Palette */
+  --color-ubiq-950: #0B0C15;
+  --color-ubiq-900: #151725;
+  --color-ubiq-800: #22253A;
+  --color-ubiq-700: #343952;
+  
+  --color-ubiq-accent: #6366f1;
+  --color-ubiq-accent-hover: #4f46e5;
+  
+  /* Fonts */
+  --font-sans: 'Inter', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+
+  /* Animations */
+  --animate-fade-in: fadeIn 0.3s ease-out;
+  
+  @keyframes fadeIn {
+    0% { opacity: 0; transform: translateY(10px); }
+    100% { opacity: 1; transform: translateY(0); }
+  }
 }
 
-* {
-  margin: 0;
-  padding: 0;
-  box-sizing: border-box;
+/* Import Google Fonts */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+
+/* Base Styles */
+:root {
+  color-scheme: dark;
 }
 
 body {
-  font-family: var(--font-sans);
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  background-color: #0f172a;
-  color: #e2e8f0;
+  /* Using the new variables we defined above */
+  @apply bg-ubiq-950 text-slate-300 font-sans antialiased selection:bg-ubiq-accent selection:text-white;
+  overflow: hidden; 
 }
 
-code {
-  font-family: var(--font-mono);
-}
-
-#root {
-  width: 100%;
-  height: 100vh;
-}
-
-/* Custom scrollbar */
+/* Custom Scrollbar */
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
 
 ::-webkit-scrollbar-track {
-  background: #1e293b;
+  background: transparent;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #475569;
-  border-radius: 4px;
+  @apply bg-ubiq-800 rounded-full hover:bg-ubiq-700 transition-colors;
 }
 
-::-webkit-scrollbar-thumb:hover {
-  background: #64748b;
+/* Reusable Components 
+   In v4, standard classes with @apply work perfectly for this */
+
+.glass-panel {
+  @apply bg-ubiq-900/50 backdrop-blur-xl border border-white/5;
 }
 
-/* Loading animation */
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
+.input-primary {
+  @apply bg-ubiq-950 border border-ubiq-800 rounded-lg px-4 py-2.5 text-slate-200 focus:outline-none focus:border-ubiq-accent focus:ring-1 focus:ring-ubiq-accent transition-all duration-200;
 }
 
-.animate-spin {
-  animation: spin 1s linear infinite;
-}
-
-/* Fade in animation */
-@keyframes fadeIn {
-  from {
-    opacity: 0;
-    transform: translateY(10px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-.animate-fade-in {
-  animation: fadeIn 0.3s ease-out;
+.btn-primary {
+  @apply bg-ubiq-accent hover:bg-ubiq-accent-hover text-white px-4 py-2 rounded-lg font-medium transition-all duration-200 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed;
 }

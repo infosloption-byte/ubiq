@@ -2,6 +2,7 @@ import { Editor } from '@monaco-editor/react';
 import { useEffect, useRef, useState } from 'react';
 import { aiAPI } from '../services/api';
 import { useAuthStore } from '../stores/authStore';
+import { SparklesIcon, XMarkIcon, CheckIcon } from '@heroicons/react/24/solid';
 
 interface CodeEditorProps {
   initialCode?: string;
@@ -10,14 +11,13 @@ interface CodeEditorProps {
 }
 
 export default function CodeEditor({ 
-  initialCode = '// Start coding with AI assistance...\n\n', 
+  initialCode = '', 
   language = 'javascript',
   onCodeChange 
 }: CodeEditorProps) {
   const [code, setCode] = useState(initialCode);
   const [suggestion, setSuggestion] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState('');
   const editorRef = useRef<any>(null);
   const timeoutRef = useRef<any>(null);
   const { user } = useAuthStore();
@@ -26,48 +26,23 @@ export default function CodeEditor({
     setCode(initialCode);
   }, [initialCode]);
 
+  // Debounced Auto-Completion
   const fetchCompletion = async (currentCode: string) => {
-    // Don't fetch if code is too short
-    if (currentCode.length < 15) {
-      setSuggestion('');
-      return;
-    }
-    
-    // Don't fetch if user hasn't enabled suggestions
-    if (user?.preferences && !user.preferences.code_suggestions) {
-      return;
-    }
+    if (currentCode.length < 10 || !user?.preferences?.code_suggestions) return;
     
     setIsLoading(true);
-    setError('');
-    
     try {
       const response = await aiAPI.completion({
         code: currentCode,
         language: language,
-        max_tokens: 100,
-        temperature: 0.2,
+        max_tokens: 50,
       });
 
       if (response.data.completion) {
         setSuggestion(response.data.completion.trim());
-        
-        // Auto-hide suggestion after 10 seconds
-        setTimeout(() => {
-          setSuggestion('');
-        }, 10000);
       }
-    } catch (err: any) {
-      console.error('Completion failed:', err);
-      
-      if (err.response?.status === 429) {
-        setError('Rate limit exceeded. Please wait before requesting more completions.');
-      } else {
-        setError('Failed to get AI suggestion');
-      }
-      
-      // Clear error after 3 seconds
-      setTimeout(() => setError(''), 3000);
+    } catch (err) {
+      // Silent fail for completions to avoid annoying the user
     } finally {
       setIsLoading(false);
     }
@@ -78,36 +53,8 @@ export default function CodeEditor({
     setCode(newCode);
     onCodeChange?.(newCode);
 
-    // Clear previous timeout
-    if (timeoutRef.current) {
-      clearTimeout(timeoutRef.current);
-    }
-
-    // Debounce completion requests (wait 2 seconds after user stops typing)
-    timeoutRef.current = setTimeout(() => {
-      fetchCompletion(newCode);
-    }, 2000);
-  };
-
-  const handleEditorMount = (editor: any, monaco: any) => {
-    editorRef.current = editor;
-
-    // Add keyboard shortcut for accepting suggestion
-    editor.addCommand(monaco.KeyMod.Alt | monaco.KeyCode.Enter, () => {
-      if (suggestion) {
-        const currentCode = editor.getValue();
-        const newCode = currentCode + '\n' + suggestion;
-        editor.setValue(newCode);
-        setSuggestion('');
-      }
-    });
-
-    // Add save shortcut
-    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
-      // Trigger save event if needed
-      const event = new CustomEvent('editor-save', { detail: { code: editor.getValue() } });
-      window.dispatchEvent(event);
-    });
+    if (timeoutRef.current) clearTimeout(timeoutRef.current);
+    timeoutRef.current = setTimeout(() => fetchCompletion(newCode), 2000);
   };
 
   const insertSuggestion = () => {
@@ -116,117 +63,72 @@ export default function CodeEditor({
       const newCode = currentCode + '\n' + suggestion;
       editorRef.current.setValue(newCode);
       setSuggestion('');
+      onCodeChange?.(newCode);
     }
   };
 
-  const dismissSuggestion = () => {
-    setSuggestion('');
-  };
-
   return (
-    <div className="h-full relative">
+    <div className="h-full relative group">
       <Editor
         height="100%"
         language={language}
         value={code}
         onChange={handleEditorChange}
-        onMount={handleEditorMount}
+        onMount={(editor) => { editorRef.current = editor; }}
         theme="vs-dark"
         options={{
-          minimap: { 
-            enabled: user?.preferences?.editor_settings?.minimap?.enabled ?? false 
-          },
+          minimap: { enabled: user?.preferences?.editor_settings?.minimap?.enabled ?? false },
           fontSize: user?.preferences?.editor_settings?.fontSize ?? 14,
+          fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
           lineNumbers: 'on',
           roundedSelection: false,
           scrollBeyondLastLine: false,
-          readOnly: false,
           automaticLayout: true,
-          tabSize: user?.preferences?.editor_settings?.tabSize ?? 4,
-          wordWrap: user?.preferences?.editor_settings?.wordWrap ?? 'on',
-          formatOnSave: user?.preferences?.editor_settings?.formatOnSave ?? false,
-          suggestOnTriggerCharacters: true,
-          quickSuggestions: {
-            other: true,
-            comments: false,
-            strings: false,
-          },
-          acceptSuggestionOnCommitCharacter: true,
-          acceptSuggestionOnEnter: 'on',
-          snippetSuggestions: 'top',
+          padding: { top: 20, bottom: 20 },
+          smoothScrolling: true,
+          cursorBlinking: "smooth",
+          cursorSmoothCaretAnimation: "on"
         }}
       />
       
-      {/* Loading Indicator */}
+      {/* AI Loading State (Subtle Pulse) */}
       {isLoading && (
-        <div className="absolute top-4 right-4 bg-blue-600 text-white px-4 py-2 rounded-lg text-sm flex items-center shadow-lg">
-          <svg className="animate-spin h-4 w-4 mr-2" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-          </svg>
-          AI is thinking...
-        </div>
-      )}
-
-      {/* Error Message */}
-      {error && (
-        <div className="absolute top-4 right-4 bg-red-500 text-white px-4 py-2 rounded-lg text-sm shadow-lg">
-          {error}
+        <div className="absolute top-4 right-4 flex items-center gap-2 bg-ubiq-900/80 backdrop-blur border border-ubiq-accent/30 text-ubiq-accent px-3 py-1.5 rounded-full text-xs font-medium shadow-lg z-10">
+          <SparklesIcon className="w-3.5 h-3.5 animate-pulse" />
+          <span>AI Thinking...</span>
         </div>
       )}
       
-      {/* AI Suggestion Panel */}
+      {/* AI Suggestion HUD */}
       {suggestion && !isLoading && (
-        <div className="absolute bottom-4 left-4 right-4 bg-slate-800 border-2 border-blue-500 rounded-lg shadow-2xl overflow-hidden animate-fade-in">
-          <div className="bg-blue-600 px-4 py-2 flex items-center justify-between">
-            <div className="flex items-center space-x-2">
-              <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
-              </svg>
-              <span className="text-white font-semibold text-sm">AI Suggestion</span>
+        <div className="absolute bottom-6 left-6 right-6 md:left-auto md:right-6 md:w-[500px] glass-panel rounded-xl shadow-2xl overflow-hidden border-l-4 border-l-ubiq-accent z-20">
+          <div className="bg-ubiq-900/90 px-4 py-2 flex items-center justify-between border-b border-white/5">
+            <div className="flex items-center gap-2 text-ubiq-accent">
+              <SparklesIcon className="w-4 h-4" />
+              <span className="text-xs font-bold uppercase tracking-wide">AI Suggestion</span>
             </div>
-            <button
-              onClick={dismissSuggestion}
-              className="text-white hover:text-blue-200 transition-colors"
-              title="Dismiss (Esc)"
-            >
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            </button>
+            <div className="flex gap-2">
+               <button onClick={() => setSuggestion('')} className="p-1 hover:bg-white/10 rounded transition-colors text-slate-400 hover:text-white">
+                  <XMarkIcon className="w-4 h-4" />
+               </button>
+            </div>
           </div>
           
-          <div className="p-4 max-h-48 overflow-y-auto">
-            <pre className="text-sm text-gray-200 whitespace-pre-wrap font-mono bg-slate-900 p-3 rounded">
-              {suggestion}
-            </pre>
+          <div className="p-4 bg-black/40 max-h-40 overflow-y-auto custom-scrollbar">
+            <pre className="text-xs md:text-sm text-slate-300 font-mono whitespace-pre-wrap">{suggestion}</pre>
           </div>
           
-          <div className="bg-slate-700 px-4 py-3 flex items-center justify-between border-t border-slate-600">
-            <div className="text-xs text-slate-400">
-              Press <kbd className="px-2 py-1 bg-slate-600 rounded text-white">Alt+Enter</kbd> to insert
-            </div>
-            <button
-              onClick={insertSuggestion}
-              className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-1.5 rounded text-sm font-medium transition-colors"
-            >
-              Insert Code
-            </button>
+          <div className="px-4 py-2 bg-ubiq-900/90 border-t border-white/5 flex justify-between items-center">
+             <span className="text-[10px] text-slate-500">Review code before accepting</span>
+             <button 
+               onClick={insertSuggestion}
+               className="flex items-center gap-1.5 bg-ubiq-accent hover:bg-ubiq-accent-hover text-white px-3 py-1 rounded text-xs font-medium transition-colors"
+             >
+               <CheckIcon className="w-3 h-3" /> Accept
+             </button>
           </div>
         </div>
       )}
-
-      {/* Keyboard Shortcuts Help */}
-      <div className="absolute bottom-2 right-2 text-xs text-slate-500">
-        <div className="flex items-center space-x-4 bg-slate-800/90 px-3 py-1 rounded">
-          <span>
-            <kbd className="px-1.5 py-0.5 bg-slate-700 rounded text-slate-300">Ctrl+S</kbd> Save
-          </span>
-          <span>
-            <kbd className="px-1.5 py-0.5 bg-slate-700 rounded text-slate-300">Alt+Enter</kbd> Accept AI
-          </span>
-        </div>
-      </div>
     </div>
   );
 }
