@@ -1,319 +1,216 @@
 import { useState, useRef, useEffect } from 'react';
-import { aiAPI, chatAPI } from '../services/api';
 import { useAuthStore } from '../stores/authStore';
+import { chatAPI, aiAPI } from '../services/api';
+import ReactMarkdown from 'react-markdown';
+import { 
+  PaperAirplaneIcon, 
+  StopIcon, 
+  SparklesIcon,
+  UserIcon,
+  ClipboardIcon,
+  CheckIcon
+} from '@heroicons/react/24/outline';
 
 interface Message {
+  id?: number;
   role: 'user' | 'assistant' | 'system';
   content: string;
-  timestamp?: Date;
+  created_at?: string;
 }
 
 interface ChatInterfaceProps {
-  sessionId?: number;
+  sessionId: number;
 }
 
 export default function ChatInterface({ sessionId }: ChatInterfaceProps) {
+  const { user } = useAuthStore(); // Subscribed to store updates
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState('');
-  const messagesEndRef = useRef<null | HTMLDivElement>(null);
-  const { user } = useAuthStore();
+  const [isTyping, setIsTyping] = useState(false);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
-    if (sessionId) {
-      loadMessages();
-    }
+    loadMessages();
   }, [sessionId]);
 
   useEffect(() => {
     scrollToBottom();
-  }, [messages]);
+  }, [messages, isTyping]);
 
   const loadMessages = async () => {
-    if (!sessionId) return;
-
     try {
+      setMessages([]);
       const response = await chatAPI.getMessages(sessionId);
-      const loadedMessages = response.data.messages.map((msg: any) => ({
-        role: msg.role,
-        content: msg.content,
-        timestamp: new Date(msg.created_at),
-      }));
-      setMessages(loadedMessages);
+      setMessages(response.data.messages || []);
     } catch (error) {
       console.error('Failed to load messages:', error);
     }
   };
 
   const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };
 
-  const sendMessage = async () => {
+  const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setInput(e.target.value);
+    if (textareaRef.current) {
+      textareaRef.current.style.height = 'auto';
+      textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 200)}px`;
+    }
+  };
+
+  const handleSendMessage = async (e?: React.FormEvent) => {
+    e?.preventDefault();
     if (!input.trim() || isLoading) return;
 
-    const userMessage: Message = { 
-      role: 'user', 
-      content: input,
-      timestamp: new Date(),
-    };
-    
-    setMessages((prev) => [...prev, userMessage]);
+    const content = input.trim();
     setInput('');
+    if (textareaRef.current) textareaRef.current.style.height = 'auto';
+
+    const tempUserMsg: Message = { role: 'user', content, created_at: new Date().toISOString() };
+    setMessages(prev => [...prev, tempUserMsg]);
     setIsLoading(true);
-    setError('');
+    setIsTyping(true);
 
     try {
-      // If we have a session ID, save to backend
-      if (sessionId) {
-        await chatAPI.sendMessage(sessionId, { content: userMessage.content });
-      }
+      await chatAPI.sendMessage(sessionId, { content });
 
-      // Get AI response
+      const contextMessages = messages.slice(-10).map(m => ({
+        role: m.role,
+        content: m.content
+      }));
+      contextMessages.push({ role: 'user', content });
+
+      // DEBUG: Verify exactly what model is being used from the store
+      const preferred = user?.preferences?.preferred_model;
+      console.log('DEBUG: User Preferences in Store:', user?.preferences);
+      
+      const modelToSend = (typeof preferred === 'string' && preferred.trim() !== '') 
+        ? preferred 
+        : 'codellama:7b';
+
+      console.log('Sending chat request with model:', modelToSend);
+
       const response = await aiAPI.chat({
-        messages: [...messages, userMessage].map(m => ({
-          role: m.role,
-          content: m.content,
-        })),
+        messages: contextMessages,
+        model: modelToSend
       });
 
-      const assistantMessage: Message = {
-        role: 'assistant',
-        content: response.data.message.content || response.data.message,
-        timestamp: new Date(),
-      };
+      const aiContent = response.data.message.content || response.data.message;
 
-      setMessages((prev) => [...prev, assistantMessage]);
-    } catch (err: any) {
-      console.error('Chat failed:', err);
+      const aiMsg: Message = { 
+        role: 'assistant', 
+        content: aiContent, 
+        created_at: new Date().toISOString() 
+      };
       
-      let errorMessage = 'Sorry, I encountered an error. Please try again.';
+      await chatAPI.sendMessage(sessionId, { content: aiContent, role: 'assistant' });
+      setMessages(prev => [...prev, aiMsg]);
+
+    } catch (error: any) {
+      console.error('Chat failed:', error);
+      let errorMsg = "**Error:** Failed to connect to AI.";
       
-      if (err.response?.status === 429) {
-        errorMessage = 'Rate limit exceeded. Please wait a moment before sending more messages.';
-      } else if (err.response?.status === 401) {
-        errorMessage = 'Your session has expired. Please refresh the page.';
+      if (error.response?.status === 422) {
+         errorMsg = "**Configuration Error:** The AI model setting is invalid. Please go to settings and select a model again.";
+      } else if (error.response?.data?.message) {
+         errorMsg = `**Error:** ${error.response.data.message}`;
       }
-      
-      setError(errorMessage);
-      
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: 'assistant',
-          content: errorMessage,
-          timestamp: new Date(),
-        },
-      ]);
+
+      setMessages(prev => [...prev, { 
+        role: 'assistant', 
+        content: errorMsg
+      }]);
     } finally {
       setIsLoading(false);
+      setIsTyping(false);
     }
   };
 
-  const handleKeyPress = (e: React.KeyboardEvent) => {
+  const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      sendMessage();
+      handleSendMessage();
     }
   };
 
-  const clearChat = () => {
-    if (confirm('Are you sure you want to clear this chat?')) {
-      setMessages([]);
-    }
-  };
-
-  const copyToClipboard = (text: string) => {
-    navigator.clipboard.writeText(text);
-  };
-
-  const formatTimestamp = (date?: Date) => {
-    if (!date) return '';
-    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  // Helper for Code Copy Button
+  const CopyButton = ({ text }: { text: string }) => {
+    const [copied, setCopied] = useState(false);
+    const handleCopy = () => {
+      navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    };
+    return (
+      <button onClick={handleCopy} className="absolute right-2 top-2 p-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-slate-300 transition-all">
+        {copied ? <CheckIcon className="w-4 h-4 text-green-400" /> : <ClipboardIcon className="w-4 h-4" />}
+      </button>
+    );
   };
 
   return (
-    <div className="flex flex-col h-full bg-slate-900">
-      {/* Header */}
-      <div className="bg-slate-800 border-b border-slate-700 px-6 py-4 flex items-center justify-between">
-        <div>
-          <h2 className="text-white font-semibold text-lg">AI Coding Assistant</h2>
-          <p className="text-slate-400 text-sm">Ask me anything about coding, debugging, or best practices</p>
-        </div>
-        <button
-          onClick={clearChat}
-          className="text-slate-400 hover:text-white transition-colors px-3 py-1.5 rounded hover:bg-slate-700"
-          title="Clear chat"
-        >
-          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-          </svg>
-        </button>
-      </div>
-
-      {/* Messages Area */}
-      <div className="flex-1 overflow-y-auto p-6 space-y-6">
-        {messages.length === 0 && !isLoading && (
-          <div className="text-center text-slate-500 mt-20">
-            <div className="text-7xl mb-6">💬</div>
-            <h3 className="text-2xl font-semibold text-white mb-3">
-              Hi! I'm your AI coding assistant.
-            </h3>
-            <p className="text-lg mb-6">
-              I can help you with:
-            </p>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 max-w-2xl mx-auto text-left">
-              <div className="bg-slate-800 p-4 rounded-lg border border-slate-700">
-                <div className="text-2xl mb-2">💻</div>
-                <div className="font-medium text-white mb-1">Code Generation</div>
-                <div className="text-sm text-slate-400">Write functions, classes, and algorithms</div>
+    <div className="flex flex-col h-full relative">
+      <div className="flex-1 overflow-y-auto px-4 py-6 scroll-smooth custom-scrollbar">
+        <div className="max-w-3xl mx-auto space-y-8">
+          {messages.map((msg, idx) => (
+            <div key={idx} className={`flex gap-5 ${msg.role === 'user' ? 'flex-row-reverse' : 'flex-row'}`}>
+              <div className={`w-8 h-8 rounded-full flex-shrink-0 flex items-center justify-center text-xs font-bold ring-1 ring-white/10 shadow-lg ${
+                msg.role === 'user' ? 'bg-ubiq-800 text-slate-300' : 'bg-gradient-to-tr from-indigo-600 to-purple-600 text-white'
+              }`}>
+                {msg.role === 'user' ? <UserIcon className="w-4 h-4" /> : <SparklesIcon className="w-4 h-4" />}
               </div>
-              <div className="bg-slate-800 p-4 rounded-lg border border-slate-700">
-                <div className="text-2xl mb-2">🐛</div>
-                <div className="font-medium text-white mb-1">Debugging Help</div>
-                <div className="text-sm text-slate-400">Find and fix errors in your code</div>
-              </div>
-              <div className="bg-slate-800 p-4 rounded-lg border border-slate-700">
-                <div className="text-2xl mb-2">📚</div>
-                <div className="font-medium text-white mb-1">Code Explanation</div>
-                <div className="text-sm text-slate-400">Understand complex code snippets</div>
-              </div>
-              <div className="bg-slate-800 p-4 rounded-lg border border-slate-700">
-                <div className="text-2xl mb-2">✨</div>
-                <div className="font-medium text-white mb-1">Best Practices</div>
-                <div className="text-sm text-slate-400">Learn coding patterns and tips</div>
+              <div className={`flex-1 max-w-[85%] rounded-2xl px-6 py-4 text-sm leading-relaxed shadow-sm relative group ${
+                msg.role === 'user' ? 'bg-ubiq-800 text-slate-200 rounded-tr-sm border border-white/5' : 'bg-transparent text-slate-300 px-0 py-0 shadow-none'
+              }`}>
+                <ReactMarkdown components={{
+                    code({node, className, children, ...props}) {
+                      const match = /language-(\w+)/.exec(className || '');
+                      const isInline = !match;
+                      return isInline ? (
+                        <code className="bg-ubiq-950/50 border border-ubiq-700 rounded px-1.5 py-0.5 text-ubiq-accent font-mono text-xs" {...props}>{children}</code>
+                      ) : (
+                        <div className="relative mt-3 mb-3 rounded-lg overflow-hidden border border-ubiq-700 bg-ubiq-950 shadow-lg">
+                           <div className="flex items-center justify-between px-4 py-1.5 bg-ubiq-900 border-b border-ubiq-800">
+                              <span className="text-[10px] text-slate-500 uppercase">{match?.[1] || 'code'}</span>
+                              <CopyButton text={String(children)} />
+                           </div>
+                           <pre className="p-4 overflow-x-auto text-xs font-mono text-slate-300"><code className={className} {...props}>{children}</code></pre>
+                        </div>
+                      );
+                    },
+                    p: ({children}) => <p className="mb-3 last:mb-0">{children}</p>,
+                    ul: ({children}) => <ul className="list-disc pl-4 mb-3 space-y-1">{children}</ul>,
+                    ol: ({children}) => <ol className="list-decimal pl-4 mb-3 space-y-1">{children}</ol>,
+                    a: ({href, children}) => <a href={href} target="_blank" rel="noopener noreferrer" className="text-ubiq-accent hover:underline">{children}</a>
+                  }}>{msg.content}</ReactMarkdown>
               </div>
             </div>
-          </div>
-        )}
-
-        {messages.map((msg, idx) => (
-          <div
-            key={idx}
-            className={`flex ${
-              msg.role === 'user' ? 'justify-end' : 'justify-start'
-            }`}
-          >
-            <div
-              className={`max-w-[85%] rounded-lg p-4 ${
-                msg.role === 'user'
-                  ? 'bg-blue-600 text-white'
-                  : 'bg-slate-800 text-slate-100 border border-slate-700'
-              }`}
-            >
-              {/* Message Header */}
-              <div className="flex items-center justify-between mb-2">
-                <div className="flex items-center space-x-2">
-                  <div className={`text-xs font-semibold uppercase ${
-                    msg.role === 'user' ? 'text-blue-100' : 'text-slate-400'
-                  }`}>
-                    {msg.role === 'user' ? 'You' : 'AI Assistant'}
-                  </div>
-                  {msg.timestamp && (
-                    <div className={`text-xs ${
-                      msg.role === 'user' ? 'text-blue-200' : 'text-slate-500'
-                    }`}>
-                      {formatTimestamp(msg.timestamp)}
-                    </div>
-                  )}
+          ))}
+          {isTyping && (
+             <div className="flex gap-5">
+                <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-indigo-600 to-purple-600 flex items-center justify-center text-white ring-1 ring-white/10"><SparklesIcon className="w-4 h-4 animate-pulse" /></div>
+                <div className="flex items-center gap-1.5 h-8 px-2">
+                   <div className="w-1.5 h-1.5 bg-slate-500 rounded-full animate-bounce delay-75" />
+                   <div className="w-1.5 h-1.5 bg-slate-500 rounded-full animate-bounce delay-150" />
+                   <div className="w-1.5 h-1.5 bg-slate-500 rounded-full animate-bounce delay-300" />
                 </div>
-                {msg.role === 'assistant' && (
-                  <button
-                    onClick={() => copyToClipboard(msg.content)}
-                    className="text-slate-400 hover:text-white transition-colors"
-                    title="Copy to clipboard"
-                  >
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                    </svg>
-                  </button>
-                )}
-              </div>
-
-              {/* Message Content */}
-              <div className="prose prose-invert max-w-none">
-                <pre className="whitespace-pre-wrap font-sans text-sm leading-relaxed">
-                  {msg.content}
-                </pre>
-              </div>
-            </div>
-          </div>
-        ))}
-
-        {isLoading && (
-          <div className="flex justify-start">
-            <div className="bg-slate-800 border border-slate-700 rounded-lg p-4 max-w-[85%]">
-              <div className="flex items-center space-x-2 mb-2">
-                <div className="text-xs font-semibold uppercase text-slate-400">AI Assistant</div>
-                <div className="text-xs text-slate-500">typing...</div>
-              </div>
-              <div className="flex space-x-2">
-                <div className="w-2 h-2 bg-slate-500 rounded-full animate-bounce"></div>
-                <div className="w-2 h-2 bg-slate-500 rounded-full animate-bounce" style={{ animationDelay: '0.1s' }}></div>
-                <div className="w-2 h-2 bg-slate-500 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></div>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {error && (
-          <div className="flex justify-center">
-            <div className="bg-red-500/10 border border-red-500 text-red-500 rounded-lg p-4 max-w-md">
-              {error}
-            </div>
-          </div>
-        )}
-
-        <div ref={messagesEndRef} />
-      </div>
-
-      {/* Input Area */}
-      <div className="border-t border-slate-700 p-6 bg-slate-800">
-        <div className="flex space-x-3">
-          <textarea
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyPress={handleKeyPress}
-            placeholder="Ask me anything about coding... (Shift+Enter for new line)"
-            className="flex-1 bg-slate-700 text-white rounded-lg px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none border border-slate-600 placeholder-slate-400"
-            rows={3}
-            disabled={isLoading}
-          />
-          <button
-            onClick={sendMessage}
-            disabled={isLoading || !input.trim()}
-            className="bg-blue-600 hover:bg-blue-700 disabled:bg-slate-600 disabled:cursor-not-allowed text-white px-8 py-3 rounded-lg font-medium transition-colors self-end flex items-center space-x-2"
-          >
-            {isLoading ? (
-              <>
-                <svg className="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                </svg>
-                <span>Thinking...</span>
-              </>
-            ) : (
-              <>
-                <span>Send</span>
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
-                </svg>
-              </>
-            )}
-          </button>
+             </div>
+          )}
+          <div ref={messagesEndRef} />
         </div>
-        
-        <div className="flex items-center justify-between mt-3">
-          <p className="text-xs text-slate-500">
-            Press <kbd className="px-2 py-1 bg-slate-700 rounded text-slate-300">Enter</kbd> to send, 
-            <kbd className="px-2 py-1 bg-slate-700 rounded text-slate-300 ml-1">Shift+Enter</kbd> for new line
-          </p>
-          <div className="text-xs text-slate-500">
-            Model: <span className="text-slate-400 font-medium">
-              {user?.preferences?.preferred_model || 'codellama:7b'}
-            </span>
+      </div>
+      <div className="px-4 pb-6 pt-2 bg-gradient-to-t from-ubiq-950 via-ubiq-950 to-transparent z-20">
+        <div className="max-w-3xl mx-auto relative">
+          <div className="relative glass-panel rounded-2xl p-2 flex items-end gap-2 shadow-2xl ring-1 ring-white/10 focus-within:ring-ubiq-accent/50 transition-all">
+            <textarea ref={textareaRef} rows={1} value={input} onChange={handleInput} onKeyDown={handleKeyDown} placeholder="Ask anything..." className="w-full bg-transparent text-slate-200 text-sm px-4 py-3 focus:outline-none resize-none max-h-[200px] placeholder:text-slate-500" />
+            <button onClick={() => handleSendMessage()} disabled={!input.trim() || isLoading} className={`p-2.5 rounded-xl mb-1 flex-shrink-0 transition-all duration-200 ${input.trim() && !isLoading ? 'bg-ubiq-accent hover:bg-ubiq-accent-hover text-white shadow-lg shadow-ubiq-accent/20' : 'bg-ubiq-800 text-slate-500 cursor-not-allowed'}`}>
+              {isLoading ? <StopIcon className="w-5 h-5 animate-pulse" /> : <PaperAirplaneIcon className="w-5 h-5" />}
+            </button>
           </div>
+          <div className="text-center mt-3 text-[10px] text-slate-600 font-medium">AI can make mistakes. Please review generated code.</div>
         </div>
       </div>
     </div>

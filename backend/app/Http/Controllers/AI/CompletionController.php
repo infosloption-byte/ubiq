@@ -7,6 +7,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Validator;
+use Illuminate\Support\Facades\Log; // Added for error logging
 use App\Models\UsageLog;
 use App\Models\RateLimit;
 use Carbon\Carbon;
@@ -66,9 +67,6 @@ class CompletionController extends Controller
     
     /**
      * Code completion endpoint
-     * 
-     * @param Request $request
-     * @return \Illuminate\Http\JsonResponse
      */
     public function complete(Request $request)
     {
@@ -108,7 +106,7 @@ class CompletionController extends Controller
         $userPreferences = $user->preferences;
         $model = $request->model ?? ($userPreferences ? $userPreferences->preferred_model : 'codellama:7b');
         
-        // Check cache (optional)
+        // Check cache
         $cacheKey = 'completion:' . md5($request->code . $model . $request->language);
         
         if ($cached = Cache::get($cacheKey)) {
@@ -124,7 +122,7 @@ class CompletionController extends Controller
             $startTime = microtime(true);
             
             // Call inference API
-            $response = Http::timeout(30)->post($this->inferenceUrl . '/v1/completion', [
+            $response = Http::timeout(60)->post($this->inferenceUrl . '/v1/completion', [
                 'code' => $request->code,
                 'language' => $request->language,
                 'model' => $model,
@@ -166,7 +164,6 @@ class CompletionController extends Controller
             ]);
             
         } catch (\Exception $e) {
-            // Log failure
             UsageLog::create([
                 'user_id' => $user->id,
                 'request_type' => 'completion',
@@ -178,17 +175,14 @@ class CompletionController extends Controller
             
             return response()->json([
                 'error' => 'Completion failed',
-                'message' => 'Failed to generate code completion. Please try again.',
+                'message' => 'Failed to generate code completion.',
                 'details' => env('APP_DEBUG') ? $e->getMessage() : null
             ], 500);
         }
     }
     
     /**
-     * Chat endpoint
-     * 
-     * @param Request $request
-     * @return \Illuminate\Http\JsonResponse
+     * Chat endpoint (Robust timeout/error handling added)
      */
     public function chat(Request $request)
     {
@@ -227,8 +221,8 @@ class CompletionController extends Controller
         try {
             $startTime = microtime(true);
             
-            // Call inference API
-            $response = Http::timeout(60)->post($this->inferenceUrl . '/v1/chat', [
+            // Call inference API with INCREASED timeout (300s) for large models
+            $response = Http::timeout(300)->post($this->inferenceUrl . '/v1/chat', [
                 'messages' => $request->messages,
                 'model' => $model,
                 'context' => $request->context ?? [],
@@ -237,8 +231,12 @@ class CompletionController extends Controller
             
             $latency = (microtime(true) - $startTime) * 1000;
             
+            // Check for AI Server Errors specifically
             if (!$response->successful()) {
-                throw new \Exception('Chat API failed: ' . $response->body());
+                $errorBody = $response->json();
+                $errorMessage = $errorBody['detail'] ?? $response->body();
+                
+                throw new \Exception("AI Server Error: " . $errorMessage);
             }
             
             $result = $response->json();
@@ -262,6 +260,22 @@ class CompletionController extends Controller
                 'latency_ms' => round($latency, 2),
                 'remaining_requests' => $rateLimitCheck['remaining']
             ]);
+
+        } catch (\Illuminate\Http\Client\ConnectionException $e) {
+            // Handle Timeouts specifically
+             UsageLog::create([
+                'user_id' => $user->id,
+                'request_type' => 'chat',
+                'model_used' => $model,
+                'success' => false,
+                'error_message' => 'Connection Timeout',
+            ]);
+
+            return response()->json([
+                'error' => 'Connection Timeout',
+                'message' => "The model '$model' is taking too long to load. Try a smaller model.",
+                'details' => $e->getMessage()
+            ], 504);
             
         } catch (\Exception $e) {
             // Log failure
@@ -273,23 +287,21 @@ class CompletionController extends Controller
                 'error_message' => $e->getMessage(),
             ]);
             
+            Log::error("Chat API Failed: " . $e->getMessage());
+            
             return response()->json([
                 'error' => 'Chat failed',
                 'message' => 'Failed to process chat request.',
-                'details' => env('APP_DEBUG') ? $e->getMessage() : null
+                'details' => $e->getMessage() // This will now show the REAL error from python
             ], 500);
         }
     }
     
     /**
      * Code review endpoint
-     * 
-     * @param Request $request
-     * @return \Illuminate\Http\JsonResponse
      */
     public function review(Request $request)
     {
-        // Validate input
         $validator = Validator::make($request->all(), [
             'code' => 'required|string|max:20000',
             'language' => 'required|string|max:50',
@@ -299,36 +311,26 @@ class CompletionController extends Controller
         ]);
 
         if ($validator->fails()) {
-            return response()->json([
-                'error' => 'Validation failed',
-                'messages' => $validator->errors()
-            ], 422);
+            return response()->json(['error' => 'Validation failed', 'messages' => $validator->errors()], 422);
         }
         
         $user = $request->user();
-        
-        // Check rate limit
         $rateLimitCheck = $this->checkRateLimit($user);
+        
         if (!$rateLimitCheck['allowed']) {
-            return response()->json([
-                'error' => 'Rate limit exceeded',
-                'retry_after' => $rateLimitCheck['retry_after']
-            ], 429);
+            return response()->json(['error' => 'Rate limit exceeded', 'retry_after' => $rateLimitCheck['retry_after']], 429);
         }
         
-        // Get model
         $userPreferences = $user->preferences;
         $model = $request->model ?? ($userPreferences ? $userPreferences->preferred_model : 'codellama:7b');
         
-        // Build review prompt
         $reviewTypes = $request->review_type ?? ['security', 'performance', 'best_practices'];
         $prompt = "Review the following {$request->language} code for " . implode(', ', $reviewTypes) . ":\n\n{$request->code}\n\nProvide a detailed review with specific suggestions.";
         
         try {
             $startTime = microtime(true);
             
-            // Call chat API with review prompt
-            $response = Http::timeout(60)->post($this->inferenceUrl . '/v1/chat', [
+            $response = Http::timeout(120)->post($this->inferenceUrl . '/v1/chat', [
                 'messages' => [
                     ['role' => 'system', 'content' => 'You are an expert code reviewer.'],
                     ['role' => 'user', 'content' => $prompt]
@@ -340,12 +342,11 @@ class CompletionController extends Controller
             $latency = (microtime(true) - $startTime) * 1000;
             
             if (!$response->successful()) {
-                throw new \Exception('Review API failed');
+                throw new \Exception('Review API failed: ' . $response->body());
             }
             
             $result = $response->json();
             
-            // Log usage
             UsageLog::create([
                 'user_id' => $user->id,
                 'request_type' => 'review',
@@ -372,18 +373,12 @@ class CompletionController extends Controller
                 'error_message' => $e->getMessage(),
             ]);
             
-            return response()->json([
-                'error' => 'Review failed',
-                'message' => 'Failed to generate code review.'
-            ], 500);
+            return response()->json(['error' => 'Review failed', 'message' => 'Failed to generate code review.', 'details' => $e->getMessage()], 500);
         }
     }
     
     /**
      * Debug help endpoint
-     * 
-     * @param Request $request
-     * @return \Illuminate\Http\JsonResponse
      */
     public function debug(Request $request)
     {
@@ -395,20 +390,14 @@ class CompletionController extends Controller
         ]);
 
         if ($validator->fails()) {
-            return response()->json([
-                'error' => 'Validation failed',
-                'messages' => $validator->errors()
-            ], 422);
+            return response()->json(['error' => 'Validation failed', 'messages' => $validator->errors()], 422);
         }
         
         $user = $request->user();
         $rateLimitCheck = $this->checkRateLimit($user);
         
         if (!$rateLimitCheck['allowed']) {
-            return response()->json([
-                'error' => 'Rate limit exceeded',
-                'retry_after' => $rateLimitCheck['retry_after']
-            ], 429);
+            return response()->json(['error' => 'Rate limit exceeded', 'retry_after' => $rateLimitCheck['retry_after']], 429);
         }
         
         $userPreferences = $user->preferences;
@@ -417,7 +406,7 @@ class CompletionController extends Controller
         $prompt = "Debug this {$request->language} code that produces the following error:\n\nError: {$request->error_message}\n\nCode:\n{$request->code}\n\nExplain the issue and provide a fix.";
         
         try {
-            $response = Http::timeout(60)->post($this->inferenceUrl . '/v1/chat', [
+            $response = Http::timeout(120)->post($this->inferenceUrl . '/v1/chat', [
                 'messages' => [
                     ['role' => 'system', 'content' => 'You are an expert debugger.'],
                     ['role' => 'user', 'content' => $prompt]
@@ -438,18 +427,12 @@ class CompletionController extends Controller
             ]);
             
         } catch (\Exception $e) {
-            return response()->json([
-                'error' => 'Debug failed',
-                'message' => 'Failed to generate debug solution.'
-            ], 500);
+            return response()->json(['error' => 'Debug failed', 'message' => 'Failed to generate debug solution.', 'details' => $e->getMessage()], 500);
         }
     }
     
     /**
      * Code explanation endpoint
-     * 
-     * @param Request $request
-     * @return \Illuminate\Http\JsonResponse
      */
     public function explain(Request $request)
     {
@@ -460,20 +443,14 @@ class CompletionController extends Controller
         ]);
 
         if ($validator->fails()) {
-            return response()->json([
-                'error' => 'Validation failed',
-                'messages' => $validator->errors()
-            ], 422);
+            return response()->json(['error' => 'Validation failed', 'messages' => $validator->errors()], 422);
         }
         
         $user = $request->user();
         $rateLimitCheck = $this->checkRateLimit($user);
         
         if (!$rateLimitCheck['allowed']) {
-            return response()->json([
-                'error' => 'Rate limit exceeded',
-                'retry_after' => $rateLimitCheck['retry_after']
-            ], 429);
+            return response()->json(['error' => 'Rate limit exceeded', 'retry_after' => $rateLimitCheck['retry_after']], 429);
         }
         
         $userPreferences = $user->preferences;
@@ -482,7 +459,7 @@ class CompletionController extends Controller
         $prompt = "Explain this {$request->language} code in detail:\n\n{$request->code}";
         
         try {
-            $response = Http::timeout(60)->post($this->inferenceUrl . '/v1/chat', [
+            $response = Http::timeout(120)->post($this->inferenceUrl . '/v1/chat', [
                 'messages' => [
                     ['role' => 'system', 'content' => 'You are a helpful programming teacher.'],
                     ['role' => 'user', 'content' => $prompt]
@@ -503,10 +480,7 @@ class CompletionController extends Controller
             ]);
             
         } catch (\Exception $e) {
-            return response()->json([
-                'error' => 'Explanation failed',
-                'message' => 'Failed to generate code explanation.'
-            ], 500);
+            return response()->json(['error' => 'Explanation failed', 'message' => 'Failed to generate code explanation.', 'details' => $e->getMessage()], 500);
         }
     }
 }

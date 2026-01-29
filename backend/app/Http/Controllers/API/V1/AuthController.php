@@ -11,7 +11,6 @@ use App\Models\UserPreference;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Validator;
-use Illuminate\Validation\ValidationException;
 use Illuminate\Support\Str;
 use App\Http\Controllers\Controller;
 
@@ -19,13 +18,9 @@ class AuthController extends Controller
 {
     /**
      * Register a new user
-     * 
-     * @param Request $request
-     * @return \Illuminate\Http\JsonResponse
      */
     public function register(Request $request)
     {
-        // Validate input
         $validator = Validator::make($request->all(), [
             'username' => 'required|string|max:100|unique:users,username|alpha_dash',
             'email' => 'required|string|email|max:191|unique:users,email',
@@ -40,7 +35,6 @@ class AuthController extends Controller
         }
 
         try {
-            // Create user
             $user = User::create([
                 'username' => $request->username,
                 'email' => $request->email,
@@ -66,7 +60,6 @@ class AuthController extends Controller
                 'code_suggestions' => true,
             ]);
 
-            // Generate token
             $token = $user->createToken('auth_token')->plainTextToken;
 
             return response()->json([
@@ -90,29 +83,20 @@ class AuthController extends Controller
 
     /**
      * Login user
-     * 
-     * @param Request $request
-     * @return \Illuminate\Http\JsonResponse
      */
     public function login(Request $request)
     {
-        // Validate input
         $validator = Validator::make($request->all(), [
             'email' => 'required|email',
             'password' => 'required|string',
         ]);
 
         if ($validator->fails()) {
-            return response()->json([
-                'error' => 'Validation failed',
-                'messages' => $validator->errors()
-            ], 422);
+            return response()->json(['error' => 'Validation failed', 'messages' => $validator->errors()], 422);
         }
 
-        // Find user
         $user = User::where('email', $request->email)->first();
 
-        // Check credentials
         if (!$user || !Hash::check($request->password, $user->password)) {
             return response()->json([
                 'error' => 'Invalid credentials',
@@ -120,10 +104,6 @@ class AuthController extends Controller
             ], 401);
         }
 
-        // Delete old tokens (optional - keep only 1 active session)
-        // $user->tokens()->delete();
-
-        // Generate new token
         $token = $user->createToken('auth_token')->plainTextToken;
 
         return response()->json([
@@ -140,43 +120,25 @@ class AuthController extends Controller
 
     /**
      * Logout user
-     * 
-     * @param Request $request
-     * @return \Illuminate\Http\JsonResponse
      */
     public function logout(Request $request)
     {
         try {
-            // Delete current token
             $request->user()->currentAccessToken()->delete();
-
-            return response()->json([
-                'message' => 'Logged out successfully'
-            ], 200);
-
+            return response()->json(['message' => 'Logged out successfully'], 200);
         } catch (\Exception $e) {
-            return response()->json([
-                'error' => 'Logout failed',
-                'message' => $e->getMessage()
-            ], 500);
+            return response()->json(['error' => 'Logout failed', 'message' => $e->getMessage()], 500);
         }
     }
 
     /**
      * Refresh token
-     * 
-     * @param Request $request
-     * @return \Illuminate\Http\JsonResponse
      */
     public function refresh(Request $request)
     {
         try {
             $user = $request->user();
-
-            // Delete current token
             $request->user()->currentAccessToken()->delete();
-
-            // Generate new token
             $token = $user->createToken('auth_token')->plainTextToken;
 
             return response()->json([
@@ -185,23 +147,42 @@ class AuthController extends Controller
             ], 200);
 
         } catch (\Exception $e) {
-            return response()->json([
-                'error' => 'Token refresh failed',
-                'message' => $e->getMessage()
-            ], 500);
+            return response()->json(['error' => 'Token refresh failed', 'message' => $e->getMessage()], 500);
         }
     }
 
     /**
+     * Alias for 'me' to satisfy routes calling 'user'
+     */
+    public function user(Request $request)
+    {
+        return $this->me($request);
+    }
+
+    /**
      * Get current user
-     * 
-     * @param Request $request
-     * @return \Illuminate\Http\JsonResponse
      */
     public function me(Request $request)
     {
         try {
             $user = $request->user()->load('preferences');
+
+            $prefs = null;
+            if ($user->preferences) {
+                // Safely decode editor_settings if it's a string
+                $settings = $user->preferences->editor_settings;
+                if (is_string($settings)) {
+                    $settings = json_decode($settings);
+                }
+
+                $prefs = [
+                    'preferred_model' => $user->preferences->preferred_model,
+                    'theme' => $user->preferences->theme,
+                    'editor_settings' => $settings,
+                    'auto_complete' => (bool) $user->preferences->auto_complete,
+                    'code_suggestions' => (bool) $user->preferences->code_suggestions,
+                ];
+            }
 
             return response()->json([
                 'user' => [
@@ -212,21 +193,68 @@ class AuthController extends Controller
                     'api_key' => $user->api_key,
                     'email_verified_at' => $user->email_verified_at,
                     'created_at' => $user->created_at,
-                    'preferences' => $user->preferences ? [
-                        'preferred_model' => $user->preferences->preferred_model,
-                        'theme' => $user->preferences->theme,
-                        'editor_settings' => json_decode($user->preferences->editor_settings),
-                        'auto_complete' => (bool) $user->preferences->auto_complete,
-                        'code_suggestions' => (bool) $user->preferences->code_suggestions,
-                    ] : null,
+                    'preferences' => $prefs,
                 ],
             ], 200);
 
         } catch (\Exception $e) {
-            return response()->json([
-                'error' => 'Failed to fetch user',
-                'message' => $e->getMessage()
-            ], 500);
+            return response()->json(['error' => 'Failed to fetch user', 'message' => $e->getMessage()], 500);
         }
+    }
+
+    /**
+     * Get user preferences
+     */
+    public function getPreferences(Request $request)
+    {
+        $preferences = $request->user()->preferences;
+        
+        // Ensure settings are returned as object, not string
+        if ($preferences && is_string($preferences->editor_settings)) {
+            $preferences->editor_settings = json_decode($preferences->editor_settings);
+        }
+
+        return response()->json(['preferences' => $preferences]);
+    }
+
+    /**
+     * Update user preferences
+     */
+    public function updatePreferences(Request $request)
+    {
+        $user = $request->user();
+        
+        // Ensure preferences record exists
+        $preference = $user->preferences;
+        if (!$preference) {
+            $preference = $user->preferences()->create([
+                'preferred_model' => 'codellama:7b', // Default fallback
+                'theme' => 'dark'
+            ]);
+        }
+        
+        $data = $request->all();
+
+        // FIX: If editor_settings is passed as an array (from frontend JSON),
+        // we must encode it to a string before saving to the database.
+        if (isset($data['editor_settings']) && is_array($data['editor_settings'])) {
+            $data['editor_settings'] = json_encode($data['editor_settings']);
+        }
+
+        // Update the database
+        $preference->update($data);
+        
+        // Refresh the model to get the saved state
+        $preference->refresh();
+
+        // Decode for the response so frontend receives JSON object
+        if (is_string($preference->editor_settings)) {
+            $preference->editor_settings = json_decode($preference->editor_settings);
+        }
+        
+        return response()->json([
+            'message' => 'Preferences updated', 
+            'preferences' => $preference
+        ]);
     }
 }

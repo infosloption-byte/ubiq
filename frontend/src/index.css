@@ -1,29 +1,38 @@
 @import "tailwindcss";
 
 @theme {
-  /* Define the Deep Space Color Palette */
-  --color-ubiq-950: #0B0C15;
-  --color-ubiq-900: #151725;
-  --color-ubiq-800: #22253A;
-  --color-ubiq-700: #343952;
+  /* THEME: "Anthropic Warmth" 
+     Strictly warm, matte, and paper-like. No blue hues.
+  */
   
-  --color-ubiq-accent: #6366f1;
-  --color-ubiq-accent-hover: #4f46e5;
+  /* Backgrounds: Warm, deep charcoal (Not black, not blue) */
+  --color-ubiq-950: #1a1918; /* Main Background - Warm Charcoal */
+  --color-ubiq-900: #232220; /* Sidebar/Cards - Lighter Warm Charcoal */
+  --color-ubiq-800: #302f2d; /* Borders/Inputs - Stone Grey */
+  --color-ubiq-700: #42403d; /* Hover States */
   
-  /* Fonts */
-  --font-sans: 'Inter', system-ui, sans-serif;
+  /* Accent: "Clay" / "Burnt Sienna" (Claude's signature feel) */
+  --color-ubiq-accent: #da7756;       /* Warm Clay */
+  --color-ubiq-accent-hover: #e08c6f; /* Lighter Clay */
+  
+  /* Text: Warm White/Eggshell */
+  --color-text-main: #f0eee9; 
+  --color-text-muted: #9f9d99;
+
+  /* Fonts - Clean & Serene */
+  --font-sans: 'Inter', system-ui, sans-serif; /* or 'Söhne' if you had it */
   --font-mono: 'JetBrains Mono', monospace;
 
-  /* Animations */
-  --animate-fade-in: fadeIn 0.3s ease-out;
+  /* Animations: Subtle & Instant */
+  --animate-fade-in: fadeIn 0.2s ease-out;
   
   @keyframes fadeIn {
-    0% { opacity: 0; transform: translateY(10px); }
-    100% { opacity: 1; transform: translateY(0); }
+    0% { opacity: 0; }
+    100% { opacity: 1; }
   }
 }
 
-/* Import Google Fonts */
+/* Import Fonts */
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
 
 /* Base Styles */
@@ -32,36 +41,46 @@
 }
 
 body {
-  /* Using the new variables we defined above */
-  @apply bg-ubiq-950 text-slate-300 font-sans antialiased selection:bg-ubiq-accent selection:text-white;
+  @apply bg-ubiq-950 text-stone-200 font-sans antialiased selection:bg-ubiq-accent/30 selection:text-white;
   overflow: hidden; 
 }
 
-/* Custom Scrollbar */
+/* Scrollbar: Thin & Warm */
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 6px;
+  height: 6px;
 }
-
 ::-webkit-scrollbar-track {
   background: transparent;
 }
-
 ::-webkit-scrollbar-thumb {
   @apply bg-ubiq-800 rounded-full hover:bg-ubiq-700 transition-colors;
 }
 
-/* Reusable Components 
-   In v4, standard classes with @apply work perfectly for this */
+/* COMPONENT CLASSES 
+   Updated for "Matte Paper" Look
+*/
 
+/* Glass Panel: Removed "glass" blur, switched to solid matte cards */
 .glass-panel {
-  @apply bg-ubiq-900/50 backdrop-blur-xl border border-white/5;
+  @apply bg-ubiq-900 border border-ubiq-800/50 shadow-none rounded-xl;
 }
 
+/* Inputs: Flat, Stone-colored */
 .input-primary {
-  @apply bg-ubiq-950 border border-ubiq-800 rounded-lg px-4 py-2.5 text-slate-200 focus:outline-none focus:border-ubiq-accent focus:ring-1 focus:ring-ubiq-accent transition-all duration-200;
+  @apply bg-ubiq-950 border border-ubiq-800 rounded-lg px-4 py-3 text-stone-200 
+         focus:outline-none focus:border-ubiq-accent focus:ring-1 focus:ring-ubiq-accent 
+         placeholder:text-stone-600 transition-all duration-200;
 }
 
+/* Buttons: Solid Matte, No Gradients */
 .btn-primary {
-  @apply bg-ubiq-accent hover:bg-ubiq-accent-hover text-white px-4 py-2 rounded-lg font-medium transition-all duration-200 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed;
+  @apply bg-ubiq-accent hover:bg-ubiq-accent-hover text-white px-5 py-2.5 rounded-lg font-medium 
+         transition-colors duration-200 shadow-sm
+         flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed;
+}
+
+/* Sidebar Links: Minimalist marker */
+.nav-item-active {
+  @apply bg-ubiq-800 text-stone-100;
 }

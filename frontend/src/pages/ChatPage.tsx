@@ -1,207 +1,244 @@
-import { useState, useRef, useEffect } from 'react';
-import { useAuthStore } from '../stores/authStore';
-import { chatAPI, aiAPI } from '../services/api';
-import ReactMarkdown from 'react-markdown';
+import { useState, useEffect } from 'react';
+import Layout from '../components/Layout';
+import ChatInterface from '../components/ChatInterface';
+import ModelSelector from '../components/ModelSelector'; // Added Import
+import { chatAPI } from '../services/api';
 import { 
-  PaperAirplaneIcon, 
   PlusIcon, 
-  CpuChipIcon,
-  StopIcon
-} from '@heroicons/react/24/solid';
+  ChatBubbleLeftIcon, 
+  TrashIcon,
+  ChatBubbleLeftRightIcon,
+  SparklesIcon
+} from '@heroicons/react/24/outline';
 
-interface Message {
-  role: 'user' | 'assistant' | 'system';
-  content: string;
+interface ChatSession {
+  id: number;
+  title: string;
+  model_used: string;
+  created_at: string;
 }
 
 export default function ChatPage() {
-  const { user } = useAuthStore();
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [input, setInput] = useState('');
-  const [isLoading, setIsLoading] = useState(false);
-  const [sessionId, setSessionId] = useState<number | null>(null);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const [sessions, setSessions] = useState<ChatSession[]>([]);
+  const [currentSession, setCurrentSession] = useState<number | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [showNewSessionDialog, setShowNewSessionDialog] = useState(false);
+  const [newSessionTitle, setNewSessionTitle] = useState('');
 
   useEffect(() => {
-    scrollToBottom();
-  }, [messages]);
+    loadSessions();
+  }, []);
 
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  };
-
-  const startNewChat = () => {
-    setMessages([]);
-    setSessionId(null);
-  };
-
-  const handleSendMessage = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!input.trim() || isLoading) return;
-
-    const userMsg: Message = { role: 'user', content: input };
-    setMessages(prev => [...prev, userMsg]);
-    setInput('');
-    setIsLoading(true);
-
+  const loadSessions = async () => {
     try {
-      // 1. Create session if it doesn't exist
-      let currentSessionId = sessionId;
-      if (!currentSessionId) {
-        const sessionRes = await chatAPI.createSession({ title: input.substring(0, 30) });
-        currentSessionId = sessionRes.data.session.id;
-        setSessionId(currentSessionId);
-      }
-
-      // 2. Save user message to backend
-      if (currentSessionId) {
-        await chatAPI.sendMessage(currentSessionId, { content: userMsg.content });
-      }
-
-      // 3. Get AI Response
-      // We pass the conversation history to the AI
-      const response = await aiAPI.chat({
-        messages: messages.concat(userMsg).map(m => ({ 
-          role: m.role, 
-          content: m.content 
-        }))
-      });
-
-      const aiContent = response.data.message.content || response.data.message;
+      const response = await chatAPI.getSessions();
+      setSessions(response.data.sessions || []);
       
-      setMessages(prev => [...prev, { 
-        role: 'assistant', 
-        content: aiContent 
-      }]);
-
+      if (response.data.sessions?.length > 0 && !currentSession) {
+        setCurrentSession(response.data.sessions[0].id);
+      }
     } catch (error) {
-      console.error('Chat failed:', error);
-      setMessages(prev => [...prev, { 
-        role: 'assistant', 
-        content: "**Error:** Failed to get response. Please try again." 
-      }]);
+      console.error('Failed to load chat sessions:', error);
     } finally {
-      setIsLoading(false);
+      setLoading(false);
     }
   };
 
-  return (
-    <div className="flex flex-col h-full bg-ubiq-950 relative">
-      {/* Empty State / Welcome Screen */}
-      {messages.length === 0 && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center text-center p-8 z-0">
-          <div className="w-20 h-20 bg-gradient-to-br from-ubiq-accent to-purple-600 rounded-2xl flex items-center justify-center mb-6 shadow-2xl shadow-ubiq-accent/20">
-            <CpuChipIcon className="w-10 h-10 text-white" />
+  const handleNewSession = async () => {
+    if (!newSessionTitle.trim()) return;
+    
+    try {
+      const response = await chatAPI.createSession({
+        title: newSessionTitle,
+      });
+
+      await loadSessions();
+      setCurrentSession(response.data.session.id);
+      setShowNewSessionDialog(false);
+      setNewSessionTitle('');
+    } catch (error) {
+      console.error('Failed to create session:', error);
+    }
+  };
+
+  const handleDeleteSession = async (e: React.MouseEvent, sessionId: number) => {
+    e.stopPropagation();
+    if (!confirm('Delete this chat history?')) return;
+
+    try {
+      await chatAPI.deleteSession(sessionId);
+      const updatedSessions = sessions.filter(s => s.id !== sessionId);
+      setSessions(updatedSessions);
+      
+      if (currentSession === sessionId) {
+        setCurrentSession(updatedSessions.length > 0 ? updatedSessions[0].id : null);
+      }
+    } catch (error) {
+      console.error('Failed to delete session:', error);
+      loadSessions();
+    }
+  };
+
+  if (loading) {
+    return (
+      <Layout>
+        <div className="flex items-center justify-center h-full bg-ubiq-950">
+          <div className="flex flex-col items-center gap-4">
+             <div className="w-10 h-10 border-2 border-ubiq-accent border-t-transparent rounded-full animate-spin" />
+             <p className="text-slate-500 text-sm font-medium tracking-wide">INITIALIZING...</p>
           </div>
-          <h2 className="text-3xl font-bold text-white mb-3">
-            Good afternoon, {user?.username}
-          </h2>
-          <p className="text-slate-400 max-w-md">
-            I'm your AI engineering companion. I can help you write code, debug issues, or architect new solutions.
-          </p>
         </div>
-      )}
+      </Layout>
+    );
+  }
 
-      {/* Messages Area */}
-      <div className="flex-1 overflow-y-auto px-4 py-6 scroll-smooth z-10">
-        <div className="max-w-3xl mx-auto space-y-8">
-          {messages.map((msg, idx) => (
-            <div 
-              key={idx} 
-              className={`flex gap-4 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+  return (
+    <Layout>
+      <div className="h-full flex flex-col md:flex-row overflow-hidden bg-ubiq-950">
+        {/* Matte Sidebar - Chat Sessions */}
+        <div className="w-full md:w-72 bg-ubiq-900 border-r border-white/5 flex flex-col shrink-0">
+          <div className="p-5 border-b border-white/5">
+            <h2 className="text-slate-400 font-medium text-xs uppercase tracking-wider mb-4 flex items-center gap-2">
+               <ChatBubbleLeftRightIcon className="w-4 h-4 text-ubiq-accent" />
+               Conversation History
+            </h2>
+            <button
+              onClick={() => setShowNewSessionDialog(true)}
+              className="btn-primary w-full shadow-lg shadow-purple-500/20"
             >
-              {/* AI Avatar */}
-              {msg.role === 'assistant' && (
-                <div className="w-8 h-8 rounded-full bg-gradient-to-br from-ubiq-accent to-purple-600 flex-shrink-0 flex items-center justify-center text-xs text-white font-bold shadow-lg shadow-ubiq-accent/20">
-                  AI
-                </div>
-              )}
+              <PlusIcon className="w-4 h-4" /> New Chat
+            </button>
+          </div>
 
-              {/* Message Bubble */}
-              <div 
-                className={`max-w-[85%] rounded-2xl px-6 py-4 text-sm leading-relaxed shadow-sm ${
-                  msg.role === 'user' 
-                    ? 'bg-ubiq-800 text-slate-100 rounded-br-sm' 
-                    : 'bg-ubiq-900/50 backdrop-blur-sm text-slate-300 border border-white/5'
-                }`}
-              >
-                <ReactMarkdown 
-                  components={{
-                    code({node, className, children, ...props}) {
-                      return (
-                        <code className={`${className} bg-black/30 rounded px-1 py-0.5 text-ubiq-accent font-mono text-xs`} {...props}>
-                          {children}
-                        </code>
-                      )
-                    },
-                    pre({children}) {
-                      return (
-                        <pre className="bg-ubiq-950 rounded-lg p-4 my-3 overflow-x-auto border border-ubiq-800 text-slate-300 font-mono text-xs">
-                          {children}
-                        </pre>
-                      )
-                    }
-                  }}
+          <div className="flex-1 overflow-y-auto p-3 space-y-1 custom-scrollbar">
+            {sessions.length === 0 ? (
+              <div className="text-slate-600 text-xs text-center py-12 border border-dashed border-ubiq-800 rounded-xl m-2">
+                No history yet.<br/>Start your first chat!
+              </div>
+            ) : (
+              sessions.map((session) => (
+                <div
+                  key={session.id}
+                  onClick={() => setCurrentSession(session.id)}
+                  className={`group flex items-center justify-between px-3 py-3 rounded-xl cursor-pointer transition-all border ${
+                    currentSession === session.id
+                      ? 'bg-ubiq-800 border-white/5 text-white shadow-md'
+                      : 'bg-transparent border-transparent text-slate-400 hover:bg-ubiq-800/50 hover:text-slate-200'
+                  }`}
                 >
-                    {msg.content}
-                </ReactMarkdown>
+                  <div className="flex items-center gap-3 overflow-hidden">
+                    <ChatBubbleLeftIcon className={`w-4 h-4 shrink-0 transition-colors ${
+                      currentSession === session.id ? 'text-ubiq-accent' : 'text-slate-600 group-hover:text-slate-400'
+                    }`} />
+                    <div className="flex flex-col overflow-hidden">
+                      <span className="text-sm truncate font-medium">
+                        {session.title}
+                      </span>
+                      <span className="text-[10px] opacity-60 truncate">
+                        {new Date(session.created_at).toLocaleDateString()}
+                      </span>
+                    </div>
+                  </div>
+                  
+                  <button
+                    onClick={(e) => handleDeleteSession(e, session.id)}
+                    className="p-1.5 rounded-lg text-slate-600 hover:bg-red-500/10 hover:text-red-400 transition-all opacity-0 group-hover:opacity-100 focus:opacity-100"
+                    title="Delete session"
+                  >
+                    <TrashIcon className="w-4 h-4" />
+                  </button>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+
+        {/* Main Chat Area */}
+        <div className="flex-1 flex flex-col min-w-0 bg-ubiq-950 relative">
+          
+          {/* Header Bar with Model Selector (Added) */}
+          <div className="h-16 shrink-0 border-b border-white/5 flex items-center justify-between px-6 bg-ubiq-950/80 backdrop-blur-md z-10 sticky top-0">
+             <div className="flex items-center gap-3">
+               <span className="text-slate-200 font-medium truncate max-w-xs md:max-w-md">
+                  {currentSession 
+                    ? sessions.find(s => s.id === currentSession)?.title 
+                    : 'New Conversation'}
+               </span>
+             </div>
+             
+             {/* Integrated Model Selector */}
+             <ModelSelector />
+          </div>
+
+          <div className="flex-1 overflow-hidden relative">
+            {currentSession ? (
+              <ChatInterface sessionId={currentSession} />
+            ) : (
+              <div className="absolute inset-0 flex flex-col items-center justify-center p-8 text-center bg-ubiq-950">
+                <div className="w-24 h-24 bg-gradient-to-tr from-indigo-500/10 via-purple-500/10 to-pink-500/10 rounded-full flex items-center justify-center mb-8 backdrop-blur-xl border border-white/5 shadow-2xl animate-pulse">
+                   <SparklesIcon className="w-10 h-10 text-ubiq-accent opacity-80" />
+                </div>
+                
+                <h3 className="text-3xl font-bold text-white mb-3 tracking-tight">
+                  How can I help you?
+                </h3>
+                <p className="text-slate-500 max-w-sm mb-10 leading-relaxed">
+                  I can help you write code, debug issues, or explain complex programming concepts.
+                </p>
+                
+                <button
+                  onClick={() => setShowNewSessionDialog(true)}
+                  className="btn-primary px-8 py-3 text-sm shadow-xl shadow-indigo-500/20"
+                >
+                  Start New Conversation
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* New Session Dialog */}
+        {showNewSessionDialog && (
+          <div className="fixed inset-0 bg-black/60 backdrop-blur-md flex items-center justify-center z-50">
+            <div className="glass-panel p-6 rounded-2xl w-full max-w-sm shadow-2xl transform transition-all scale-100">
+              <h3 className="text-white text-lg font-semibold mb-4 flex items-center gap-2">
+                <PlusIcon className="w-5 h-5 text-ubiq-accent" />
+                New Chat
+              </h3>
+              
+              <div className="space-y-4">
+                <div>
+                  <label className="text-xs font-medium text-slate-400 ml-1 uppercase tracking-wide">Topic</label>
+                  <input
+                    type="text"
+                    value={newSessionTitle}
+                    onChange={(e) => setNewSessionTitle(e.target.value)}
+                    placeholder="e.g. React Component Debugging"
+                    className="input-primary w-full mt-2"
+                    autoFocus
+                    onKeyDown={(e) => e.key === 'Enter' && handleNewSession()}
+                  />
+                </div>
+
+                <div className="flex gap-3 pt-4">
+                  <button
+                    onClick={() => setShowNewSessionDialog(false)}
+                    className="flex-1 px-4 py-2.5 rounded-xl border border-white/10 text-slate-400 hover:bg-white/5 transition-colors text-sm font-medium"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleNewSession}
+                    className="flex-1 btn-primary text-sm"
+                  >
+                    Create Chat
+                  </button>
+                </div>
               </div>
             </div>
-          ))}
-          
-          {/* Loading Indicator */}
-          {isLoading && (
-            <div className="flex gap-4">
-               <div className="w-8 h-8 rounded-full bg-ubiq-800 animate-pulse" />
-               <div className="flex items-center gap-1 h-10 px-4">
-                 <span className="w-1.5 h-1.5 bg-ubiq-700 rounded-full animate-bounce delay-75"></span>
-                 <span className="w-1.5 h-1.5 bg-ubiq-700 rounded-full animate-bounce delay-150"></span>
-                 <span className="w-1.5 h-1.5 bg-ubiq-700 rounded-full animate-bounce delay-300"></span>
-               </div>
-            </div>
-          )}
-          <div ref={messagesEndRef} />
-        </div>
-      </div>
-
-      {/* Input Area */}
-      <div className="p-6 bg-gradient-to-t from-ubiq-950 via-ubiq-950 to-transparent z-20">
-        <div className="max-w-3xl mx-auto">
-          <form onSubmit={handleSendMessage} className="relative group">
-            <button 
-              type="button"
-              onClick={startNewChat}
-              className="absolute left-3 top-1/2 -translate-y-1/2 p-2 text-slate-500 hover:text-white hover:bg-ubiq-800 rounded-lg transition-all"
-              title="New Chat"
-            >
-                <PlusIcon className="w-5 h-5" />
-            </button>
-            
-            <input
-              type="text"
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              placeholder="Ask anything about your code..."
-              className="w-full bg-ubiq-900/80 backdrop-blur-xl border border-ubiq-800 text-slate-200 rounded-2xl pl-14 pr-14 py-4 focus:outline-none focus:border-ubiq-accent/50 focus:ring-1 focus:ring-ubiq-accent/50 transition-all shadow-2xl shadow-black/50"
-            />
-            
-            <button
-              type="submit"
-              disabled={!input.trim() || isLoading}
-              className="absolute right-3 top-1/2 -translate-y-1/2 p-2 bg-ubiq-accent hover:bg-ubiq-accent-hover text-white rounded-xl disabled:opacity-0 disabled:scale-90 transition-all duration-200 shadow-lg shadow-ubiq-accent/25"
-            >
-              {isLoading ? (
-                <StopIcon className="w-5 h-5 animate-pulse" />
-              ) : (
-                <PaperAirplaneIcon className="w-5 h-5" />
-              )}
-            </button>
-          </form>
-          <div className="text-center mt-3 text-xs text-slate-600 font-medium">
-            Ubiq AI Agent • v1.0 • Running on Local LLaMA
           </div>
-        </div>
+        )}
       </div>
-    </div>
+    </Layout>
   );
 }

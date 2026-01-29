@@ -10,62 +10,54 @@ use App\Http\Controllers\API\V1\CompletionController;
 use App\Http\Controllers\API\V1\ModelController;
 use App\Http\Controllers\API\V1\UsageController;
 
-/*
-|--------------------------------------------------------------------------
-| API Routes
-|--------------------------------------------------------------------------
-|
-| Here is where you can register API routes for your application. These
-| routes are loaded by the RouteServiceProvider and all of them will
-| be assigned to the "api" middleware group. Make something great!
-|
-*/
-
 Route::prefix('v1')->group(function () {
-    // Public routes - Authentication
+    // Public routes
     Route::post('/auth/register', [AuthController::class, 'register']);
     Route::post('/auth/login', [AuthController::class, 'login']);
     
-    // Protected routes - Require authentication
+    // Protected routes
     Route::middleware('auth:sanctum')->group(function () {
         // Authentication
         Route::post('/auth/logout', [AuthController::class, 'logout']);
-        Route::get('/auth/user', [AuthController::class, 'user']);
+        Route::get('/auth/user', [AuthController::class, 'user']); // Frontend calls /auth/me, mapped to this or update frontend
+        Route::get('/auth/me', [AuthController::class, 'user']);   // Added alias for frontend
         
-        // Projects - Full CRUD
+        // Projects
         Route::apiResource('projects', ProjectController::class);
+        Route::post('/projects/{project}/archive', [ProjectController::class, 'archive']);
         Route::post('/projects/{project}/restore', [ProjectController::class, 'restore']);
         
-        // Files - Nested under projects
-        Route::apiResource('projects.files', FileController::class)
-            ->shallow(); // Allows /files/{file} for show, update, destroy
+        // Files
+        Route::apiResource('projects.files', FileController::class)->shallow();
         
-        // Chat/Messages
-        Route::get('/projects/{project}/messages', [ChatController::class, 'index']);
-        Route::post('/projects/{project}/messages', [ChatController::class, 'store']);
-        Route::delete('/messages/{message}', [ChatController::class, 'destroy']);
+        // Chat Sessions (New Structure)
+        Route::get('/chat/sessions', [ChatController::class, 'index']);
+        Route::post('/chat/sessions', [ChatController::class, 'store']);
+        Route::get('/chat/sessions/{session}', [ChatController::class, 'show']);
+        Route::delete('/chat/sessions/{session}', [ChatController::class, 'destroy']);
         
-        // AI Completion Features
-        Route::post('/ai/complete', [CompletionController::class, 'complete']);
+        // Chat Messages
+        Route::get('/chat/sessions/{session}/messages', [ChatController::class, 'messages']);
+        Route::post('/chat/sessions/{session}/messages', [ChatController::class, 'sendMessage']);
+        
+        // AI Features (Aligned with Frontend)
+        Route::post('/ai/completion', [CompletionController::class, 'complete']);
+        Route::post('/ai/chat', [CompletionController::class, 'chat']);
         Route::post('/ai/review', [CompletionController::class, 'review']);
         Route::post('/ai/debug', [CompletionController::class, 'debug']);
         Route::post('/ai/explain', [CompletionController::class, 'explain']);
         
-        // Models Management
-        Route::get('/models', [ModelController::class, 'index']);
-        Route::get('/models/current', [ModelController::class, 'current']);
-        Route::post('/models/{model}/select', [ModelController::class, 'select']);
+        // Models
+        Route::get('/ai/models', [ModelController::class, 'index']);
         
-        // Usage Statistics
-        Route::get('/usage', [UsageController::class, 'index']);
-        Route::get('/usage/stats', [UsageController::class, 'stats']);
+        // User & Stats
+        Route::get('/user/preferences', [AuthController::class, 'getPreferences']); // Ensure AuthController has this or create UserController
+        Route::put('/user/preferences', [AuthController::class, 'updatePreferences']);
+        Route::get('/user/stats', [UsageController::class, 'stats']);
+        Route::get('/user/usage', [UsageController::class, 'index']);
     });
 });
 
-// Health check endpoint (optional, for monitoring)
 Route::get('/health', function () {
-    return response()->json([
-        'status' => 'ok',
-        'timestamp' => now()->toIso8601String(),
-    ]);
+    return response()->json(['status' => 'ok', 'timestamp' => now()->toIso8601String()]);
 });

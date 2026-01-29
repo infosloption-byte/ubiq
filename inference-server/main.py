@@ -67,7 +67,7 @@ async def completion(request: Request):
         }
     }
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=300.0) as client:
         try:
             # Call Ollama Generate API
             response = await client.post(f"{OLLAMA_HOST}/api/generate", json=payload)
@@ -92,6 +92,7 @@ async def chat(request: Request):
     Laravel sends: { messages, model, context, stream }
     """
     body = await request.json()
+    print(f"------------ REQUESTING MODEL: {body.get('model')} ------------")
     
     payload = {
         "model": body.get("model", "codellama:7b"),
@@ -99,7 +100,7 @@ async def chat(request: Request):
         "stream": False # Enforce no streaming for now as Laravel doesn't seem to handle it in the Controller
     }
 
-    async with httpx.AsyncClient(timeout=120.0) as client:
+    async with httpx.AsyncClient(timeout=300.0) as client:
         try:
             response = await client.post(f"{OLLAMA_HOST}/api/chat", json=payload)
             if response.status_code == 200:
