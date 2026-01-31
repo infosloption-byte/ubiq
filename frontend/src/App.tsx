@@ -6,6 +6,8 @@ import DashboardPage from './pages/DashboardPage';
 import EditorPage from './pages/EditorPage';
 import ChatPage from './pages/ChatPage';
 import SettingsPage from './pages/SettingsPage';
+import ProjectsPage from './pages/ProjectsPage';
+import ProjectEditorPage from './pages/ProjectEditorPage';
 
 function App() {
   const { token } = useAuthStore();
@@ -50,6 +52,10 @@ function App() {
           path="/" 
           element={<Navigate to={token ? "/dashboard" : "/login"} />} 
         />
+
+        {/* Project Routes */}
+        <Route path="/projects" element={<ProjectsPage />} />
+        <Route path="/projects/:id" element={<ProjectEditorPage />} />
         
         {/* 404 */}
         <Route 

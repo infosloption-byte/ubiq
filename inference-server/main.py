@@ -1,9 +1,10 @@
 import os
+import json
 import httpx
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
-from dotenv import load_dotenv
 import logging
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse, StreamingResponse
+from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
@@ -35,6 +36,7 @@ async def list_models():
                 return {"models": data.get("models", [])}
             return JSONResponse(content={"error": "Failed to fetch models"}, status_code=response.status_code)
         except Exception as e:
+            logger.error(f"Models Error: {str(e)}")
             return JSONResponse(content={"error": str(e)}, status_code=500)
 
 @app.post("/v1/completion")
@@ -92,14 +94,43 @@ async def chat(request: Request):
     Laravel sends: { messages, model, context, stream }
     """
     body = await request.json()
-    print(f"------------ REQUESTING MODEL: {body.get('model')} ------------")
+    model = body.get("model", "codellama:7b")
+    messages = body.get("messages", [])
+    stream = body.get("stream", False)
+
+    print(f"------------ REQUESTING MODEL: {model} (Stream: {stream}) ------------")
     
     payload = {
-        "model": body.get("model", "codellama:7b"),
-        "messages": body.get("messages", []),
-        "stream": False # Enforce no streaming for now as Laravel doesn't seem to handle it in the Controller
+        "model": model,
+        "messages": messages,
+        "stream": stream
     }
 
+    # --- STREAMING RESPONSE HANDLING ---
+    if stream:
+        async def generate_stream():
+            async with httpx.AsyncClient(timeout=300.0) as client:
+                try:
+                    async with client.stream(
+                        "POST", 
+                        f"{OLLAMA_HOST}/api/chat", 
+                        json=payload
+                    ) as response:
+                        if response.status_code != 200:
+                            # Yield error as a chunk so frontend receives it
+                            yield json.dumps({"error": f"Ollama Error: {response.status_code}"}).encode()
+                            return
+
+                        async for chunk in response.aiter_bytes():
+                            yield chunk
+                except Exception as e:
+                    logger.error(f"Streaming Error: {str(e)}")
+                    yield json.dumps({"error": str(e)}).encode()
+
+        # Return a StreamingResponse so data flows immediately
+        return StreamingResponse(generate_stream(), media_type="application/x-ndjson")
+
+    # --- STANDARD RESPONSE HANDLING (Non-Streaming) ---
     async with httpx.AsyncClient(timeout=300.0) as client:
         try:
             response = await client.post(f"{OLLAMA_HOST}/api/chat", json=payload)
@@ -111,9 +142,13 @@ async def chat(request: Request):
                     "eval_count": result.get("eval_count", 0),
                     "prompt_eval_count": result.get("prompt_eval_count", 0)
                 }
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            
+            error_msg = response.text
+            logger.error(f"Chat Error: {error_msg}")
+            raise HTTPException(status_code=response.status_code, detail=error_msg)
+            
         except Exception as e:
-            logger.error(f"Chat Error: {str(e)}")
+            logger.error(f"Chat Connection Error: {str(e)}")
             raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":

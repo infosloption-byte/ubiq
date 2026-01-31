@@ -1,9 +1,5 @@
 <?php
 
-// ============================================================
-// File: app/Models/Project.php
-// ============================================================
-
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Factories\HasFactory;
@@ -20,12 +16,16 @@ class Project extends Model
         'language',
         'visibility',
         'is_archived',
+        'source',
+        'repository_url',
+        'branch',
+        'github_token',
+        'storage_path'
     ];
 
     protected $casts = [
         'is_archived' => 'boolean',
-        'created_at' => 'datetime',
-        'updated_at' => 'datetime',
+        'github_token' => 'encrypted', // Automatically encrypt/decrypt
     ];
 
     public function user()
@@ -43,4 +43,3 @@ class Project extends Model
         return $this->hasMany(ChatSession::class);
     }
 }
-

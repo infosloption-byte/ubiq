@@ -182,11 +182,11 @@ class CompletionController extends Controller
     }
     
     /**
-     * Chat endpoint (Robust timeout/error handling added)
+     * Chat endpoint (Supports Streaming & Regular Requests)
      */
     public function chat(Request $request)
     {
-        // Validate input
+        // 1. Validate Input
         $validator = Validator::make($request->all(), [
             'messages' => 'required|array|min:1',
             'messages.*.role' => 'required|string|in:user,assistant,system',
@@ -205,7 +205,7 @@ class CompletionController extends Controller
         
         $user = $request->user();
         
-        // Check rate limit
+        // 2. Check Rate Limit
         $rateLimitCheck = $this->checkRateLimit($user);
         if (!$rateLimitCheck['allowed']) {
             return response()->json([
@@ -214,34 +214,109 @@ class CompletionController extends Controller
             ], 429);
         }
         
-        // Get model
+        // 3. Determine Model
         $userPreferences = $user->preferences;
         $model = $request->model ?? ($userPreferences ? $userPreferences->preferred_model : 'codellama:7b');
-        
+        $shouldStream = $request->boolean('stream', false);
+        $inferenceUrl = $this->inferenceUrl;
+
+        // --- CONTEXT INJECTION LOGIC ---
+        $messages = $request->messages;
+        $clientContext = $request->input('context'); // Get the context sent from frontend
+
+        if ($clientContext && isset($clientContext['file'])) {
+            // Create a System Prompt for the file
+            $fileContext = $clientContext['file'];
+            $fileName = $fileContext['name'] ?? 'Current File';
+            $fileContent = $fileContext['content'] ?? '';
+
+            $systemMessage = [
+                'role' => 'system',
+                'content' => "You are an expert developer. The user is currently editing the following file.\n\n" .
+                             "--- BEGIN FILE: {$fileName} ---\n" .
+                             "{$fileContent}\n" .
+                             "--- END FILE ---\n\n" .
+                             "Use this context to answer questions specifically about this code. " .
+                             "If you provide code changes, output ONLY the code block."
+            ];
+
+            // Prepend this to the messages list
+            array_unshift($messages, $systemMessage);
+        }
+        // -------------------------------
+
+        // --- STREAMING MODE ---
+        if ($shouldStream) {
+            return response()->stream(function () use ($model, $messages, $inferenceUrl) {
+                set_time_limit(0);
+                
+                $url = $inferenceUrl . '/v1/chat';
+                $options = [
+                    'http' => [
+                        'header'  => "Content-type: application/json\r\n",
+                        'method'  => 'POST',
+                        'content' => json_encode([
+                            'model' => $model,
+                            'messages' => $messages, // Send MODIFIED messages
+                            'stream' => true,
+                        ]),
+                        'timeout' => 300 
+                    ]
+                ];
+                
+                $context = stream_context_create($options);
+                $stream = @fopen($url, 'r', false, $context);
+
+                if (!$stream) {
+                    $error = error_get_last();
+                    echo "data: " . json_encode(['error' => 'Failed to connect to AI server: ' . ($error['message'] ?? 'Unknown error')]) . "\n\n";
+                    ob_flush();
+                    flush();
+                    return;
+                }
+
+                while (!feof($stream)) {
+                    $line = fgets($stream);
+                    if ($line) {
+                        echo "data: " . trim($line) . "\n\n";
+                        if (ob_get_level() > 0) ob_flush();
+                        flush();
+                    }
+                }
+                
+                fclose($stream);
+                echo "data: [DONE]\n\n";
+                if (ob_get_level() > 0) ob_flush();
+                flush();
+
+            }, 200, [
+                'Content-Type' => 'text/event-stream',
+                'Cache-Control' => 'no-cache',
+                'Connection' => 'keep-alive',
+                'X-Accel-Buffering' => 'no'
+            ]);
+        }
+
+        // --- STANDARD MODE (Non-Streaming Fallback) ---
         try {
             $startTime = microtime(true);
             
-            // Call inference API with INCREASED timeout (300s) for large models
             $response = Http::timeout(300)->post($this->inferenceUrl . '/v1/chat', [
-                'messages' => $request->messages,
+                'messages' => $messages, // Send MODIFIED messages
                 'model' => $model,
-                'context' => $request->context ?? [],
-                'stream' => $request->stream ?? false,
+                'stream' => false,
             ]);
             
             $latency = (microtime(true) - $startTime) * 1000;
             
-            // Check for AI Server Errors specifically
             if (!$response->successful()) {
                 $errorBody = $response->json();
                 $errorMessage = $errorBody['detail'] ?? $response->body();
-                
                 throw new \Exception("AI Server Error: " . $errorMessage);
             }
             
             $result = $response->json();
             
-            // Log usage
             UsageLog::create([
                 'user_id' => $user->id,
                 'request_type' => 'chat',
@@ -262,7 +337,6 @@ class CompletionController extends Controller
             ]);
 
         } catch (\Illuminate\Http\Client\ConnectionException $e) {
-            // Handle Timeouts specifically
              UsageLog::create([
                 'user_id' => $user->id,
                 'request_type' => 'chat',
@@ -278,7 +352,6 @@ class CompletionController extends Controller
             ], 504);
             
         } catch (\Exception $e) {
-            // Log failure
             UsageLog::create([
                 'user_id' => $user->id,
                 'request_type' => 'chat',
@@ -292,7 +365,7 @@ class CompletionController extends Controller
             return response()->json([
                 'error' => 'Chat failed',
                 'message' => 'Failed to process chat request.',
-                'details' => $e->getMessage() // This will now show the REAL error from python
+                'details' => $e->getMessage()
             ], 500);
         }
     }

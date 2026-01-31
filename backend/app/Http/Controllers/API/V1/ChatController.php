@@ -103,4 +103,51 @@ class ChatController extends Controller
 
         return response()->json(['message' => $message]);
     }
+
+    /**
+     * Auto-generate title for chat session
+     */
+    public function generateTitle(Request $request, ChatSession $session)
+    {
+        // Simple heuristic: Use the first 50 characters of user prompt
+        // Or call AI to summarize it (Better)
+        
+        $prompt = $request->input('prompt');
+        if (!$prompt) return response()->json(['message' => 'No prompt provided'], 400);
+
+        // Option 1: Fast & Free (Truncate)
+        // $title = \Illuminate\Support\Str::limit($prompt, 30);
+
+        // Option 2: Smart (Ask AI)
+        // You can make an internal HTTP request to your own CompletionController
+        // For now, let's do a smart truncation to keep it fast
+        $title = ucfirst(substr($prompt, 0, 40));
+        if (strlen($prompt) > 40) $title .= '...';
+
+        $session->update(['title' => $title]);
+
+        return response()->json(['title' => $title]);
+    }
+
+    /**
+     * Update chat session (e.g. rename title)
+     */
+    public function update(Request $request, ChatSession $session)
+    {
+        // Verify ownership
+        if ($request->user()->id !== $session->user_id) {
+            return response()->json(['message' => 'Unauthorized'], 403);
+        }
+
+        $validated = $request->validate([
+            'title' => 'nullable|string|max:255',
+        ]);
+
+        $session->update($validated);
+
+        return response()->json([
+            'message' => 'Session updated',
+            'session' => $session
+        ]);
+    }
 }
