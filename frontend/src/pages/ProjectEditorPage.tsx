@@ -1,18 +1,18 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
-import { projectAPI, fileAPI, chatAPI } from '../services/api';
+import { projectAPI, fileAPI, chatAPI, aiAPI } from '../services/api';
+import axios from 'axios';
 import Layout from '../components/Layout';
 import FileTree from '../components/FileTree';
 import ChatInterface from '../components/ChatInterface';
-// Ensure 'type' is used for OnMount to avoid Vite build errors
+import InputDialog from '../components/InputDialog';
+import ConfirmDialog from '../components/ConfirmDialog';
+import EditorTabs from '../components/EditorTabs';
+import { buildFileTree, type FileNode } from '../utils/fileUtils';
 import Editor, { DiffEditor, type OnMount } from "@monaco-editor/react";
 import { 
-  CodeBracketIcon, 
-  ChatBubbleLeftRightIcon,
-  XMarkIcon,
-  ArrowPathIcon,
-  CheckIcon,
-  NoSymbolIcon
+  CodeBracketIcon, ChatBubbleLeftRightIcon, XMarkIcon, ArrowPathIcon, 
+  CheckIcon, NoSymbolIcon, PlusIcon, FolderPlusIcon, MagnifyingGlassIcon 
 } from '@heroicons/react/24/outline';
 
 export default function ProjectEditorPage() {
@@ -22,14 +22,26 @@ export default function ProjectEditorPage() {
   // --- Data State ---
   const [project, setProject] = useState<any>(null);
   const [files, setFiles] = useState<any[]>([]);
-  const [activeFile, setActiveFile] = useState<any>(null);
+  const [fileTree, setFileTree] = useState<FileNode[]>([]);
+  const [fileSearch, setFileSearch] = useState('');
+  
+  // --- Tabbed Editing State ---
+  const [openFiles, setOpenFiles] = useState<FileNode[]>([]);
+  const [activeFile, setActiveFile] = useState<FileNode | null>(null);
   
   const [fileContent, setFileContent] = useState('');
   const [proposedContent, setProposedContent] = useState<string | null>(null);
-  
   const [loading, setLoading] = useState(true);
   const [chatSessionId, setChatSessionId] = useState<number | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+
+  // --- Auto Prompt State ---
+  const [autoPrompt, setAutoPrompt] = useState<string | null>(null);
+
+  // --- Modal State ---
+  const [createModal, setCreateModal] = useState<{ isOpen: boolean; type: 'file' | 'folder'; parentPath: string }>({ isOpen: false, type: 'file', parentPath: '' });
+  const [deleteModal, setDeleteModal] = useState<{ isOpen: boolean; node: FileNode | null }>({ isOpen: false, node: null });
+  const [confirmDiscardModal, setConfirmDiscardModal] = useState<{ isOpen: boolean; nextFile: any | null }>({ isOpen: false, nextFile: null });
 
   // --- Layout State ---
   const [showChat, setShowChat] = useState(true);
@@ -37,36 +49,40 @@ export default function ProjectEditorPage() {
   const [chatWidth, setChatWidth] = useState(400);
   const [isResizingSidebar, setIsResizingSidebar] = useState(false);
   const [isResizingChat, setIsResizingChat] = useState(false);
-
-  // --- FIX: Transition State to prevent Monaco crash ---
-  // This forces the editor to unmount completely before switching modes
-  const [isEditorTransitioning, setIsEditorTransitioning] = useState(false);
+  const [showEditor, setShowEditor] = useState(true);
 
   const sidebarRef = useRef<HTMLDivElement>(null);
   const chatRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<any>(null);
+  const monacoRef = useRef<any>(null);
+  const debounceRef = useRef<NodeJS.Timeout | null>(null);
 
-  // --- Initialization ---
   useEffect(() => {
-    if (projectId) {
-        loadProjectData(projectId);
-        initializeProjectChat(projectId);
-    }
+    if (projectId) { loadProjectData(projectId); initializeProjectChat(projectId); }
   }, [projectId]);
+
+  useEffect(() => {
+      if (files.length > 0) {
+          if (!fileSearch.trim()) {
+              setFileTree(buildFileTree(files));
+          } else {
+              const filtered = files.filter(f => 
+                  f.name.toLowerCase().includes(fileSearch.toLowerCase()) || 
+                  f.path.toLowerCase().includes(fileSearch.toLowerCase())
+              );
+              setFileTree(buildFileTree(filtered));
+          }
+      }
+  }, [fileSearch, files]);
 
   const loadProjectData = async (pid: number) => {
     try {
-      const [pRes, fRes] = await Promise.all([
-        projectAPI.get(pid),
-        fileAPI.getAll(pid)
-      ]);
+      const [pRes, fRes] = await Promise.all([projectAPI.get(pid), fileAPI.getAll(pid)]);
       setProject(pRes.data.project);
-      setFiles(fRes.data.files || []);
-    } catch (error) {
-      console.error("Failed to load project:", error);
-    } finally {
-      setLoading(false);
-    }
+      const raw = fRes.data.files || [];
+      setFiles(raw);
+      setFileTree(buildFileTree(raw));
+    } catch (e) { console.error(e); } finally { setLoading(false); }
   };
 
   const initializeProjectChat = async (pid: number) => {
@@ -74,13 +90,12 @@ export default function ProjectEditorPage() {
           const res = await chatAPI.getSessions();
           const sessions = res.data.sessions || [];
           const existingSession = sessions.find((s: any) => s.project_id === pid);
-          if (existingSession) {
-              setChatSessionId(existingSession.id);
-          } else {
+          if (existingSession) setChatSessionId(existingSession.id);
+          else {
               const newRes = await chatAPI.createSession({ project_id: pid, title: `Workspace Chat` });
               setChatSessionId(newRes.data.session.id);
           }
-      } catch (error) { console.error("Failed to init chat:", error); }
+      } catch (e) {}
   };
 
   const getLanguageFromFilename = (filename: string) => {
@@ -89,230 +104,288 @@ export default function ProjectEditorPage() {
       return map[ext || ''] || 'plaintext';
   };
 
-  // --- File Actions ---
-  const handleFileSelect = async (file: any) => {
-    if (proposedContent !== null) {
-        if (!confirm("You have unsaved changes from AI. Discard them?")) return;
-        setProposedContent(null);
-    }
-    setActiveFile(file);
-    
-    // Smooth transition when switching files
-    setIsEditorTransitioning(true);
-    
-    try {
-        const res = await fileAPI.get(file.id);
-        setFileContent(res.data.file.content || '');
-    } catch (e) {
-        console.error("Failed to load file content", e);
-    } finally {
-        setTimeout(() => setIsEditorTransitioning(false), 50);
-    }
+  // --- MEGA-PROMPT GENERATOR ---
+  const getProjectStructureContext = () => {
+      if (!files || files.length === 0) return "No files in project.";
+      
+      const textFiles = files.filter(f => 
+          f.size_bytes < 50000 && 
+          !f.name.match(/\.(png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$/i)
+      );
+
+      return textFiles.map(f => `
+// =======================================================
+// FILE: ${f.path}
+// =======================================================
+${f.content || '// (Empty file)'}
+`).join('\n\n');
   };
 
-  const handleSave = async () => {
-      if (!activeFile) return;
+  // --- Actions ---
+  const openCreateModal = (type: 'file' | 'folder', parentPath: string = '') => {
+      setCreateModal({ isOpen: true, type, parentPath });
+  };
+
+  const submitCreate = async (name: string) => {
+      setCreateModal(prev => ({ ...prev, isOpen: false })); 
+      const { type, parentPath } = createModal;
+      const fullPath = parentPath ? `${parentPath}/${name}` : name;
+
+      try {
+          if (type === 'folder') {
+              await fileAPI.create(projectId, { name: '.gitkeep', path: `${fullPath}/.gitkeep`, content: '', language: 'text' });
+          } else {
+              await fileAPI.create(projectId, { name: name, path: fullPath, content: '', language: getLanguageFromFilename(name) });
+          }
+          loadProjectData(projectId);
+      } catch (e) { console.error("Create failed", e); }
+  };
+
+  const openDeleteModal = (node: FileNode) => {
+      setDeleteModal({ isOpen: true, node });
+  };
+
+  const submitDelete = async () => {
+      const { node } = deleteModal;
+      if (!node) return;
+      
+      try {
+          if (node.type === 'folder') {
+              let token = localStorage.getItem('token');
+              if (!token) {
+                  const authStorage = localStorage.getItem('auth-storage');
+                  if (authStorage) token = JSON.parse(authStorage).state?.token;
+              }
+              await axios.delete(`http://localhost:8000/api/v1/projects/${projectId}/files/path`, {
+                  data: { path: node.path },
+                  headers: { Authorization: `Bearer ${token}` }
+              });
+          } else if (node.fileId) {
+              await fileAPI.delete(node.fileId);
+          }
+
+          if (node.fileId) closeTab(node.fileId);
+          if (activeFile && (activeFile.fileId === node.fileId || (activeFile.path && activeFile.path.startsWith(node.path + '/')))) {
+              setActiveFile(null);
+              setFileContent('');
+              setProposedContent(null);
+          }
+          loadProjectData(projectId);
+      } catch (e) { console.error("Delete failed", e); }
+  };
+
+  const handleFileSelect = async (file: FileNode) => {
+    if (!file.fileId) return; 
+    if (proposedContent !== null) {
+        setConfirmDiscardModal({ isOpen: true, nextFile: file });
+        return;
+    }
+    if (!openFiles.find(f => f.fileId === file.fileId)) {
+        setOpenFiles(prev => [...prev, file]);
+    }
+    loadFileContent(file);
+  };
+
+  const closeTab = (fileId: number) => {
+      setOpenFiles(prev => prev.filter(f => f.fileId !== fileId));
+      if (activeFile?.fileId === fileId) {
+          const remaining = openFiles.filter(f => f.fileId !== fileId);
+          if (remaining.length > 0) {
+              loadFileContent(remaining[remaining.length - 1]);
+          } else {
+              setActiveFile(null);
+              setFileContent('');
+              setProposedContent(null);
+          }
+      }
+  };
+
+  const loadFileContent = async (file: FileNode) => {
+      if (!file.fileId) return;
+      setActiveFile(file);
+      setShowEditor(false); 
+      try {
+          const res = await fileAPI.get(file.fileId);
+          setFileContent(res.data.file.content || '');
+      } catch (e) { console.error(e); } 
+      finally { setTimeout(() => setShowEditor(true), 50); }
+  };
+
+  const handleSave = async (contentToSave?: string) => {
+      if (!activeFile?.fileId) return;
       setIsSaving(true);
       try {
-          await fileAPI.update(activeFile.id, { content: fileContent });
-      } catch (e) {
-          console.error("Save failed", e);
-      } finally {
-          setIsSaving(false);
-      }
+          const content = contentToSave !== undefined ? contentToSave : fileContent;
+          await fileAPI.update(activeFile.fileId, { content: content });
+      } catch (e) { console.error("Save failed", e); } 
+      finally { setIsSaving(false); }
   };
 
   const handleApplyCode = (newCode: string) => {
-      if (!activeFile) {
-          alert("Please open a file to apply code.");
-          return;
-      }
-      // Switch to Diff View
+      if (!activeFile) { alert("Please open a file."); return; }
       setProposedContent(newCode);
   };
 
-  // --- FIX: Robust Unmount-Update-Remount Pattern ---
-  const handleAcceptDiff = () => {
+  const handleAcceptDiff = async () => {
       if (proposedContent !== null) {
           const newContent = proposedContent;
-          
-          // 1. Force Unmount (removes DiffEditor from DOM)
-          setIsEditorTransitioning(true);
-
-          // 2. Wait for disposal to complete (100ms is safe)
-          setTimeout(() => {
-              setFileContent(newContent);
-              setProposedContent(null); // Clear diff state
-              
-              // 3. Remount (adds Standard Editor to DOM)
-              setIsEditorTransitioning(false);
-          }, 100); 
+          setShowEditor(false);
+          if (activeFile) await handleSave(newContent);
+          setTimeout(() => { setFileContent(newContent); setProposedContent(null); setShowEditor(true); }, 100); 
       }
   };
 
   const handleRejectDiff = () => {
-      // Same safe transition for Reject
-      setIsEditorTransitioning(true);
-      setTimeout(() => {
-          setProposedContent(null);
-          setIsEditorTransitioning(false);
-      }, 100);
+      setShowEditor(false);
+      setTimeout(() => { setProposedContent(null); setShowEditor(true); }, 100);
   };
 
+  // --- Context Menu Actions ---
   const handleEditorMount: OnMount = (editor, monaco) => {
       editorRef.current = editor;
-      editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
-          handleSave();
+      monacoRef.current = monaco;
+      editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => { handleSave(); });
+
+      // Action 1: Explain
+      editor.addAction({
+          id: 'ai-explain',
+          label: 'AI: Explain Selection',
+          contextMenuGroupId: 'navigation',
+          contextMenuOrder: 1,
+          run: (ed) => {
+              const selection = ed.getSelection();
+              const text = ed.getModel()?.getValueInRange(selection || undefined);
+              if (text) {
+                  setShowChat(true); 
+                  setAutoPrompt(`Explain this code:\n\`\`\`${text}\`\`\``);
+              } else { alert("Select some code first."); }
+          }
       });
+
+      // Action 2: Refactor
+      editor.addAction({
+          id: 'ai-refactor',
+          label: 'AI: Refactor / Optimize',
+          contextMenuGroupId: 'navigation',
+          contextMenuOrder: 2,
+          run: (ed) => {
+              const selection = ed.getSelection();
+              const text = ed.getModel()?.getValueInRange(selection || undefined);
+              if (text) {
+                  setShowChat(true); 
+                  setAutoPrompt(`Refactor and optimize this code:\n\`\`\`${text}\`\`\``);
+              }
+          }
+      });
+
+      // Action 3: Generate Docs
+      editor.addAction({
+          id: 'ai-docs',
+          label: 'AI: Generate Documentation',
+          contextMenuGroupId: 'navigation',
+          contextMenuOrder: 3,
+          run: (ed) => {
+              const selection = ed.getSelection();
+              const text = ed.getModel()?.getValueInRange(selection || undefined);
+              if (text) {
+                  setShowChat(true); 
+                  setAutoPrompt(`Generate documentation comments for this code:\n\`\`\`${text}\`\`\``);
+              }
+          }
+      });
+      
+      if (monaco.languages.registerInlineCompletionItemProvider) {
+          monaco.languages.registerInlineCompletionItemProvider({ pattern: '**' }, {
+              provideInlineCompletionItems: async (model, position) => {
+                  return new Promise((resolve) => {
+                      if (debounceRef.current) clearTimeout(debounceRef.current);
+                      debounceRef.current = setTimeout(async () => {
+                          const text = model.getValueInRange({ startLineNumber: 1, startColumn: 1, endLineNumber: position.lineNumber, endColumn: position.column });
+                          if (text.length < 5) { resolve({ items: [] }); return; }
+                          try {
+                              const res = await aiAPI.completion({ code: model.getValue(), language: model.getLanguageId(), max_tokens: 50 });
+                              if (res.data.completion) resolve({ items: [{ insertText: res.data.completion, range: { startLineNumber: position.lineNumber, startColumn: position.column, endLineNumber: position.lineNumber, endColumn: position.column } }] });
+                              else resolve({ items: [] });
+                          } catch (e) { resolve({ items: [] }); }
+                      }, 500); 
+                  });
+              },
+              freeInlineCompletion: () => {}
+          });
+      }
   };
 
-  // --- Resizing Logic ---
   const startResizingSidebar = useCallback(() => setIsResizingSidebar(true), []);
   const startResizingChat = useCallback(() => setIsResizingChat(true), []);
   const stopResizing = useCallback(() => { setIsResizingSidebar(false); setIsResizingChat(false); }, []);
   const resize = useCallback((e: MouseEvent) => {
-      if (isResizingSidebar) {
-          const w = e.clientX - 64; 
-          if (w > 150 && w < 600) setSidebarWidth(w);
-      }
-      if (isResizingChat) {
-          const w = window.innerWidth - e.clientX;
-          if (w > 300 && w < 800) setChatWidth(w);
-      }
+      if (isResizingSidebar) { const w = e.clientX - 64; if (w > 150 && w < 600) setSidebarWidth(w); }
+      if (isResizingChat) { const w = window.innerWidth - e.clientX; if (w > 300 && w < 800) setChatWidth(w); }
   }, [isResizingSidebar, isResizingChat]);
+  useEffect(() => { window.addEventListener("mousemove", resize); window.addEventListener("mouseup", stopResizing); return () => { window.removeEventListener("mousemove", resize); window.removeEventListener("mouseup", stopResizing); }; }, [resize, stopResizing]);
 
-  useEffect(() => {
-      window.addEventListener("mousemove", resize);
-      window.addEventListener("mouseup", stopResizing);
-      return () => { window.removeEventListener("mousemove", resize); window.removeEventListener("mouseup", stopResizing); };
-  }, [resize, stopResizing]);
-
-  if (loading) return <Layout><div className="flex h-full items-center justify-center text-slate-500">Loading...</div></Layout>;
+  if (loading) return <Layout><div className="flex h-full items-center justify-center text-slate-500">Loading Workspace...</div></Layout>;
 
   return (
     <Layout>
       <div className={`flex h-full bg-ubiq-950 overflow-hidden ${isResizingSidebar || isResizingChat ? 'select-none cursor-col-resize' : ''}`}>
         
-        {/* LEFT: File Explorer */}
+        {/* LEFT PANEL */}
         <div ref={sidebarRef} className="bg-ubiq-900 border-r border-white/5 flex flex-col shrink-0 relative transition-none" style={{ width: sidebarWidth }}>
-           <div className="h-12 flex items-center px-4 border-b border-white/5 font-medium text-slate-300 text-sm truncate bg-ubiq-900">
-              <CodeBracketIcon className="w-4 h-4 mr-2 text-ubiq-accent shrink-0" />
-              <span className="truncate">{project?.name || 'Project'}</span>
+           <div className="flex flex-col h-full">
+               <div className="h-12 flex items-center justify-between px-4 border-b border-white/5 bg-ubiq-900 shrink-0">
+                  <div className="flex items-center gap-2 overflow-hidden"><CodeBracketIcon className="w-4 h-4 text-ubiq-accent shrink-0" /><span className="font-medium text-slate-300 text-sm truncate">{project?.name}</span></div>
+                  <div className="flex gap-1">
+                      <button onClick={() => openCreateModal('folder')} className="p-1 text-slate-400 hover:text-white transition-colors"><FolderPlusIcon className="w-4 h-4" /></button>
+                      <button onClick={() => openCreateModal('file')} className="p-1 text-slate-400 hover:text-white transition-colors"><PlusIcon className="w-4 h-4" /></button>
+                  </div>
+               </div>
+               <div className="px-3 py-2 border-b border-white/5">
+                   <div className="relative">
+                       <MagnifyingGlassIcon className="w-3.5 h-3.5 absolute left-2.5 top-2 text-slate-500" />
+                       <input type="text" placeholder="Search..." value={fileSearch} onChange={(e) => setFileSearch(e.target.value)} className="w-full bg-ubiq-950 border border-white/10 rounded-md py-1 pl-8 pr-2 text-xs text-slate-300 focus:outline-none focus:border-ubiq-accent" />
+                   </div>
+               </div>
+               <div className="flex-1 overflow-y-auto p-2 custom-scrollbar bg-ubiq-900">
+                  <FileTree nodes={fileTree} onSelectFile={handleFileSelect} onDeleteNode={openDeleteModal} onCreateNode={openCreateModal} selectedFileId={activeFile?.fileId} />
+               </div>
            </div>
-           <div className="flex-1 overflow-y-auto p-2 custom-scrollbar bg-ubiq-900">
-              <FileTree files={files} onSelectFile={handleFileSelect} selectedFileId={activeFile?.id} />
-           </div>
-           <div onMouseDown={startResizingSidebar} className="absolute top-0 right-0 w-1 h-full cursor-col-resize hover:bg-ubiq-accent/50 active:bg-ubiq-accent transition-colors z-10" />
+           <div onMouseDown={(e) => { e.preventDefault(); startResizingSidebar(); }} className="absolute top-0 right-0 w-1.5 h-full cursor-col-resize hover:bg-ubiq-accent/50 z-50 transition-colors" />
         </div>
 
-        {/* CENTER: Editor Area */}
+        {/* CENTER PANEL */}
         <div className="flex-1 flex flex-col min-w-0 bg-[#1e1e1e] relative">
-           
-           {/* Header */}
+           <EditorTabs files={openFiles} activeFileId={activeFile?.fileId || null} onSelect={handleFileSelect} onClose={closeTab} />
            <div className="h-12 bg-[#1e1e1e] border-b border-white/5 flex items-center justify-between px-4 shrink-0">
               {proposedContent !== null ? (
-                  <div className="flex items-center gap-3 animate-fade-in">
-                      <span className="text-xs font-bold text-amber-400 uppercase tracking-wide flex items-center gap-2">
-                          Diff View
-                      </span>
-                      <div className="h-4 w-px bg-white/10 mx-1" />
-                      <button 
-                          onClick={handleAcceptDiff}
-                          disabled={isEditorTransitioning}
-                          className="flex items-center gap-1.5 px-3 py-1 rounded bg-green-500/20 text-green-400 hover:bg-green-500/30 text-xs font-medium transition-colors disabled:opacity-50"
-                      >
-                          <CheckIcon className="w-3.5 h-3.5" /> Accept
-                      </button>
-                      <button 
-                          onClick={handleRejectDiff}
-                          disabled={isEditorTransitioning}
-                          className="flex items-center gap-1.5 px-3 py-1 rounded bg-red-500/20 text-red-400 hover:bg-red-500/30 text-xs font-medium transition-colors disabled:opacity-50"
-                      >
-                          <NoSymbolIcon className="w-3.5 h-3.5" /> Reject
-                      </button>
-                  </div>
+                  <div className="flex items-center gap-3 animate-fade-in"><span className="text-xs font-bold text-amber-400 uppercase">Diff View</span><button onClick={handleAcceptDiff} disabled={!showEditor || isSaving} className="text-green-400 text-xs flex gap-1"><CheckIcon className="w-3.5 h-3.5"/> Accept</button><button onClick={handleRejectDiff} disabled={!showEditor || isSaving} className="text-red-400 text-xs flex gap-1"><NoSymbolIcon className="w-3.5 h-3.5"/> Reject</button></div>
               ) : (
-                  <div className="flex items-center gap-3">
-                      <span className="text-xs text-slate-400 font-mono truncate">
-                         {activeFile ? activeFile.path : 'No file selected'}
-                      </span>
-                      {isSaving && <span className="text-[10px] text-slate-500 animate-pulse">Saving...</span>}
-                  </div>
+                  <span className="text-xs text-slate-400 font-mono truncate">{activeFile ? activeFile.path : 'No file selected'}</span>
               )}
-              
               <div className="flex items-center gap-2">
-                 {proposedContent === null && (
-                     <button onClick={handleSave} className="p-1.5 hover:text-white text-slate-500 transition-colors" title="Save (Ctrl+S)">
-                        <ArrowPathIcon className={`w-4 h-4 ${isSaving ? 'animate-spin' : ''}`} />
-                     </button>
-                 )}
-                 <button onClick={() => setShowChat(!showChat)} className={`p-1.5 rounded-lg transition-colors ${showChat ? 'bg-ubiq-accent/20 text-ubiq-accent' : 'text-slate-500 hover:text-white'}`} title="Toggle AI Chat">
-                    <ChatBubbleLeftRightIcon className="w-5 h-5" />
-                 </button>
+                 <button onClick={() => handleSave()} className="p-1.5 hover:text-white text-slate-500"><ArrowPathIcon className={`w-4 h-4 ${isSaving?'animate-spin':''}`} /></button>
+                 <button onClick={() => setShowChat(!showChat)} className="p-1.5 hover:text-white text-slate-500"><ChatBubbleLeftRightIcon className="w-5 h-5" /></button>
               </div>
            </div>
-
-           {/* Editor / Diff Area (Guarded by Transition State) */}
            <div className="flex-1 relative overflow-hidden">
-              {/* FIX: If transitioning, show loader. If not, show editors. */}
-              {isEditorTransitioning ? (
-                  <div className="absolute inset-0 flex items-center justify-center bg-[#1e1e1e]">
-                      <div className="w-5 h-5 border-2 border-slate-600 border-t-slate-400 rounded-full animate-spin" />
-                  </div>
+              {!showEditor ? (
+                  <div className="absolute inset-0 flex items-center justify-center bg-[#1e1e1e]"><div className="w-5 h-5 border-2 border-slate-600 border-t-slate-400 rounded-full animate-spin" /></div>
+              ) : activeFile ? (
+                 proposedContent !== null ? (
+                     <DiffEditor key={`diff-${activeFile.fileId}`} height="100%" theme="vs-dark" original={fileContent} modified={proposedContent} language={getLanguageFromFilename(activeFile.name)} options={{ minimap: {enabled:false}, fontSize: 14, automaticLayout: true, readOnly: true }} />
+                 ) : (
+                     <Editor key={`editor-${activeFile.fileId}`} height="100%" theme="vs-dark" value={fileContent} onChange={(v) => setFileContent(v||'')} onMount={handleEditorMount} language={getLanguageFromFilename(activeFile.name)} options={{ minimap: {enabled:false}, fontSize: 14, automaticLayout: true, inlineSuggest: { enabled: true } }} />
+                 )
               ) : (
-                  activeFile ? (
-                     proposedContent !== null ? (
-                         <DiffEditor
-                            key="diff-editor" 
-                            height="100%"
-                            theme="vs-dark"
-                            language={getLanguageFromFilename(activeFile.name)}
-                            original={fileContent}
-                            modified={proposedContent}
-                            options={{
-                                minimap: { enabled: false },
-                                fontSize: 14,
-                                wordWrap: 'on',
-                                automaticLayout: true,
-                                readOnly: true,
-                                renderSideBySide: true,
-                                padding: { top: 16 }
-                            }}
-                         />
-                     ) : (
-                         <Editor
-                            key="standard-editor" 
-                            height="100%"
-                            theme="vs-dark"
-                            language={getLanguageFromFilename(activeFile.name)}
-                            value={fileContent}
-                            onChange={(value) => setFileContent(value || '')}
-                            onMount={handleEditorMount}
-                            options={{
-                                minimap: { enabled: false },
-                                fontSize: 14,
-                                wordWrap: 'on',
-                                automaticLayout: true,
-                                padding: { top: 16 },
-                                smoothScrolling: true,
-                            }}
-                         />
-                     )
-                  ) : (
-                     <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-600 bg-[#1e1e1e]">
-                        <CodeBracketIcon className="w-16 h-16 mb-4 opacity-20" />
-                        <p className="text-sm">Select a file to start editing</p>
-                        <p className="text-xs opacity-50 mt-2">Use Ctrl+S to save changes</p>
-                     </div>
-                  )
+                 <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-600 bg-[#1e1e1e]"><CodeBracketIcon className="w-16 h-16 mb-4 opacity-20" /><p className="text-sm">Select a file</p></div>
               )}
            </div>
         </div>
 
-        {/* RIGHT: AI Chat */}
+        {/* RIGHT PANEL (Chat) */}
         {showChat && (
-           <div ref={chatRef} className="bg-ubiq-950 flex flex-col shrink-0 relative border-l border-white/5 transition-none" style={{ width: chatWidth }}>
-              <div onMouseDown={startResizingChat} className="absolute top-0 left-0 w-1 h-full cursor-col-resize hover:bg-ubiq-accent/50 active:bg-ubiq-accent transition-colors z-10 -ml-0.5" />
+           <div ref={chatRef} className="bg-ubiq-950 flex flex-col shrink-0 border-l border-white/5 transition-none relative" style={{ width: chatWidth }}>
+              <div onMouseDown={(e) => { e.preventDefault(); startResizingChat(); }} className="absolute top-0 left-0 w-1.5 h-full cursor-col-resize hover:bg-ubiq-accent/50 z-50 -ml-0.5 transition-colors" />
               <div className="h-12 flex items-center justify-between px-4 border-b border-white/5 bg-ubiq-900/50 shrink-0">
                  <span className="text-sm font-medium text-slate-200">AI Assistant</span>
                  <button onClick={() => setShowChat(false)} className="text-slate-500 hover:text-white"><XMarkIcon className="w-4 h-4" /></button>
@@ -320,17 +393,26 @@ export default function ProjectEditorPage() {
               <div className="flex-1 overflow-hidden relative">
                  {chatSessionId ? (
                      <ChatInterface 
-                        sessionId={chatSessionId}
-                        activeContext={activeFile ? { fileName: activeFile.name, fileContent: fileContent } : null}
-                        onApplyCode={handleApplyCode}
+                        sessionId={chatSessionId} 
+                        // FIX: Always Pass Project Structure
+                        activeContext={{
+                            projectStructure: getProjectStructureContext(),
+                            // Only include currentFile if activeFile exists
+                            currentFile: activeFile ? { name: activeFile.name, content: fileContent } : undefined
+                        }}
+                        onApplyCode={handleApplyCode} 
+                        autoPrompt={autoPrompt}
+                        onAutoPromptClear={() => setAutoPrompt(null)}
                      />
-                 ) : (
-                     <div className="flex items-center justify-center h-full text-slate-500 text-xs">Initializing Chat...</div>
-                 )}
+                 ) : null}
               </div>
            </div>
         )}
 
+        {/* MODALS */}
+        <InputDialog isOpen={createModal.isOpen} onClose={() => setCreateModal(p => ({...p, isOpen: false}))} onSubmit={submitCreate} title={`New ${createModal.type === 'folder' ? 'Folder' : 'File'}`} message={`Enter name for new ${createModal.type} inside '${createModal.parentPath || 'root'}':`} placeholder={createModal.type === 'folder' ? "components" : "App.tsx"} />
+        <ConfirmDialog isOpen={deleteModal.isOpen} onClose={() => setDeleteModal({ isOpen: false, node: null })} onConfirm={submitDelete} title="Delete Item?" message={`Are you sure you want to delete '${deleteModal.node?.name}'? This action cannot be undone.`} confirmText="Delete" isDestructive={true} />
+        <ConfirmDialog isOpen={confirmDiscardModal.isOpen} onClose={() => setConfirmDiscardModal({ isOpen: false, nextFile: null })} onConfirm={() => { setProposedContent(null); handleFileSelect(confirmDiscardModal.nextFile); }} title="Discard Changes?" message="You have unsaved changes from the AI. Switching files will discard them." confirmText="Discard Changes" isDestructive={true} />
       </div>
     </Layout>
   );

@@ -38,6 +38,9 @@ Route::prefix('v1')->group(function () {
         
         // Files
         Route::apiResource('projects.files', FileController::class)->shallow();
+
+        // Delete files by path (Folder Deletion)
+        Route::delete('projects/{project}/files/path', [App\Http\Controllers\API\V1\FileController::class, 'destroyPath']);
         
         // Chat Sessions
         Route::get('/chat/sessions', [ChatController::class, 'index']);

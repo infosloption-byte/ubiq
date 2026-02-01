@@ -3,53 +3,113 @@ import {
   FolderIcon, 
   DocumentIcon, 
   ChevronRightIcon, 
-  ChevronDownIcon 
+  ChevronDownIcon, 
+  PlusIcon, 
+  TrashIcon, 
+  FolderPlusIcon 
 } from '@heroicons/react/24/outline';
 
-interface FileNode {
-  id: number;
-  name: string;
-  language: string;
-  is_folder?: boolean; // API might not send this yet, but good for future
-  children?: FileNode[];
-}
+import type { FileNode } from '../utils/fileUtils';
 
 interface FileTreeProps {
-  files: FileNode[];
+  nodes: FileNode[];
   onSelectFile: (file: FileNode) => void;
+  onDeleteNode: (node: FileNode) => void;
+  onCreateNode: (type: 'file' | 'folder', parentPath: string) => void;
   selectedFileId?: number | null;
+  level?: number;
 }
 
-export default function FileTree({ files, onSelectFile, selectedFileId }: FileTreeProps) {
-  // Simple flat list renderer for now (can be upgraded to recursive tree later)
+export default function FileTree({ nodes, onSelectFile, onDeleteNode, onCreateNode, selectedFileId, level = 0 }: FileTreeProps) {
+  const [expanded, setExpanded] = useState<{ [key: string]: boolean }>({});
+
+  const toggleFolder = (path: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setExpanded(prev => ({ ...prev, [path]: !prev[path] }));
+  };
+
   return (
-    <div className="space-y-0.5 select-none">
-      {files.map((file) => (
-        <div
-          key={file.id}
-          onClick={() => onSelectFile(file)}
-          className={`flex items-center gap-2 px-3 py-1.5 rounded-lg cursor-pointer text-sm transition-colors ${
-            selectedFileId === file.id
-              ? 'bg-ubiq-accent/20 text-white'
-              : 'text-slate-400 hover:text-slate-200 hover:bg-white/5'
-          }`}
-        >
-          {/* Icon based on extension/type */}
-          {file.name.includes('.') ? (
-            <DocumentIcon className="w-4 h-4 shrink-0 opacity-70" />
-          ) : (
-            <FolderIcon className="w-4 h-4 shrink-0 text-ubiq-accent opacity-80" />
-          )}
-          
-          <span className="truncate">{file.name}</span>
-        </div>
-      ))}
-      
-      {files.length === 0 && (
-        <div className="text-center py-4 text-xs text-slate-600 italic">
-          No files found.
-        </div>
-      )}
+    <div className="select-none text-sm">
+      {nodes.map((node) => {
+        const isExpanded = expanded[node.path];
+        
+        // FIX: Ensure only valid fileIds are marked selected. Folders (undefined id) are ignored.
+        const isSelected = !!node.fileId && node.fileId === selectedFileId;
+        
+        const paddingLeft = level * 12 + 12;
+
+        return (
+          <div key={node.path}>
+            <div
+              className={`group flex items-center justify-between py-1.5 pr-2 cursor-pointer transition-colors ${
+                isSelected 
+                  ? 'bg-ubiq-accent/20 text-white' // Highlight Only Active File
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-white/5' // Default Hover
+              }`}
+              style={{ paddingLeft: `${paddingLeft}px` }}
+              onClick={(e) => {
+                e.stopPropagation(); 
+                node.type === 'folder' ? toggleFolder(node.path, e) : onSelectFile(node); 
+              }}
+            >
+              <div className="flex items-center gap-1.5 truncate min-w-0">
+                {node.type === 'folder' && (
+                  <span className="shrink-0 text-slate-500">
+                    {isExpanded ? <ChevronDownIcon className="w-3 h-3" /> : <ChevronRightIcon className="w-3 h-3" />}
+                  </span>
+                )}
+                {node.type === 'folder' ? (
+                  <FolderIcon className={`w-4 h-4 shrink-0 ${isExpanded ? 'text-ubiq-accent' : 'text-slate-500'}`} />
+                ) : (
+                  <DocumentIcon className="w-4 h-4 shrink-0 opacity-70" />
+                )}
+                <span className="truncate">{node.name}</span>
+              </div>
+
+              {/* Actions Area */}
+              <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                {node.type === 'folder' && (
+                  <>
+                    <button 
+                      onClick={(e) => { e.stopPropagation(); onCreateNode('file', node.path); setExpanded(p => ({...p, [node.path]: true})); }}
+                      className="p-1 hover:text-white hover:bg-white/10 rounded" 
+                      title="New File"
+                    >
+                      <PlusIcon className="w-3 h-3" />
+                    </button>
+                    <button 
+                      onClick={(e) => { e.stopPropagation(); onCreateNode('folder', node.path); setExpanded(p => ({...p, [node.path]: true})); }}
+                      className="p-1 hover:text-white hover:bg-white/10 rounded" 
+                      title="New Folder"
+                    >
+                      <FolderPlusIcon className="w-3 h-3" />
+                    </button>
+                  </>
+                )}
+                
+                <button 
+                  onClick={(e) => { e.stopPropagation(); onDeleteNode(node); }}
+                  className="p-1 hover:text-red-400 hover:bg-white/10 rounded" 
+                  title="Delete"
+                >
+                  <TrashIcon className="w-3 h-3" />
+                </button>
+              </div>
+            </div>
+
+            {node.type === 'folder' && isExpanded && node.children && (
+              <FileTree 
+                nodes={node.children} 
+                onSelectFile={onSelectFile} 
+                onDeleteNode={onDeleteNode}
+                onCreateNode={onCreateNode}
+                selectedFileId={selectedFileId}
+                level={level + 1}
+              />
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }

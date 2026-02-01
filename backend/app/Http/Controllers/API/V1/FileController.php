@@ -16,15 +16,14 @@ class FileController extends Controller
      */
     public function index(Request $request, Project $project)
     {
-        // 1. Authorization
         if ($project->user_id !== $request->user()->id) {
             return response()->json(['error' => 'Unauthorized'], 403);
         }
 
-        // 2. Fetch Files (exclude deleted ones)
         $files = $project->files()
             ->where('is_deleted', false)
-            ->select(['id', 'project_id', 'name', 'language', 'size_bytes', 'updated_at']) // Optimize query
+            // UPDATE: Added 'content' to this list so the frontend gets the code
+            ->select(['id', 'project_id', 'name', 'path', 'content', 'language', 'size_bytes', 'updated_at']) 
             ->get();
 
         return response()->json(['files' => $files]);
@@ -96,19 +95,28 @@ class FileController extends Controller
 
         return response()->json(['file' => $file]);
     }
-
+    
     /**
-     * Delete a file (Soft delete or hard delete).
-     * Route: DELETE /api/v1/files/{file}
+     * Delete a directory path and all contents.
      */
-    public function destroy(Request $request, File $file)
+    public function destroyPath(Request $request, Project $project)
     {
-        if ($file->project->user_id !== $request->user()->id) {
+        if ($project->user_id !== $request->user()->id) {
             return response()->json(['error' => 'Unauthorized'], 403);
         }
 
-        $file->delete(); // Or set is_deleted = true
+        $request->validate(['path' => 'required|string']);
+        $path = $request->input('path');
 
-        return response()->json(['message' => 'File deleted']);
+        // Delete the exact file (if it's a file) OR any files inside the folder
+        // We use $path . '/%' to ensure we don't accidentally delete "images-backup" when deleting "images"
+        $deleted = $project->files()
+            ->where(function($query) use ($path) {
+                $query->where('path', $path)
+                      ->orWhere('path', 'like', $path . '/%');
+            })
+            ->delete();
+
+        return response()->json(['message' => "Deleted $deleted files"]);
     }
 }
