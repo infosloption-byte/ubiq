@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../stores/authStore';
 import { authAPI, projectAPI, userAPI } from '../services/api';
 import Layout from '../components/Layout';
+import CreateProjectDialog from '../components/CreateProjectDialog'; 
 import { 
   FolderIcon, 
   DocumentTextIcon, 
@@ -33,24 +34,29 @@ export default function DashboardPage() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
   const [loading, setLoading] = useState(true);
+  
+  // State for Dialog
+  const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
+
+  // Define loadData outside useEffect so we can pass it to the dialog
+  const loadData = async () => {
+    try {
+      const [userData, projectData, statsData] = await Promise.all([
+        authAPI.me(),
+        projectAPI.getAll(),
+        userAPI.getStats()
+      ]);
+      setUser(userData.data.user);
+      setProjects(projectData.data.projects);
+      setStats(statsData.data.stats);
+    } catch (e) {
+      console.error("Dashboard error", e);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
-    const loadData = async () => {
-      try {
-        const [userData, projectData, statsData] = await Promise.all([
-          authAPI.me(),
-          projectAPI.getAll(),
-          userAPI.getStats()
-        ]);
-        setUser(userData.data.user);
-        setProjects(projectData.data.projects);
-        setStats(statsData.data.stats);
-      } catch (e) {
-        console.error("Dashboard error", e);
-      } finally {
-        setLoading(false);
-      }
-    };
     loadData();
   }, []);
 
@@ -76,9 +82,10 @@ export default function DashboardPage() {
             <h1 className="text-2xl font-bold text-white">Dashboard</h1>
             <p className="text-slate-400 text-sm mt-1">Overview of your activity and projects</p>
           </div>
+          {/* Button opens modal */}
           <button 
-            onClick={() => navigate('/editor')}
-            className="btn-primary shadow-lg shadow-ubiq-accent/20"
+            onClick={() => setIsCreateDialogOpen(true)}
+            className="btn-primary shadow-lg shadow-ubiq-accent/20 flex items-center gap-2 px-4 py-2 rounded-lg bg-ubiq-accent hover:bg-ubiq-accent-hover text-white transition-colors"
           >
             <PlusIcon className="w-5 h-5" />
             <span>New Project</span>
@@ -112,21 +119,22 @@ export default function DashboardPage() {
                <FolderIcon className="w-12 h-12 text-slate-600 mx-auto mb-4" />
                <h3 className="text-white font-medium mb-1">No projects found</h3>
                <p className="text-slate-500 text-sm mb-4">Get started by creating your first AI-powered project.</p>
-               <button onClick={() => navigate('/editor')} className="text-ubiq-accent hover:text-white text-sm font-medium">Create Project &rarr;</button>
+               <button onClick={() => setIsCreateDialogOpen(true)} className="text-ubiq-accent hover:text-white text-sm font-medium">Create Project &rarr;</button>
             </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {projects.map((project) => (
                 <Link 
                   key={project.id} 
-                  to={`/editor/${project.id}`}
+                  // LINK TO PROJECT INFO PAGE (Not Editor)
+                  to={`/projects/${project.id}`} 
                   className="glass-panel p-5 rounded-xl hover:border-ubiq-accent/50 hover:bg-ubiq-900 transition-all group"
                 >
                   <div className="flex items-start justify-between mb-4">
                     <div className="p-2 bg-ubiq-950 rounded-lg border border-ubiq-800 group-hover:border-ubiq-700">
                       <FolderIcon className="w-6 h-6 text-ubiq-accent" />
                     </div>
-                    {project.language && (
+                    {project.language && project.language !== 'mixed' && (
                       <span className="text-[10px] font-mono px-2 py-1 rounded bg-ubiq-950 border border-ubiq-800 text-slate-400">
                         {project.language}
                       </span>
@@ -147,6 +155,17 @@ export default function DashboardPage() {
             </div>
           )}
         </div>
+
+        {/* Create Dialog */}
+        <CreateProjectDialog 
+            isOpen={isCreateDialogOpen} 
+            onClose={() => setIsCreateDialogOpen(false)} 
+            onSuccess={() => {
+                loadData(); 
+                setIsCreateDialogOpen(false);
+            }} 
+        />
+
       </div>
     </Layout>
   );

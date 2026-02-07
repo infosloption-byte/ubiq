@@ -13,9 +13,22 @@ class ChatController extends Controller
     // Get all chat sessions for the user
     public function index(Request $request)
     {
-        $sessions = ChatSession::where('user_id', $request->user()->id)
-            ->orderBy('updated_at', 'desc')
-            ->get();
+        $user = $request->user();
+        
+        // Start Query
+        $query = ChatSession::where('user_id', $user->id);
+
+        // --- FILTERING LOGIC ---
+        // If frontend sends ?project_id=123, return only those chats.
+        // If frontend sends NOTHING, return only Global chats (where project_id is NULL).
+        if ($request->has('project_id')) {
+            $query->where('project_id', $request->input('project_id'));
+        } else {
+            $query->whereNull('project_id');
+        }
+
+        // Sort by newest first
+        $sessions = $query->orderBy('updated_at', 'desc')->get();
 
         return response()->json(['sessions' => $sessions]);
     }
@@ -34,7 +47,7 @@ class ChatController extends Controller
 
         $session = ChatSession::create([
             'user_id' => $request->user()->id,
-            'project_id' => $request->project_id,
+            'project_id' => $request->project_id, // Can be null
             'title' => $request->title ?? 'New Chat',
         ]);
 
@@ -95,7 +108,7 @@ class ChatController extends Controller
         $message = $session->messages()->create([
             'role' => $request->role ?? 'user',
             'content' => $request->content,
-            'tokens' => 0 // You can calculate tokens here if needed
+            'tokens' => 0 
         ]);
 
         // Update session timestamp
@@ -109,18 +122,9 @@ class ChatController extends Controller
      */
     public function generateTitle(Request $request, ChatSession $session)
     {
-        // Simple heuristic: Use the first 50 characters of user prompt
-        // Or call AI to summarize it (Better)
-        
         $prompt = $request->input('prompt');
         if (!$prompt) return response()->json(['message' => 'No prompt provided'], 400);
 
-        // Option 1: Fast & Free (Truncate)
-        // $title = \Illuminate\Support\Str::limit($prompt, 30);
-
-        // Option 2: Smart (Ask AI)
-        // You can make an internal HTTP request to your own CompletionController
-        // For now, let's do a smart truncation to keep it fast
         $title = ucfirst(substr($prompt, 0, 40));
         if (strlen($prompt) > 40) $title .= '...';
 
@@ -134,7 +138,6 @@ class ChatController extends Controller
      */
     public function update(Request $request, ChatSession $session)
     {
-        // Verify ownership
         if ($request->user()->id !== $session->user_id) {
             return response()->json(['message' => 'Unauthorized'], 403);
         }
@@ -149,5 +152,33 @@ class ChatController extends Controller
             'message' => 'Session updated',
             'session' => $session
         ]);
+    }
+
+    // Upload an attachment for a chat session
+    public function uploadAttachment(Request $request, ChatSession $session)
+    {
+        if ($session->user_id !== $request->user()->id) {
+            return response()->json(['error' => 'Unauthorized'], 403);
+        }
+
+        $request->validate([
+            'file' => 'required|file|max:10240|mimes:jpeg,png,jpg,gif,webp,pdf,txt' // 10MB Limit
+        ]);
+
+        if ($request->hasFile('file')) {
+            $file = $request->file('file');
+            $path = $file->store('chat_attachments', 'public'); // Ensure 'public' disk is configured
+            
+            // Generate full URL
+            $url = asset('storage/' . $path);
+
+            return response()->json([
+                'url' => $url,
+                'name' => $file->getClientOriginalName(),
+                'type' => $file->getClientMimeType()
+            ]);
+        }
+
+        return response()->json(['error' => 'No file uploaded'], 400);
     }
 }

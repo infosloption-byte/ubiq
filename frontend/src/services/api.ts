@@ -2,7 +2,6 @@ import axios, { AxiosError } from 'axios';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000/api/v1';
 
-// 1. Create Axios Instance
 const api = axios.create({
   baseURL: API_URL,
   headers: {
@@ -11,13 +10,9 @@ const api = axios.create({
   timeout: 30000,
 });
 
-// 2. Request Interceptor (Robust Token Logic)
 api.interceptors.request.use(
   (config) => {
-    // Try standard storage first
     let token = localStorage.getItem('auth_token') || localStorage.getItem('token');
-    
-    // Fallback: Try to read from Zustand's auth-storage if standard keys fail
     if (!token) {
         const authStorage = localStorage.getItem('auth-storage');
         if (authStorage) {
@@ -27,7 +22,6 @@ api.interceptors.request.use(
             } catch (e) { /* ignore */ }
         }
     }
-
     if (token) {
       config.headers.Authorization = `Bearer ${token}`;
     }
@@ -38,12 +32,10 @@ api.interceptors.request.use(
   }
 );
 
-// 3. Response Interceptor (Auto-Logout)
 api.interceptors.response.use(
   (response) => response,
   (error: AxiosError) => {
     if (error.response?.status === 401) {
-      // Clear all possible token storage
       localStorage.removeItem('auth_token');
       localStorage.removeItem('token');
       localStorage.removeItem('auth-storage');
@@ -55,7 +47,6 @@ api.interceptors.response.use(
 
 // --- API DEFINITIONS ---
 
-// Auth API
 export const authAPI = {
   register: (data: any) => api.post('/auth/register', data),
   login: (data: any) => api.post('/auth/login', data),
@@ -64,7 +55,6 @@ export const authAPI = {
   refresh: () => api.post('/auth/refresh'),
 };
 
-// User API
 export const userAPI = {
   getProfile: () => api.get('/user/profile'),
   updateProfile: (data: any) => api.put('/user/profile', data),
@@ -74,7 +64,6 @@ export const userAPI = {
   getStats: () => api.get('/user/stats'),
 };
 
-// Project API (Restored)
 export const projectAPI = {
   getAll: (archived?: boolean) => api.get('/projects', { params: { archived } }),
   create: (data: { name: string; description?: string; language?: string; visibility?: string }) => api.post('/projects', data),
@@ -85,7 +74,6 @@ export const projectAPI = {
   restore: (id: number) => api.post(`/projects/${id}/restore`),
 };
 
-// File API (Restored)
 export const fileAPI = {
   getAll: (projectId: number) => api.get(`/projects/${projectId}/files`),
   create: (projectId: number, data: { name: string; path: string; content?: string; language?: string }) => api.post(`/projects/${projectId}/files`, data),
@@ -94,7 +82,6 @@ export const fileAPI = {
   delete: (id: number) => api.delete(`/files/${id}`),
 };
 
-// AI API
 export const aiAPI = {
   completion: (data: any) => api.post('/ai/completion', data),
   chat: (data: any) => api.post('/ai/chat', data),
@@ -104,22 +91,19 @@ export const aiAPI = {
   getModels: () => api.get('/ai/models'),
 };
 
-// Chat API (Updated with Title Logic)
 export const chatAPI = {
-  getSessions: () => api.get('/chat/sessions'),
+  getSessions: (params?: { project_id?: number }) => api.get('/chat/sessions', { params }),
   createSession: (data: { title?: string; project_id?: number }) => api.post('/chat/sessions', data),
   getSession: (id: number) => api.get(`/chat/sessions/${id}`),
   getMessages: (sessionId: number) => api.get(`/chat/sessions/${sessionId}/messages`),
   sendMessage: (sessionId: number, data: { content: string }) => api.post(`/chat/sessions/${sessionId}/messages`, data),
   deleteSession: (id: number) => api.delete(`/chat/sessions/${id}`),
-  
-  // FIX: Using 'api' instead of 'apiClient'
   updateSession: (id: number, data: { title: string }) => api.patch(`/chat/sessions/${id}`, data),
+  uploadAttachment: (sessionId: number, formData: FormData) => api.post(`/chat/sessions/${sessionId}/upload`, formData, {headers: { 'Content-Type': 'multipart/form-data' }}),
 };
 
 // --- HELPER FUNCTIONS ---
 
-// Stream Chat Helper
 export const streamChat = async (
   messages: any[], 
   model: string, 
@@ -127,10 +111,13 @@ export const streamChat = async (
   onDone: () => void,
   onError: (err: string) => void,
   signal?: AbortSignal,
-  context?: any // NEW: Context parameter (e.g. { file: { name: 'app.py', content: '...' } })
+  apiKeys?: any 
 ) => {
   try {
-    let token = localStorage.getItem('token');
+    // FIX: Check 'auth_token' first (standard), then 'token'
+    let token = localStorage.getItem('auth_token') || localStorage.getItem('token');
+    
+    // Fallback: Check auth-storage if direct keys are missing
     if (!token) {
         const authStorage = localStorage.getItem('auth-storage');
         if (authStorage) {
@@ -148,22 +135,27 @@ export const streamChat = async (
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${token}`,
-        'Accept': 'text/event-stream',
+        'Accept': 'application/x-ndjson',
       },
       body: JSON.stringify({ 
           messages, 
           model, 
           stream: true,
-          context: context // Send context to backend
+          api_keys: apiKeys || {} 
       }),
       signal: signal
     });
 
     if (response.status === 401) throw new Error("Session expired.");
     if (!response.ok) {
-        const text = await response.text();
-        throw new Error(`Server Error: ${text}`);
+        try {
+            const errorData = await response.json();
+            throw new Error(errorData.error || `Server Error: ${response.statusText}`);
+        } catch (e) {
+            throw new Error(`Server Error: ${response.statusText}`);
+        }
     }
+    
     if (!response.body) throw new Error('No response body');
 
     const reader = response.body.getReader();
@@ -176,21 +168,37 @@ export const streamChat = async (
 
       const chunk = decoder.decode(value, { stream: true });
       buffer += chunk;
-      const lines = buffer.split('\n\n');
+      const lines = buffer.split('\n');
       buffer = lines.pop() || '';
 
       for (const line of lines) {
-        if (line.startsWith('data: ')) {
-          const dataStr = line.replace('data: ', '').trim();
-          if (dataStr === '[DONE]') {
-            onDone();
-            return;
-          }
-          try {
-            const data = JSON.parse(dataStr);
-            if (data.error) throw new Error(data.error);
-            if (data.message && data.message.content) onChunk(data.message.content);
-          } catch (e) { /* ignore */ }
+        if (!line.trim()) continue;
+        
+        try {
+            const cleanLine = line.startsWith('data: ') ? line.replace('data: ', '') : line;
+            if (cleanLine === '[DONE]') {
+                onDone();
+                return;
+            }
+
+            const data = JSON.parse(cleanLine);
+            
+            // --- ERROR HANDLING ---
+            if (data.error) {
+                onError(data.error);
+                return; 
+            }
+
+            if (data.message && data.message.content) {
+                onChunk(data.message.content);
+            }
+            
+            if (data.done) {
+                onDone();
+                return;
+            }
+        } catch (e) { 
+            // Ignore parsing errors for partial chunks
         }
       }
     }
@@ -204,10 +212,8 @@ export const streamChat = async (
   }
 };
 
-// Auto-Title Helper (Optimized to use Axios)
 export const generateTitle = async (sessionId: number, firstMessage: string) => {
     try {
-        // Fire and forget - we don't strictly need to await the result in UI
         return await api.post(`/chat/sessions/${sessionId}/title`, { prompt: firstMessage });
     } catch (e) {
         console.error("Failed to auto-generate title", e);

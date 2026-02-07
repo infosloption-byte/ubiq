@@ -6,6 +6,7 @@
 
 namespace App\Http\Controllers\API\V1;
 
+use Laravel\Socialite\Facades\Socialite;
 use App\Models\User;
 use App\Models\UserPreference;
 use Illuminate\Http\Request;
@@ -256,5 +257,39 @@ class AuthController extends Controller
             'message' => 'Preferences updated', 
             'preferences' => $preference
         ]);
+    }
+
+    public function redirectToGoogle()
+    {
+        return Socialite::driver('google')->stateless()->redirect();
+    }
+
+    public function handleGoogleCallback()
+    {
+        try {
+            $googleUser = Socialite::driver('google')->stateless()->user();
+
+            // Find or Create User
+            $user = User::firstOrCreate(
+                ['email' => $googleUser->getEmail()],
+                [
+                    'username' => $googleUser->getName(),
+                    'password' => bcrypt(Str::random(24)), // Random password
+                    'google_id' => $googleUser->getId(),
+                    'avatar' => $googleUser->getAvatar(),
+                    'subscription_tier' => 'free'
+                ]
+            );
+
+            // Create Token
+            $token = $user->createToken('auth_token')->plainTextToken;
+
+            // Redirect to Frontend with Token
+            // CHANGE THIS URL to your actual frontend URL
+            return redirect("http://localhost:3000/auth/callback?token={$token}");
+
+        } catch (\Exception $e) {
+            return redirect("http://localhost:3000/login?error=Google login failed");
+        }
     }
 }

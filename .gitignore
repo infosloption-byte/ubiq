@@ -1,0 +1,10 @@
+# Ignore these files in all directories
+.env
+.env.production
+node_modules/
+vendor/
+/storage/*.key
+id_rsa
+.DS_Store
+dist/
+build/

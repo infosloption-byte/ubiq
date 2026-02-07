@@ -36,80 +36,108 @@ class ProjectController extends Controller
      */
     public function store(Request $request)
     {
-        // 1. Validate Input
         $validator = Validator::make($request->all(), [
             'name' => 'required|string|max:191',
             'description' => 'nullable|string',
-            'language' => 'nullable|string|max:50',
             'visibility' => 'nullable|in:private,public',
-            'source' => 'nullable|in:manual,upload,github',
+            'source' => 'nullable|in:manual,github', // 'upload' handled by import()
             'repository_url' => 'nullable|required_if:source,github|url',
-            'branch' => 'nullable|string',
             'github_token' => 'nullable|string',
         ]);
         
         if ($validator->fails()) {
-            return response()->json([
-                'error' => 'Validation failed',
-                'messages' => $validator->errors()
-            ], 422);
+            return response()->json(['error' => 'Validation failed', 'messages' => $validator->errors()], 422);
         }
         
-        // 2. Create Project Record
         $project = Project::create([
             'user_id' => $request->user()->id,
             'name' => $request->name,
             'description' => $request->description,
-            'language' => $request->language,
+            'language' => 'mixed', // Default value
             'visibility' => $request->visibility ?? 'private',
             'source' => $request->source ?? 'manual',
             'repository_url' => $request->repository_url,
-            'branch' => $request->branch ?? 'main',
             'github_token' => $request->github_token,
         ]);
 
-        // 3. Initialize Project Content based on Source
+        // Default content
         if ($project->source === 'manual') {
-            // Create a default starting file for manual projects
-            File::create([
-                'project_id' => $project->id,
-                'name' => 'main.' . ($this->getExtensionForLanguage($project->language) ?? 'txt'),
-                'path' => 'src/main.' . ($this->getExtensionForLanguage($project->language) ?? 'txt'),
-                'content' => "// Start coding your " . $project->name . " project here...",
-                'language' => $project->language ?? 'text',
-                'size_bytes' => 50
-            ]);
-        } 
-        elseif ($project->source === 'github') {
-            // Create a placeholder README to indicate GitHub import
-            // In a production app, you would dispatch a Job here: ImportGithubRepo::dispatch($project);
             File::create([
                 'project_id' => $project->id,
                 'name' => 'README.md',
                 'path' => 'README.md',
-                'content' => "# " . $project->name . "\n\nImported from GitHub: " . $project->repository_url . "\n\n_Syncing in progress..._",
+                'content' => "# " . $project->name . "\n\nWelcome to your new project!",
                 'language' => 'markdown',
-                'size_bytes' => 100
+                'size_bytes' => 50
             ]);
-        }
+        } 
         
-        return response()->json([
-            'message' => 'Project created successfully',
-            'project' => $project
-        ], 201);
+        return response()->json(['message' => 'Project created successfully', 'project' => $project], 201);
     }
-    
+
     /**
-     * Helper to guess extension from language name.
+     * Import a project from a ZIP file.
      */
-    private function getExtensionForLanguage($language) {
-        $map = [
-            'python' => 'py', 'javascript' => 'js', 'typescript' => 'ts',
-            'html' => 'html', 'css' => 'css', 'php' => 'php',
-            'java' => 'java', 'c' => 'c', 'cpp' => 'cpp', 'go' => 'go',
-            'rust' => 'rs', 'ruby' => 'rb', 'json' => 'json'
-        ];
-        return $map[strtolower($language ?? '')] ?? 'txt';
+    public function import(Request $request)
+    {
+        $validator = Validator::make($request->all(), [
+            'name' => 'required|string|max:191',
+            'description' => 'nullable|string',
+            'file' => 'required|file|mimes:zip|max:20480', // 20MB Max
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json(['error' => 'Validation failed', 'messages' => $validator->errors()], 422);
+        }
+
+        $project = Project::create([
+            'user_id' => $request->user()->id,
+            'name' => $request->name,
+            'description' => $request->description,
+            'language' => 'mixed',
+            'visibility' => $request->visibility ?? 'private',
+            'source' => 'upload'
+        ]);
+
+        $zip = new \ZipArchive;
+
+        if ($zip->open($request->file('file')->path()) === TRUE) {
+            
+            for ($i = 0; $i < $zip->numFiles; $i++) {
+                $filename = $zip->getNameIndex($i);
+                
+                // Skip directories and Mac system files
+                if (substr($filename, -1) == '/') continue;
+                if (str_contains($filename, '__MACOSX') || str_contains($filename, '.DS_Store')) continue;
+
+                $content = $zip->getFromIndex($i);
+                
+                // Skip binary files (simple check) - or store them as base64 if you want
+                // For this MVP, let's try to detect if content is utf-8
+                if (!mb_detect_encoding($content, 'UTF-8', true)) continue; 
+
+                $ext = pathinfo($filename, PATHINFO_EXTENSION);
+                $langMap = [
+                    'js'=>'javascript', 'ts'=>'typescript', 'jsx'=>'javascript', 'tsx'=>'typescript',
+                    'py'=>'python', 'php'=>'php', 'html'=>'html', 'css'=>'css', 'json'=>'json', 'md'=>'markdown'
+                ];
+                $language = $langMap[strtolower($ext)] ?? 'plaintext';
+
+                File::create([
+                    'project_id' => $project->id,
+                    'name' => basename($filename),
+                    'path' => $filename,
+                    'content' => $content,
+                    'language' => $language,
+                    'size_bytes' => strlen($content),
+                ]);
+            }
+            $zip->close();
+        } else {
+            return response()->json(['error' => 'Failed to open ZIP file'], 500);
+        }
+
+        return response()->json(['message' => 'Project imported successfully', 'project' => $project], 201);
     }
     
     /**
@@ -213,5 +241,36 @@ class ProjectController extends Controller
             'message' => 'Project restored successfully',
             'project' => $project
         ]);
+    }
+
+    /**
+     * Download project as ZIP.
+     */
+    public function download(Request $request, Project $project)
+    {
+        if ($project->user_id !== $request->user()->id) {
+            return response()->json(['error' => 'Unauthorized'], 403);
+        }
+
+        $zipFileName = 'project_' . $project->id . '_' . time() . '.zip';
+        $zipPath = storage_path('app/public/' . $zipFileName);
+
+        $zip = new \ZipArchive;
+        if ($zip->open($zipPath, \ZipArchive::CREATE) === TRUE) {
+            
+            // Chunking to handle large projects without memory overflow
+            $project->files()->chunk(100, function($files) use ($zip) {
+                foreach ($files as $file) {
+                    // Add file to zip using its path
+                    $zip->addFromString($file->path, $file->content ?? '');
+                }
+            });
+            
+            $zip->close();
+        } else {
+            return response()->json(['error' => 'Could not create zip'], 500);
+        }
+
+        return response()->download($zipPath)->deleteFileAfterSend(true);
     }
 }

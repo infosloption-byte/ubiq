@@ -12,13 +12,19 @@
 /.vscode
 /.zed
 /auth.json
-/node_modules
+node_modules
 /public/build
 /public/hot
 /public/storage
 /storage/*.key
 /storage/pail
-/vendor
+vendor
 Homestead.json
 Homestead.yaml
 Thumbs.db
+
+# Ignore these files in all directories
+id_rsa
+.DS_Store
+dist/
+build/

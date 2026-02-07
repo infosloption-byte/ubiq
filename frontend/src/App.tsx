@@ -1,13 +1,18 @@
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { useAuthStore } from './stores/authStore';
+
+// --- PAGES ---
+import LandingPage from './pages/LandingPage'; // <--- Import Landing Page
 import LoginPage from './pages/LoginPage';
 import RegisterPage from './pages/RegisterPage';
 import DashboardPage from './pages/DashboardPage';
-import EditorPage from './pages/EditorPage';
+import EditorPage from './pages/EditorPage'; 
 import ChatPage from './pages/ChatPage';
 import SettingsPage from './pages/SettingsPage';
-import ProjectsPage from './pages/ProjectsPage';
-import ProjectEditorPage from './pages/ProjectEditorPage';
+import ProjectsPage from './pages/ProjectsPage'; 
+import ProjectEditorPage from './pages/ProjectEditorPage'; 
+import ProjectInfoPage from './pages/ProjectInfoPage'; 
+import AuthCallbackPage from './pages/AuthCallbackPage';
 
 function App() {
   const { token } = useAuthStore();
@@ -15,6 +20,11 @@ function App() {
   return (
     <Router>
       <Routes>
+        {/* --- ROOT ROUTE (LANDING PAGE) --- */}
+        <Route path="/" element={<LandingPage />} />
+
+        <Route path="/auth/callback" element={<AuthCallbackPage />} />
+
         {/* Public routes */}
         <Route 
           path="/login" 
@@ -30,34 +40,49 @@ function App() {
           path="/dashboard" 
           element={token ? <DashboardPage /> : <Navigate to="/login" />} 
         />
+        
+        {/* Legacy Editor */}
         <Route 
-          path="/editor" 
+          path="/legacy-editor" 
           element={token ? <EditorPage /> : <Navigate to="/login" />} 
         />
         <Route 
-          path="/editor/:projectId" 
+          path="/legacy-editor/:projectId" 
           element={token ? <EditorPage /> : <Navigate to="/login" />} 
         />
+
+        {/* --- CHAT ROUTES --- */}
         <Route 
           path="/chat" 
           element={token ? <ChatPage /> : <Navigate to="/login" />} 
         />
         <Route 
+          path="/chat/:sessionId" 
+          element={token ? <ChatPage /> : <Navigate to="/login" />} 
+        />
+
+        <Route 
           path="/settings" 
           element={token ? <SettingsPage /> : <Navigate to="/login" />} 
         />
 
-        {/* Default redirect */}
+        {/* --- NEW PROJECT ROUTES --- */}
         <Route 
-          path="/" 
-          element={<Navigate to={token ? "/dashboard" : "/login"} />} 
+            path="/projects" 
+            element={token ? <ProjectsPage /> : <Navigate to="/login" />} 
         />
-
-        {/* Project Routes */}
-        <Route path="/projects" element={<ProjectsPage />} />
-        <Route path="/projects/:id" element={<ProjectEditorPage />} />
         
-        {/* 404 */}
+        <Route 
+            path="/projects/:id" 
+            element={token ? <ProjectInfoPage /> : <Navigate to="/login" />} 
+        />
+        
+        <Route 
+            path="/editor/:id" 
+            element={token ? <ProjectEditorPage /> : <Navigate to="/login" />} 
+        />
+        
+        {/* 404 - Redirect to Landing Page */}
         <Route 
           path="*" 
           element={<Navigate to="/" />} 

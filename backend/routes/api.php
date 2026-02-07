@@ -23,6 +23,12 @@ Route::prefix('v1')->group(function () {
     // Public routes
     Route::post('/auth/register', [AuthController::class, 'register']);
     Route::post('/auth/login', [AuthController::class, 'login']);
+
+    Route::get('/auth/google', [AuthController::class, 'redirectToGoogle']);
+    Route::get('/auth/google/callback', [AuthController::class, 'handleGoogleCallback']);
+
+    Route::get('projects/{project}/preview/{token}/{path}', [App\Http\Controllers\API\V1\FileController::class, 'preview'])
+    ->where('path', '.*');
     
     // Protected routes
     Route::middleware('auth:sanctum')->group(function () {
@@ -38,9 +44,12 @@ Route::prefix('v1')->group(function () {
         
         // Files
         Route::apiResource('projects.files', FileController::class)->shallow();
-
-        // Delete files by path (Folder Deletion)
+        
         Route::delete('projects/{project}/files/path', [App\Http\Controllers\API\V1\FileController::class, 'destroyPath']);
+        Route::post('projects/import', [ProjectController::class, 'import']);
+        Route::post('projects/{project}/files/upload', [App\Http\Controllers\API\V1\FileController::class, 'upload']);
+        Route::get('projects/{project}/download', [App\Http\Controllers\API\V1\ProjectController::class, 'download']);
+        Route::get('projects/{project}/files/{file}/serve', [App\Http\Controllers\API\V1\FileController::class, 'serve']);
         
         // Chat Sessions
         Route::get('/chat/sessions', [ChatController::class, 'index']);
@@ -50,6 +59,8 @@ Route::prefix('v1')->group(function () {
         Route::post('/chat/sessions/{session}/title', [ChatController::class, 'generateTitle']);
         // NEW: Manual Update route (for inline editing)
         Route::patch('/chat/sessions/{session}', [ChatController::class, 'update']);
+
+        Route::post('/chat/sessions/{session}/upload', [ChatController::class, 'uploadAttachment']);
         
         // Chat Messages
         Route::get('/chat/sessions/{session}/messages', [ChatController::class, 'messages']);

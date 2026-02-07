@@ -1,25 +1,36 @@
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { authAPI } from '../services/api';
 import { useAuthStore } from '../stores/authStore';
-import { SparklesIcon, CheckCircleIcon } from '@heroicons/react/24/solid';
+import { authAPI } from '../services/api';
+import { EnvelopeIcon, LockClosedIcon, UserIcon, ArrowRightIcon } from '@heroicons/react/24/outline';
 
 export default function RegisterPage() {
-  const [formData, setFormData] = useState({ username: '', email: '', password: '', password_confirmation: '' });
-  const [error, setError] = useState('');
-  const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
-  const { setAuth } = useAuthStore();
+  const setToken = useAuthStore((state) => state.setToken);
+  
+  const [formData, setFormData] = useState({
+    username: '',
+    email: '',
+    password: '',
+    password_confirmation: ''
+  });
+  
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (formData.password !== formData.password_confirmation) return setError("Passwords don't match");
-    setError('');
+    if (formData.password !== formData.password_confirmation) {
+        setError("Passwords do not match");
+        return;
+    }
+    
     setLoading(true);
-
+    setError('');
+    
     try {
-      const res = await authAPI.register(formData);
-      setAuth(res.data.token, res.data.user);
+      const response = await authAPI.register(formData);
+      setToken(response.data.token);
       navigate('/dashboard');
     } catch (err: any) {
       setError(err.response?.data?.message || 'Registration failed');
@@ -28,101 +39,122 @@ export default function RegisterPage() {
     }
   };
 
+  const handleGoogleLogin = () => {
+    window.location.href = 'http://localhost:8000/api/v1/auth/google';
+  };
+
   return (
-    <div className="min-h-screen flex bg-ubiq-950 text-slate-300">
-      {/* Left: Form Section */}
-      <div className="flex-1 flex flex-col justify-center px-4 sm:px-6 lg:px-20 xl:px-24 z-10 relative">
-         {/* Simple background glow for mobile/tablet */}
-        <div className="absolute top-0 left-0 w-full h-full overflow-hidden -z-10 lg:hidden">
-           <div className="absolute top-[-10%] right-[-10%] w-96 h-96 bg-ubiq-accent/10 rounded-full blur-[80px]" />
+    <div className="min-h-screen bg-[#050509] flex items-center justify-center p-4 relative overflow-hidden">
+      <div className="absolute top-[-20%] left-[-10%] w-[600px] h-[600px] bg-purple-600/10 rounded-full blur-[120px] pointer-events-none" />
+      <div className="absolute bottom-[-20%] right-[-10%] w-[600px] h-[600px] bg-indigo-600/10 rounded-full blur-[120px] pointer-events-none" />
+
+      <div className="w-full max-w-md bg-[#0B0B10] border border-white/10 p-8 rounded-2xl shadow-2xl relative z-10">
+        <div className="text-center mb-8">
+          <Link to="/" className="inline-flex items-center gap-2 mb-6 group">
+            <div className="w-8 h-8 bg-gradient-to-tr from-indigo-500 to-purple-600 rounded-lg flex items-center justify-center text-white font-bold shadow-lg shadow-indigo-500/20 group-hover:scale-105 transition-transform">U</div>
+            <span className="font-semibold text-white text-lg">Ubiq Editor</span>
+          </Link>
+          <h2 className="text-2xl font-bold text-white mb-2">Create an account</h2>
+          <p className="text-slate-400 text-sm">Start building your projects with AI.</p>
         </div>
 
-        <div className="mx-auto w-full max-w-sm lg:w-96">
-          <div className="mb-10">
-            <h2 className="text-3xl font-bold text-white tracking-tight">Create account</h2>
-            <p className="mt-2 text-sm text-slate-500">Start building with AI today.</p>
+        <button 
+          onClick={handleGoogleLogin}
+          className="w-full flex items-center justify-center gap-3 bg-white text-black font-medium py-2.5 rounded-lg hover:bg-slate-200 transition-colors mb-6"
+        >
+          <img src="https://www.svgrepo.com/show/475656/google-color.svg" className="w-5 h-5" alt="Google" />
+          Sign up with Google
+        </button>
+
+        <div className="relative mb-6">
+          <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-white/10"></div></div>
+          <div className="relative flex justify-center text-xs uppercase"><span className="bg-[#0B0B10] px-2 text-slate-500">Or sign up with email</span></div>
+        </div>
+
+        {error && (
+          <div className="mb-4 p-3 bg-red-500/10 border border-red-500/20 text-red-400 text-sm rounded-lg text-center">
+            {error}
+          </div>
+        )}
+
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-slate-400 ml-1">Username</label>
+            <div className="relative">
+              <UserIcon className="w-5 h-5 absolute left-3 top-2.5 text-slate-500" />
+              <input 
+                type="text" 
+                required 
+                value={formData.username} 
+                onChange={(e) => setFormData({...formData, username: e.target.value})}
+                className="w-full bg-[#15151A] border border-white/10 rounded-lg py-2.5 pl-10 pr-4 text-slate-200 focus:outline-none focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/50 transition-all placeholder:text-slate-600"
+                placeholder="DeveloperOne"
+              />
+            </div>
           </div>
 
-          <form onSubmit={handleSubmit} className="space-y-5">
-             {error && <div className="text-red-400 text-sm bg-red-500/10 p-3 rounded-lg border border-red-500/20">{error}</div>}
-             
-             <div className="space-y-1">
-               <label className="text-xs font-medium text-slate-400 ml-1">Username</label>
-               <input 
-                 required 
-                 className="input-primary w-full" 
-                 placeholder="jdoe"
-                 value={formData.username}
-                 onChange={e => setFormData({...formData, username: e.target.value})}
-               />
-             </div>
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-slate-400 ml-1">Email</label>
+            <div className="relative">
+              <EnvelopeIcon className="w-5 h-5 absolute left-3 top-2.5 text-slate-500" />
+              <input 
+                type="email" 
+                required 
+                value={formData.email} 
+                onChange={(e) => setFormData({...formData, email: e.target.value})}
+                className="w-full bg-[#15151A] border border-white/10 rounded-lg py-2.5 pl-10 pr-4 text-slate-200 focus:outline-none focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/50 transition-all placeholder:text-slate-600"
+                placeholder="name@company.com"
+              />
+            </div>
+          </div>
 
-             <div className="space-y-1">
-               <label className="text-xs font-medium text-slate-400 ml-1">Email</label>
-               <input 
-                 type="email" required 
-                 className="input-primary w-full" 
-                 placeholder="you@company.com"
-                 value={formData.email}
-                 onChange={e => setFormData({...formData, email: e.target.value})}
-               />
-             </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-1">
+                <label className="text-xs font-medium text-slate-400 ml-1">Password</label>
+                <div className="relative">
+                <LockClosedIcon className="w-5 h-5 absolute left-3 top-2.5 text-slate-500" />
+                <input 
+                    type="password" 
+                    required 
+                    value={formData.password} 
+                    onChange={(e) => setFormData({...formData, password: e.target.value})}
+                    className="w-full bg-[#15151A] border border-white/10 rounded-lg py-2.5 pl-10 pr-4 text-slate-200 focus:outline-none focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/50 transition-all placeholder:text-slate-600"
+                    placeholder="••••••"
+                />
+                </div>
+            </div>
+            <div className="space-y-1">
+                <label className="text-xs font-medium text-slate-400 ml-1">Confirm</label>
+                <div className="relative">
+                <LockClosedIcon className="w-5 h-5 absolute left-3 top-2.5 text-slate-500" />
+                <input 
+                    type="password" 
+                    required 
+                    value={formData.password_confirmation} 
+                    onChange={(e) => setFormData({...formData, password_confirmation: e.target.value})}
+                    className="w-full bg-[#15151A] border border-white/10 rounded-lg py-2.5 pl-10 pr-4 text-slate-200 focus:outline-none focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/50 transition-all placeholder:text-slate-600"
+                    placeholder="••••••"
+                />
+                </div>
+            </div>
+          </div>
 
-             <div className="space-y-1">
-               <label className="text-xs font-medium text-slate-400 ml-1">Password</label>
-               <input 
-                 type="password" required minLength={8}
-                 className="input-primary w-full" 
-                 placeholder="••••••••"
-                 value={formData.password}
-                 onChange={e => setFormData({...formData, password: e.target.value})}
-               />
-             </div>
+          <button 
+            type="submit" 
+            disabled={loading}
+            className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-semibold py-2.5 rounded-lg transition-all shadow-lg shadow-indigo-600/20 flex items-center justify-center gap-2 mt-2 disabled:opacity-70 disabled:cursor-not-allowed"
+          >
+            {loading ? 'Creating Account...' : 'Get Started'} 
+            {!loading && <ArrowRightIcon className="w-4 h-4" />}
+          </button>
+        </form>
 
-             <div className="space-y-1">
-               <label className="text-xs font-medium text-slate-400 ml-1">Confirm Password</label>
-               <input 
-                 type="password" required 
-                 className="input-primary w-full" 
-                 placeholder="••••••••"
-                 value={formData.password_confirmation}
-                 onChange={e => setFormData({...formData, password_confirmation: e.target.value})}
-               />
-             </div>
-
-             <button type="submit" disabled={loading} className="btn-primary w-full py-3 mt-4">
-               {loading ? 'Creating...' : 'Create Account'}
-             </button>
-          </form>
-
-          <p className="mt-8 text-center text-sm text-slate-500">
-            Already a member? <Link to="/login" className="font-medium text-ubiq-accent hover:text-white">Sign in</Link>
-          </p>
-        </div>
-      </div>
-
-      {/* Right: Visual Section (Hidden on Mobile) */}
-      <div className="hidden lg:flex flex-1 relative bg-ubiq-900 overflow-hidden items-center justify-center">
-        <div className="absolute inset-0 bg-gradient-to-br from-ubiq-accent/20 to-purple-900/20 opacity-30" />
-        <div className="relative z-10 max-w-md px-8 text-center">
-           <div className="w-20 h-20 bg-gradient-to-br from-ubiq-accent to-purple-600 rounded-3xl flex items-center justify-center text-white font-bold text-3xl mx-auto mb-8 shadow-2xl shadow-ubiq-accent/30">
-              U
-           </div>
-           <h3 className="text-2xl font-bold text-white mb-6">Unlock your potential</h3>
-           <ul className="space-y-4 text-left inline-block">
-              {[
-                'Smart Code Completion',
-                'Real-time AI Chat Debugging',
-                'Automated Code Reviews',
-                'Private & Secure Environment'
-              ].map((item, i) => (
-                <li key={i} className="flex items-center text-slate-300">
-                  <CheckCircleIcon className="w-5 h-5 text-ubiq-accent mr-3" />
-                  {item}
-                </li>
-              ))}
-           </ul>
-        </div>
+        <p className="mt-8 text-center text-sm text-slate-500">
+          Already have an account?{' '}
+          <Link to="/login" className="text-indigo-400 hover:text-indigo-300 font-medium transition-colors">
+            Sign in
+          </Link>
+        </p>
       </div>
     </div>
   );

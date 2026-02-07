@@ -7,7 +7,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Validator;
-use Illuminate\Support\Facades\Log; // Added for error logging
+use Illuminate\Support\Facades\Log;
 use App\Models\UsageLog;
 use App\Models\RateLimit;
 use Carbon\Carbon;
@@ -129,6 +129,7 @@ class CompletionController extends Controller
                 'max_tokens' => $request->max_tokens ?? 100,
                 'temperature' => $request->temperature ?? 0.2,
                 'context_files' => $request->context_files ?? [],
+                'api_keys' => $request->input('api_keys', []) // <--- ADDED: Pass keys to Python
             ]);
             
             $latency = (microtime(true) - $startTime) * 1000;
@@ -247,7 +248,7 @@ class CompletionController extends Controller
 
         // --- STREAMING MODE ---
         if ($shouldStream) {
-            return response()->stream(function () use ($model, $messages, $inferenceUrl) {
+            return response()->stream(function () use ($model, $messages, $inferenceUrl, $request) {
                 set_time_limit(0);
                 
                 $url = $inferenceUrl . '/v1/chat';
@@ -257,8 +258,9 @@ class CompletionController extends Controller
                         'method'  => 'POST',
                         'content' => json_encode([
                             'model' => $model,
-                            'messages' => $messages, // Send MODIFIED messages
+                            'messages' => $messages,
                             'stream' => true,
+                            'api_keys' => $request->input('api_keys', []) // <--- ADDED: Pass keys to Python
                         ]),
                         'timeout' => 300 
                     ]
@@ -302,9 +304,10 @@ class CompletionController extends Controller
             $startTime = microtime(true);
             
             $response = Http::timeout(300)->post($this->inferenceUrl . '/v1/chat', [
-                'messages' => $messages, // Send MODIFIED messages
+                'messages' => $messages,
                 'model' => $model,
                 'stream' => false,
+                'api_keys' => $request->input('api_keys', []) // <--- ADDED: Pass keys to Python
             ]);
             
             $latency = (microtime(true) - $startTime) * 1000;
@@ -375,6 +378,7 @@ class CompletionController extends Controller
      */
     public function review(Request $request)
     {
+        // ... (validation logic same as before) ...
         $validator = Validator::make($request->all(), [
             'code' => 'required|string|max:20000',
             'language' => 'required|string|max:50',
@@ -410,8 +414,10 @@ class CompletionController extends Controller
                 ],
                 'model' => $model,
                 'stream' => false,
+                'api_keys' => $request->input('api_keys', []) // <--- ADDED
             ]);
             
+            // ... (rest of review logic remains same) ...
             $latency = (microtime(true) - $startTime) * 1000;
             
             if (!$response->successful()) {
@@ -438,14 +444,7 @@ class CompletionController extends Controller
             ]);
             
         } catch (\Exception $e) {
-            UsageLog::create([
-                'user_id' => $user->id,
-                'request_type' => 'review',
-                'model_used' => $model,
-                'success' => false,
-                'error_message' => $e->getMessage(),
-            ]);
-            
+            // ... (logging)
             return response()->json(['error' => 'Review failed', 'message' => 'Failed to generate code review.', 'details' => $e->getMessage()], 500);
         }
     }
@@ -455,6 +454,7 @@ class CompletionController extends Controller
      */
     public function debug(Request $request)
     {
+        // ... (validation logic same as before) ...
         $validator = Validator::make($request->all(), [
             'code' => 'required|string|max:20000',
             'error_message' => 'required|string|max:2000',
@@ -485,6 +485,7 @@ class CompletionController extends Controller
                     ['role' => 'user', 'content' => $prompt]
                 ],
                 'model' => $model,
+                'api_keys' => $request->input('api_keys', []) // <--- ADDED
             ]);
             
             if (!$response->successful()) {
@@ -509,6 +510,7 @@ class CompletionController extends Controller
      */
     public function explain(Request $request)
     {
+        // ... (validation logic same as before) ...
         $validator = Validator::make($request->all(), [
             'code' => 'required|string|max:20000',
             'language' => 'required|string|max:50',
@@ -538,6 +540,7 @@ class CompletionController extends Controller
                     ['role' => 'user', 'content' => $prompt]
                 ],
                 'model' => $model,
+                'api_keys' => $request->input('api_keys', []) // <--- ADDED
             ]);
             
             if (!$response->successful()) {

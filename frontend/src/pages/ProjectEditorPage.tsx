@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { useParams } from 'react-router-dom';
+import { useParams, useSearchParams } from 'react-router-dom';
 import { projectAPI, fileAPI, chatAPI, aiAPI } from '../services/api';
 import axios from 'axios';
 import Layout from '../components/Layout';
@@ -10,14 +10,20 @@ import ConfirmDialog from '../components/ConfirmDialog';
 import EditorTabs from '../components/EditorTabs';
 import { buildFileTree, type FileNode } from '../utils/fileUtils';
 import Editor, { DiffEditor, type OnMount } from "@monaco-editor/react";
+import FilePreview from '../components/FilePreview';
 import { 
   CodeBracketIcon, ChatBubbleLeftRightIcon, XMarkIcon, ArrowPathIcon, 
-  CheckIcon, NoSymbolIcon, PlusIcon, FolderPlusIcon, MagnifyingGlassIcon 
+  CheckIcon, NoSymbolIcon, PlusIcon, FolderPlusIcon, MagnifyingGlassIcon,
+  CloudArrowUpIcon, EyeIcon
 } from '@heroicons/react/24/outline';
 
 export default function ProjectEditorPage() {
   const { id } = useParams<{ id: string }>();
   const projectId = Number(id);
+
+  // Get Search Params
+  const [searchParams] = useSearchParams();
+  const openFileId = searchParams.get('openFile');
 
   // --- Data State ---
   const [project, setProject] = useState<any>(null);
@@ -35,6 +41,11 @@ export default function ProjectEditorPage() {
   const [chatSessionId, setChatSessionId] = useState<number | null>(null);
   const [isSaving, setIsSaving] = useState(false);
 
+  // --- Upload State (NEW) ---
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+
   // --- Auto Prompt State ---
   const [autoPrompt, setAutoPrompt] = useState<string | null>(null);
 
@@ -51,6 +62,8 @@ export default function ProjectEditorPage() {
   const [isResizingChat, setIsResizingChat] = useState(false);
   const [showEditor, setShowEditor] = useState(true);
 
+  const [showPreview, setShowPreview] = useState(false);
+
   const sidebarRef = useRef<HTMLDivElement>(null);
   const chatRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<any>(null);
@@ -60,6 +73,27 @@ export default function ProjectEditorPage() {
   useEffect(() => {
     if (projectId) { loadProjectData(projectId); initializeProjectChat(projectId); }
   }, [projectId]);
+
+  // Watch for files loading & URL param
+  useEffect(() => {
+      if (files.length > 0 && openFileId) {
+          const targetFile = files.find(f => f.id === Number(openFileId));
+          // Only open if not already open
+          if (targetFile && activeFile?.fileId !== targetFile.id) {
+              // Construct a minimal node object to satisfy handleFileSelect
+              const node: FileNode = {
+                  id: String(targetFile.id),
+                  name: targetFile.name,
+                  path: targetFile.path,
+                  type: 'file',
+                  fileId: targetFile.id,
+                  language: targetFile.language,
+                  updatedAt: targetFile.updated_at
+              };
+              handleFileSelect(node);
+          }
+      }
+  }, [files, openFileId]);
 
   useEffect(() => {
       if (files.length > 0) {
@@ -75,6 +109,12 @@ export default function ProjectEditorPage() {
       }
   }, [fileSearch, files]);
 
+  // Helper to check if file MUST be previewed (cannot be edited textually)
+  const isBinaryFile = (filename: string) => {
+      const ext = filename.split('.').pop()?.toLowerCase();
+      return ['png', 'jpg', 'jpeg', 'gif', 'svg', 'ico', 'pdf', 'zip'].includes(ext || '');
+  };
+
   const loadProjectData = async (pid: number) => {
     try {
       const [pRes, fRes] = await Promise.all([projectAPI.get(pid), fileAPI.getAll(pid)]);
@@ -87,15 +127,24 @@ export default function ProjectEditorPage() {
 
   const initializeProjectChat = async (pid: number) => {
       try {
-          const res = await chatAPI.getSessions();
+          // 1. Get Chats for THIS Project Only
+          const res = await chatAPI.getSessions({ project_id: pid });
           const sessions = res.data.sessions || [];
-          const existingSession = sessions.find((s: any) => s.project_id === pid);
-          if (existingSession) setChatSessionId(existingSession.id);
-          else {
-              const newRes = await chatAPI.createSession({ project_id: pid, title: `Workspace Chat` });
+          
+          if (sessions.length > 0) {
+              // Open latest existing project chat
+              setChatSessionId(sessions[0].id);
+          } else {
+              // Create new project-specific chat
+              const newRes = await chatAPI.createSession({ 
+                  project_id: pid, 
+                  title: `Workspace Chat` // Default title
+              });
               setChatSessionId(newRes.data.session.id);
           }
-      } catch (e) {}
+      } catch (e) {
+          console.error("Failed to init project chat", e);
+      }
   };
 
   const getLanguageFromFilename = (filename: string) => {
@@ -174,6 +223,56 @@ ${f.content || '// (Empty file)'}
       } catch (e) { console.error("Delete failed", e); }
   };
 
+  // --- NEW: File Upload Handler ---
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const files = e.target.files;
+      if (!files || files.length === 0) return;
+
+      setIsUploading(true);
+      setUploadProgress(0);
+
+      const token = localStorage.getItem('token') || JSON.parse(localStorage.getItem('auth-storage') || '{}').state?.token;
+      
+      // Upload files sequentially to track progress
+      for (let i = 0; i < files.length; i++) {
+          const file = files[i];
+          const formData = new FormData();
+          formData.append('file', file);
+          // Optional: formData.append('parent_path', selectedFolderPath);
+
+          try {
+              // Direct axios call to get upload progress
+              await axios.post(`http://localhost:8000/api/v1/projects/${projectId}/files/upload`, formData, {
+                  headers: { 
+                      'Authorization': `Bearer ${token}`,
+                      'Content-Type': 'multipart/form-data'
+                  },
+                  onUploadProgress: (progressEvent) => {
+                      if (progressEvent.total) {
+                          const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+                          // Calculate overall progress across all files
+                          const totalProgress = ((i * 100) + percentCompleted) / files.length;
+                          setUploadProgress(totalProgress);
+                      }
+                  }
+              });
+          } catch (err) {
+              console.error(`Failed to upload ${file.name}`, err);
+              // alert(`Failed to upload ${file.name}`);
+          }
+      }
+
+      setUploadProgress(100);
+      setTimeout(() => {
+          setIsUploading(false);
+          setUploadProgress(0);
+          loadProjectData(projectId); // Refresh Tree
+      }, 500);
+      
+      // Reset input
+      if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
   const handleFileSelect = async (file: FileNode) => {
     if (!file.fileId) return; 
     if (proposedContent !== null) {
@@ -203,7 +302,16 @@ ${f.content || '// (Empty file)'}
   const loadFileContent = async (file: FileNode) => {
       if (!file.fileId) return;
       setActiveFile(file);
-      setShowEditor(false); 
+      
+      // Auto-switch logic
+      if (isBinaryFile(file.name)) {
+          setShowPreview(true); // Force preview for images
+          setShowEditor(false); // Hide spinner logic for binary
+      } else {
+          setShowPreview(false); // Default to code for text
+          setShowEditor(false);
+      }
+
       try {
           const res = await fileAPI.get(file.fileId);
           setFileContent(res.data.file.content || '');
@@ -333,25 +441,51 @@ ${f.content || '// (Empty file)'}
         {/* LEFT PANEL */}
         <div ref={sidebarRef} className="bg-ubiq-900 border-r border-white/5 flex flex-col shrink-0 relative transition-none" style={{ width: sidebarWidth }}>
            <div className="flex flex-col h-full">
+               
+               {/* Sidebar Header */}
                <div className="h-12 flex items-center justify-between px-4 border-b border-white/5 bg-ubiq-900 shrink-0">
                   <div className="flex items-center gap-2 overflow-hidden"><CodeBracketIcon className="w-4 h-4 text-ubiq-accent shrink-0" /><span className="font-medium text-slate-300 text-sm truncate">{project?.name}</span></div>
                   <div className="flex gap-1">
-                      <button onClick={() => openCreateModal('folder')} className="p-1 text-slate-400 hover:text-white transition-colors"><FolderPlusIcon className="w-4 h-4" /></button>
-                      <button onClick={() => openCreateModal('file')} className="p-1 text-slate-400 hover:text-white transition-colors"><PlusIcon className="w-4 h-4" /></button>
+                      {/* Upload Button */}
+                      <button onClick={() => fileInputRef.current?.click()} className="p-1 text-slate-400 hover:text-white transition-colors" title="Upload Files">
+                          <CloudArrowUpIcon className="w-4 h-4" />
+                      </button>
+                      <button onClick={() => openCreateModal('folder')} className="p-1 text-slate-400 hover:text-white transition-colors" title="New Folder"><FolderPlusIcon className="w-4 h-4" /></button>
+                      <button onClick={() => openCreateModal('file')} className="p-1 text-slate-400 hover:text-white transition-colors" title="New File"><PlusIcon className="w-4 h-4" /></button>
                   </div>
                </div>
+
+               {/* Upload Progress Bar */}
+               {isUploading && (
+                   <div className="h-1 w-full bg-ubiq-950">
+                       <div className="h-full bg-ubiq-accent transition-all duration-300 ease-out shadow-[0_0_10px_rgba(59,130,246,0.5)]" style={{ width: `${uploadProgress}%` }} />
+                   </div>
+               )}
+               
+               {/* Search Bar */}
                <div className="px-3 py-2 border-b border-white/5">
                    <div className="relative">
                        <MagnifyingGlassIcon className="w-3.5 h-3.5 absolute left-2.5 top-2 text-slate-500" />
                        <input type="text" placeholder="Search..." value={fileSearch} onChange={(e) => setFileSearch(e.target.value)} className="w-full bg-ubiq-950 border border-white/10 rounded-md py-1 pl-8 pr-2 text-xs text-slate-300 focus:outline-none focus:border-ubiq-accent" />
                    </div>
                </div>
+
+               {/* Tree */}
                <div className="flex-1 overflow-y-auto p-2 custom-scrollbar bg-ubiq-900">
                   <FileTree nodes={fileTree} onSelectFile={handleFileSelect} onDeleteNode={openDeleteModal} onCreateNode={openCreateModal} selectedFileId={activeFile?.fileId} />
                </div>
            </div>
            <div onMouseDown={(e) => { e.preventDefault(); startResizingSidebar(); }} className="absolute top-0 right-0 w-1.5 h-full cursor-col-resize hover:bg-ubiq-accent/50 z-50 transition-colors" />
         </div>
+
+        {/* Hidden File Input */}
+        <input 
+            type="file" 
+            ref={fileInputRef} 
+            onChange={handleFileUpload} 
+            className="hidden" 
+            multiple 
+        />
 
         {/* CENTER PANEL */}
         <div className="flex-1 flex flex-col min-w-0 bg-[#1e1e1e] relative">
@@ -363,6 +497,17 @@ ${f.content || '// (Empty file)'}
                   <span className="text-xs text-slate-400 font-mono truncate">{activeFile ? activeFile.path : 'No file selected'}</span>
               )}
               <div className="flex items-center gap-2">
+                {/* PREVIEW TOGGLE BUTTON */}
+                 {activeFile && (
+                     <button 
+                        onClick={() => setShowPreview(!showPreview)} 
+                        className={`p-1.5 transition-colors flex items-center gap-2 text-xs rounded-md ${showPreview ? 'bg-ubiq-accent text-white' : 'text-slate-500 hover:text-white hover:bg-white/10'}`}
+                        title={showPreview ? "Back to Code" : "Preview File"}
+                     >
+                        {showPreview ? <CodeBracketIcon className="w-4 h-4" /> : <EyeIcon className="w-4 h-4" />}
+                        <span className="hidden md:inline">{showPreview ? 'Code' : 'Preview'}</span>
+                     </button>
+                 )}
                  <button onClick={() => handleSave()} className="p-1.5 hover:text-white text-slate-500"><ArrowPathIcon className={`w-4 h-4 ${isSaving?'animate-spin':''}`} /></button>
                  <button onClick={() => setShowChat(!showChat)} className="p-1.5 hover:text-white text-slate-500"><ChatBubbleLeftRightIcon className="w-5 h-5" /></button>
               </div>
@@ -371,7 +516,15 @@ ${f.content || '// (Empty file)'}
               {!showEditor ? (
                   <div className="absolute inset-0 flex items-center justify-center bg-[#1e1e1e]"><div className="w-5 h-5 border-2 border-slate-600 border-t-slate-400 rounded-full animate-spin" /></div>
               ) : activeFile ? (
-                 proposedContent !== null ? (
+                 // CONDITIONAL RENDER: Preview vs Editor vs Diff
+                 showPreview ? (
+                     <FilePreview 
+                        file={activeFile} 
+                        content={fileContent} 
+                        projectId={projectId} 
+                        allFiles={files}
+                     />
+                 ) : proposedContent !== null ? (
                      <DiffEditor key={`diff-${activeFile.fileId}`} height="100%" theme="vs-dark" original={fileContent} modified={proposedContent} language={getLanguageFromFilename(activeFile.name)} options={{ minimap: {enabled:false}, fontSize: 14, automaticLayout: true, readOnly: true }} />
                  ) : (
                      <Editor key={`editor-${activeFile.fileId}`} height="100%" theme="vs-dark" value={fileContent} onChange={(v) => setFileContent(v||'')} onMount={handleEditorMount} language={getLanguageFromFilename(activeFile.name)} options={{ minimap: {enabled:false}, fontSize: 14, automaticLayout: true, inlineSuggest: { enabled: true } }} />

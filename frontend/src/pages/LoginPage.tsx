@@ -1,105 +1,118 @@
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { authAPI } from '../services/api';
 import { useAuthStore } from '../stores/authStore';
-import { SparklesIcon, ArrowRightIcon } from '@heroicons/react/24/outline';
+import { authAPI } from '../services/api';
+import { EnvelopeIcon, LockClosedIcon, ArrowRightIcon } from '@heroicons/react/24/outline';
 
 export default function LoginPage() {
+  const navigate = useNavigate();
+  const setToken = useAuthStore((state) => state.setToken);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  
-  const navigate = useNavigate();
-  const { setAuth } = useAuthStore();
+  const [error, setError] = useState('');
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setError('');
     setLoading(true);
-
+    setError('');
     try {
       const response = await authAPI.login({ email, password });
-      setAuth(response.data.token, response.data.user);
+      setToken(response.data.token);
       navigate('/dashboard');
     } catch (err: any) {
-      setError(err.response?.data?.message || 'Invalid credentials');
+      setError(err.response?.data?.message || 'Login failed');
     } finally {
       setLoading(false);
     }
   };
 
-  return (
-    <div className="min-h-screen w-full flex bg-ubiq-950 text-slate-300 relative overflow-hidden">
-      {/* Background Decor */}
-      <div className="absolute top-[-20%] left-[-10%] w-[500px] h-[500px] bg-ubiq-accent/10 rounded-full blur-[128px]" />
-      <div className="absolute bottom-[-20%] right-[-10%] w-[500px] h-[500px] bg-purple-600/10 rounded-full blur-[128px]" />
+  const handleGoogleLogin = () => {
+    // Redirect to Laravel Backend Google Route
+    window.location.href = 'http://localhost:8000/api/v1/auth/google';
+  };
 
-      {/* Main Container */}
-      <div className="w-full max-w-md m-auto p-6 z-10">
-        <div className="text-center mb-10">
-          <div className="w-12 h-12 bg-gradient-to-br from-ubiq-accent to-purple-600 rounded-xl flex items-center justify-center text-white font-bold text-xl mx-auto mb-4 shadow-lg shadow-ubiq-accent/20">
-            U
-          </div>
-          <h1 className="text-2xl font-semibold text-white tracking-tight">Welcome back</h1>
-          <p className="text-slate-500 mt-2 text-sm">Sign in to continue to Ubiq</p>
+  return (
+    <div className="min-h-screen bg-[#050509] flex items-center justify-center p-4 relative overflow-hidden">
+      {/* Background Gradients */}
+      <div className="absolute top-[-20%] right-[-10%] w-[600px] h-[600px] bg-indigo-600/10 rounded-full blur-[120px] pointer-events-none" />
+      <div className="absolute bottom-[-20%] left-[-10%] w-[600px] h-[600px] bg-purple-600/10 rounded-full blur-[120px] pointer-events-none" />
+
+      <div className="w-full max-w-md bg-[#0B0B10] border border-white/10 p-8 rounded-2xl shadow-2xl relative z-10">
+        <div className="text-center mb-8">
+          <Link to="/" className="inline-flex items-center gap-2 mb-6 group">
+            <div className="w-8 h-8 bg-gradient-to-tr from-indigo-500 to-purple-600 rounded-lg flex items-center justify-center text-white font-bold shadow-lg shadow-indigo-500/20 group-hover:scale-105 transition-transform">U</div>
+            <span className="font-semibold text-white text-lg">Ubiq Editor</span>
+          </Link>
+          <h2 className="text-2xl font-bold text-white mb-2">Welcome back</h2>
+          <p className="text-slate-400 text-sm">Enter your credentials to access your workspace.</p>
         </div>
 
-        <div className="glass-panel p-8 rounded-2xl shadow-2xl">
-          <form onSubmit={handleSubmit} className="space-y-5">
-            {error && (
-              <div className="p-3 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400 text-sm text-center">
-                {error}
-              </div>
-            )}
+        {/* --- GOOGLE BUTTON --- */}
+        <button 
+          onClick={handleGoogleLogin}
+          className="w-full flex items-center justify-center gap-3 bg-white text-black font-medium py-2.5 rounded-lg hover:bg-slate-200 transition-colors mb-6"
+        >
+          <img src="https://www.svgrepo.com/show/475656/google-color.svg" className="w-5 h-5" alt="Google" />
+          Continue with Google
+        </button>
 
-            <div className="space-y-1.5">
-              <label className="text-xs font-medium text-slate-400 ml-1">Email</label>
-              <input
-                type="email"
-                required
-                value={email}
+        <div className="relative mb-6">
+          <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-white/10"></div></div>
+          <div className="relative flex justify-center text-xs uppercase"><span className="bg-[#0B0B10] px-2 text-slate-500">Or continue with email</span></div>
+        </div>
+
+        {error && (
+          <div className="mb-4 p-3 bg-red-500/10 border border-red-500/20 text-red-400 text-sm rounded-lg text-center">
+            {error}
+          </div>
+        )}
+
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-slate-400 ml-1">Email Address</label>
+            <div className="relative">
+              <EnvelopeIcon className="w-5 h-5 absolute left-3 top-2.5 text-slate-500" />
+              <input 
+                type="email" 
+                required 
+                value={email} 
                 onChange={(e) => setEmail(e.target.value)}
-                className="input-primary w-full"
-                placeholder="developer@example.com"
+                className="w-full bg-[#15151A] border border-white/10 rounded-lg py-2.5 pl-10 pr-4 text-slate-200 focus:outline-none focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/50 transition-all placeholder:text-slate-600"
+                placeholder="name@company.com"
               />
             </div>
+          </div>
 
-            <div className="space-y-1.5">
-              <label className="text-xs font-medium text-slate-400 ml-1">Password</label>
-              <input
-                type="password"
-                required
-                value={password}
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-slate-400 ml-1">Password</label>
+            <div className="relative">
+              <LockClosedIcon className="w-5 h-5 absolute left-3 top-2.5 text-slate-500" />
+              <input 
+                type="password" 
+                required 
+                value={password} 
                 onChange={(e) => setPassword(e.target.value)}
-                className="input-primary w-full"
+                className="w-full bg-[#15151A] border border-white/10 rounded-lg py-2.5 pl-10 pr-4 text-slate-200 focus:outline-none focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/50 transition-all placeholder:text-slate-600"
                 placeholder="••••••••"
               />
             </div>
-
-            <button type="submit" disabled={loading} className="btn-primary w-full py-2.5 shadow-lg shadow-ubiq-accent/20">
-              {loading ? <span className="animate-pulse">Signing in...</span> : (
-                <>
-                  <span>Sign In</span>
-                  <ArrowRightIcon className="w-4 h-4" />
-                </>
-              )}
-            </button>
-          </form>
-
-          {/* Demo Hint */}
-          <div className="mt-8 pt-6 border-t border-white/5 text-center">
-             <div className="inline-block px-4 py-2 bg-ubiq-900/50 rounded-lg border border-ubiq-800/50 text-xs text-slate-400">
-                <span className="block mb-1 font-medium text-slate-300">Demo Access</span>
-                <code className="text-ubiq-accent">demo@example.com</code> / <code className="text-ubiq-accent">demo123456</code>
-             </div>
           </div>
-        </div>
 
-        <p className="text-center mt-8 text-sm text-slate-500">
+          <button 
+            type="submit" 
+            disabled={loading}
+            className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-semibold py-2.5 rounded-lg transition-all shadow-lg shadow-indigo-600/20 flex items-center justify-center gap-2 mt-2 disabled:opacity-70 disabled:cursor-not-allowed"
+          >
+            {loading ? 'Signing in...' : 'Sign In'} 
+            {!loading && <ArrowRightIcon className="w-4 h-4" />}
+          </button>
+        </form>
+
+        <p className="mt-8 text-center text-sm text-slate-500">
           Don't have an account?{' '}
-          <Link to="/register" className="text-ubiq-accent hover:text-white transition-colors font-medium">
-            Create one
+          <Link to="/register" className="text-indigo-400 hover:text-indigo-300 font-medium transition-colors">
+            Create account
           </Link>
         </p>
       </div>
