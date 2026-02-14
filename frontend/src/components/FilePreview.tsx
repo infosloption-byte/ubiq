@@ -31,7 +31,7 @@ export default function FilePreview({ file, projectId }: FilePreviewProps) {
     token = token.replace('Bearer ', '');
 
     // 3. Construct Backend URL
-    const baseUrl = `http://localhost:8000/api/v1/projects/${projectId}/preview`;
+    const baseUrl = `${import.meta.env.VITE_API_URL}/projects/${projectId}/preview`;
     
     // Remove leading slashes from file path to ensure clean URL
     const cleanPath = file.path.replace(/^\/+/, '');

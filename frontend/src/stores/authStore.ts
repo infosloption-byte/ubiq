@@ -19,6 +19,7 @@ interface AuthState {
   token: string | null;
   user: User | null;
   setAuth: (token: string, user: User) => void;
+  setToken: (token: string) => void; // <--- Added this line
   setUser: (user: User) => void;
   logout: () => void;
 }
@@ -32,6 +33,12 @@ export const useAuthStore = create<AuthState>()(
       setAuth: (token, user) => {
         localStorage.setItem('auth_token', token);
         set({ token, user });
+      },
+
+      // --- NEW FUNCTION TO FIX CRASH ---
+      setToken: (token) => {
+        localStorage.setItem('auth_token', token);
+        set({ token });
       },
       
       setUser: (user) => {

@@ -21,6 +21,7 @@ return Application::configure(basePath: dirname(__DIR__))
         $middleware->alias([
             'verified' => \App\Http\Middleware\EnsureEmailIsVerified::class,
             'rate.limit' => \App\Http\Middleware\RateLimitMiddleware::class,
+            'admin' => \App\Http\Middleware\AdminMiddleware::class,
         ]);
 
         // CORS configuration for API

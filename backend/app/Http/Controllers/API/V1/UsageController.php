@@ -7,6 +7,8 @@ use Illuminate\Http\Request;
 use App\Models\Project;
 use App\Models\File;
 use App\Models\ChatSession;
+use App\Models\UsageLog;
+use App\Models\SiteVisit;
 
 class UsageController extends Controller
 {
@@ -44,5 +46,27 @@ class UsageController extends Controller
         return response()->json([
             'usage' => []
         ]);
+    }
+
+    /**
+     * Record a public site visit
+     * POST /api/v1/visit
+     */
+    public function recordVisit(Request $request)
+    {
+        // Simple throttling: Don't count same IP multiple times per hour
+        $exists = SiteVisit::where('ip_address', $request->ip())
+            ->where('created_at', '>', now()->subHour())
+            ->exists();
+
+        if (!$exists) {
+            SiteVisit::create([
+                'ip_address' => $request->ip(),
+                'user_agent' => $request->userAgent(),
+                'referer' => $request->header('referer'),
+            ]);
+        }
+
+        return response()->json(['status' => 'recorded']);
     }
 }

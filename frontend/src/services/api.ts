@@ -1,6 +1,6 @@
 import axios, { AxiosError } from 'axios';
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000/api/v1';
+const API_URL = import.meta.env.VITE_API_URL //|| 'http://localhost:8000/api/v1';
 
 const api = axios.create({
   baseURL: API_URL,
@@ -72,6 +72,15 @@ export const projectAPI = {
   delete: (id: number) => api.delete(`/projects/${id}`),
   archive: (id: number) => api.post(`/projects/${id}/archive`),
   restore: (id: number) => api.post(`/projects/${id}/restore`),
+  scaffold: (projectId: number, files: any[]) => 
+      api.post(`/projects/${projectId}/scaffold`, { files }),
+  seedChat: (projectId: number, prompt: string, aiResponse: string, model: string) => 
+        api.post(`/projects/${projectId}/seed-chat`, { 
+            prompt, 
+            ai_response: aiResponse, // <--- Key must match Laravel validation
+            model 
+        }),
+  runProject: (projectId: number) => api.post(`/projects/${projectId}/run`),
 };
 
 export const fileAPI = {
@@ -89,6 +98,13 @@ export const aiAPI = {
   debug: (data: any) => api.post('/ai/debug', data),
   explain: (data: any) => api.post('/ai/explain', data),
   getModels: () => api.get('/ai/models'),
+  generateProject: (projectId: number, prompt: string, model: string, apiKeys?: any) => 
+      api.post('/ai/generate', { 
+          project_id: projectId, 
+          prompt, 
+          model, // <--- Send selected model
+          api_keys: apiKeys 
+      }),
 };
 
 export const chatAPI = {
@@ -100,6 +116,29 @@ export const chatAPI = {
   deleteSession: (id: number) => api.delete(`/chat/sessions/${id}`),
   updateSession: (id: number, data: { title: string }) => api.patch(`/chat/sessions/${id}`, data),
   uploadAttachment: (sessionId: number, formData: FormData) => api.post(`/chat/sessions/${sessionId}/upload`, formData, {headers: { 'Content-Type': 'multipart/form-data' }}),
+};
+
+export const adminAPI = {
+  getStats: () => api.get('/admin/stats'),
+  getUsers: (page = 1) => api.get(`/admin/users?page=${page}`),
+  deleteUser: (id: number) => api.delete(`/admin/users/${id}`),
+};
+
+export const gitAPI = {
+  // only need status and createPr for the simple workflow
+  getStatus: (projectId: number) => api.get(`/projects/${projectId}/git/status`),
+  
+  createPr: (projectId: number, data: { token: string, title: string, description: string }) => 
+      api.post(`/projects/${projectId}/git/create-pr`, data),
+
+  // getStatus: (projectId: number) => api.get(`/projects/${projectId}/git/status`),
+  // stageFile: (projectId: number, path: string) => api.post(`/projects/${projectId}/git/add`, { path }),
+  // unstageFile: (projectId: number, path: string) => api.post(`/projects/${projectId}/git/reset`, { path }),
+  // commit: (projectId: number, data: { message: string }) => api.post(`/projects/${projectId}/git/commit`, data),
+  
+  // Updated Push/Pull
+  // push: (projectId: number, token: string) => api.post(`/projects/${projectId}/git/push`, { token }),
+  // pull: (projectId: number, token: string) => api.post(`/projects/${projectId}/git/pull`, { token }),
 };
 
 // --- HELPER FUNCTIONS ---

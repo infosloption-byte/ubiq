@@ -13,6 +13,8 @@ import ProjectsPage from './pages/ProjectsPage';
 import ProjectEditorPage from './pages/ProjectEditorPage'; 
 import ProjectInfoPage from './pages/ProjectInfoPage'; 
 import AuthCallbackPage from './pages/AuthCallbackPage';
+import GuidePage from './pages/GuidePage';
+import AdminPage from './pages/AdminPage';
 
 function App() {
   const { token } = useAuthStore();
@@ -20,8 +22,17 @@ function App() {
   return (
     <Router>
       <Routes>
+        
+        <Route path="/admin" element={
+            // Simple check: if not logged in, it will fail API calls anyway. 
+            // Ideally wrap in a <AdminRoute> component, but standard <Route> works if backend returns 403.
+            <AdminPage />
+        } />
+
         {/* --- ROOT ROUTE (LANDING PAGE) --- */}
         <Route path="/" element={<LandingPage />} />
+
+        <Route path="/guide" element={<GuidePage />} />
 
         <Route path="/auth/callback" element={<AuthCallbackPage />} />
 

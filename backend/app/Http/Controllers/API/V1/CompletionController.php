@@ -5,558 +5,668 @@ namespace App\Http\Controllers\API\V1;
 use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
-use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\Log;
+use App\Models\Project;
 use App\Models\UsageLog;
 use App\Models\RateLimit;
 use Carbon\Carbon;
 
 class CompletionController extends Controller
 {
-    protected $inferenceUrl;
+    // Define rate limits per tier
     protected $rateLimits = [
         'free' => 30,      // 30 requests per hour
         'premium' => 100,  // 100 requests per hour
     ];
     
-    public function __construct()
-    {
-        $this->inferenceUrl = env('INFERENCE_API_URL', 'http://localhost:8001');
-    }
-    
     /**
-     * Check rate limit for user
+     * Helper: Map model ID to API Endpoint & Key
      */
-    protected function checkRateLimit($user)
+    private function getProviderConfig($modelId, $apiKeys)
     {
-        $limit = $this->rateLimits[$user->subscription_tier] ?? 30;
-        $now = Carbon::now();
-        
-        // Get or create rate limit record
-        $rateLimit = RateLimit::where('user_id', $user->id)
-            ->where('window_end', '>', $now)
-            ->first();
-        
-        if (!$rateLimit) {
-            // Create new window
-            RateLimit::create([
-                'user_id' => $user->id,
-                'request_count' => 1,
-                'window_start' => $now,
-                'window_end' => $now->copy()->addHour(),
-            ]);
-            return ['allowed' => true, 'remaining' => $limit - 1];
-        }
-        
-        if ($rateLimit->request_count >= $limit) {
-            $retryAfter = $rateLimit->window_end->diffInSeconds($now);
+        // 1. GOOGLE GEMINI (Native API)
+        if (str_contains($modelId, 'gemini')) {
+            $key = isset($apiKeys['google']) ? trim($apiKeys['google']) : null;
+            if (!$key) return null;
+            
+            // Clean model name: remove 'models/' if present to avoid duplication in URL
+            // e.g. "models/gemini-1.5-pro" -> "gemini-1.5-pro"
+            $cleanModel = str_replace('models/', '', $modelId);
+            
             return [
-                'allowed' => false,
-                'remaining' => 0,
-                'retry_after' => $retryAfter
+                'provider' => 'gemini',
+                // Using v1beta as it supports systemInstruction and latest models
+                'url' => "https://generativelanguage.googleapis.com/v1beta/models/{$cleanModel}:generateContent?key={$key}",
+                'headers' => ['Content-Type' => 'application/json'],
+                'model_name' => $cleanModel
             ];
         }
-        
-        $rateLimit->increment('request_count');
+
+        // 2. OPENAI
+        if (str_starts_with($modelId, 'gpt-')) {
+            $key = isset($apiKeys['openai']) ? trim($apiKeys['openai']) : null;
+            if (!$key) return null;
+            return [
+                'provider' => 'openai',
+                'url' => 'https://api.openai.com/v1/chat/completions',
+                'headers' => ['Authorization' => "Bearer $key"],
+                'model_name' => $modelId
+            ];
+        }
+
+        // 3. OPENROUTER
+        if (str_starts_with($modelId, 'openrouter/')) {
+            $key = isset($apiKeys['openrouter']) ? trim($apiKeys['openrouter']) : null;
+            if (!$key) return null;
+            return [
+                'provider' => 'openrouter',
+                'url' => 'https://openrouter.ai/api/v1/chat/completions',
+                'headers' => [
+                    'Authorization' => "Bearer $key",
+                    'HTTP-Referer' => config('app.url'),
+                    'X-Title' => 'Ubiq Editor'
+                ],
+                'model_name' => str_replace('openrouter/', '', $modelId)
+            ];
+        }
+
+        // 4. MISTRAL
+        if (str_contains($modelId, 'mistral') || str_contains($modelId, 'codestral')) {
+            $key = isset($apiKeys['mistral']) ? trim($apiKeys['mistral']) : null;
+            if (!$key) return null;
+            return [
+                'provider' => 'mistral',
+                'url' => 'https://api.mistral.ai/v1/chat/completions',
+                'headers' => ['Authorization' => "Bearer $key"],
+                'model_name' => $modelId
+            ];
+        }
+
+        // 5. LOCAL (OLLAMA)
         return [
-            'allowed' => true,
-            'remaining' => $limit - $rateLimit->request_count
+            'provider' => 'ollama',
+            'url' => 'http://host.docker.internal:11434/api/chat',
+            'headers' => [],
+            'model_name' => $modelId,
+            'is_local' => true
         ];
     }
-    
+
+    protected function checkRateLimit($user)
+    {
+        $limit = $this->rateLimits[$user->subscription_tier ?? 'free'] ?? 30;
+        $now = Carbon::now();
+        $rateLimit = RateLimit::where('user_id', $user->id)->where('window_end', '>', $now)->first();
+        
+        if (!$rateLimit) {
+            RateLimit::create(['user_id' => $user->id, 'request_count' => 1, 'window_start' => $now, 'window_end' => $now->copy()->addHour()]);
+            return ['allowed' => true, 'remaining' => $limit - 1];
+        }
+        if ($rateLimit->request_count >= $limit) return ['allowed' => false, 'remaining' => 0, 'retry_after' => $rateLimit->window_end->diffInSeconds($now)];
+        
+        $rateLimit->increment('request_count');
+        return ['allowed' => true, 'remaining' => $limit - $rateLimit->request_count];
+    }
+
+    /**
+     * GENERATE PROJECT (Used by AI Architect)
+     */
+    public function generate(Request $request)
+    {
+        $request->validate([
+            'project_id' => 'required|exists:projects,id',
+            'prompt' => 'required|string|max:5000',
+            'model' => 'required|string',
+            'api_keys' => 'nullable|array'
+        ]);
+
+        $project = Project::find($request->project_id);
+        if ($project->user_id !== $request->user()->id) {
+            return response()->json(['error' => 'Unauthorized'], 403);
+        }
+
+        $rateLimitCheck = $this->checkRateLimit($request->user());
+        if (!$rateLimitCheck['allowed']) {
+            return response()->json(['error' => 'Rate limit exceeded'], 429);
+        }
+
+        $model = $request->model;
+        $apiKeys = $request->input('api_keys', []);
+        $config = $this->getProviderConfig($model, $apiKeys);
+
+        if (!$config) {
+            return response()->json(['error' => "Configuration failed for model: {$model}. Please check your API keys."], 400);
+        }
+
+        // --- TRULY DYNAMIC POLYGLOT SYSTEM PROMPT ---
+        // --- TRULY DYNAMIC POLYGLOT SYSTEM PROMPT ---
+        $systemPrompt = "You are an Expert Full Stack Architect.
+        TASK: Generate a complete, production-ready web application workspace.
+        
+        TECHNOLOGY STACK SELECTION:
+        - If the user specifies a framework or language (e.g., Angular, Laravel, React, Vue, Express, Django, CodeIgniter), you MUST strictly use that technology stack.
+        - If the user does not specify a stack, you MUST analyze their requirements and independently choose the OPTIMUM modern stack (e.g., Vite+React+Node) for their specific use case.
+        
+        CRITICAL RULES:
+        1. Return ONLY valid JSON where keys are file paths and values are code: {\"filename.ext\": \"content\"}. No markdown blocks outside the JSON.
+        2. You MUST include a 'ubiq.json' file to configure the server. It MUST contain:
+           - \"title\": A short, catchy name for this project based on the prompt.
+           - \"runtime\": You MUST map your chosen stack to EXACTLY ONE of these sandbox environments:
+                -> \"static\": For pure Vanilla HTML/CSS/JS without build steps.
+                -> \"node\": For ANY JavaScript/TypeScript framework (React, Angular, Vue, Next.js, Express, Svelte, etc.).
+                -> \"php\": For ANY PHP framework or pure PHP (Laravel, CodeIgniter, Symfony, etc.).
+                -> \"python\": For ANY Python framework (Django, Flask, FastAPI, etc.).
+           - \"entry\": The primary file to execute or serve.
+        
+        3. DEPENDENCY ENFORCEMENT & PORT STANDARDIZATION:
+           - If runtime is \"node\", you MUST generate a valid 'package.json' with a \"dev\" script. 
+           - CRITICAL: You MUST configure the \"dev\" script to run on port 5173 and bind to 0.0.0.0. 
+             (Examples: \"vite --port 5173 --host\", \"next dev -p 5173 -H 0.0.0.0\", \"ng serve --port 5173 --host 0.0.0.0\").
+           - If runtime is \"php\", generate a 'composer.json' (if using packages) and standard directory structure.
+           - If runtime is \"python\", generate a 'requirements.txt'.
+          
+        4. Provide ALL necessary code to make the app actually run. Do not leave placeholders.";
+        
+        $userPrompt = "Create this app: " . $request->prompt;
+
+        // ---------------------------------------------------------
+        // BROAD LOCAL MODEL REINFORCEMENT:
+        // We use broad keyword matching to catch families of frameworks.
+        // ---------------------------------------------------------
+        $isNode = preg_match('/react|vue|angular|svelte|next|nuxt|node|express|nest/i', $request->prompt);
+        $isPhp = preg_match('/php|laravel|symfony|codeigniter|yii/i', $request->prompt);
+        $isPython = preg_match('/python|django|flask|fastapi/i', $request->prompt);
+
+        if ($isNode) {
+            $userPrompt .= "\n\nCRITICAL ENFORCEMENT: You MUST use '\"runtime\": \"node\"' and generate a full 'package.json' with dependencies. Do NOT output a static HTML fallback.";
+        } elseif ($isPhp) {
+            $userPrompt .= "\n\nCRITICAL ENFORCEMENT: You MUST use '\"runtime\": \"php\"' and generate the correct PHP framework structure (including composer.json if applicable). Do NOT output a static HTML fallback.";
+        } elseif ($isPython) {
+            $userPrompt .= "\n\nCRITICAL ENFORCEMENT: You MUST use '\"runtime\": \"python\"' and generate a 'requirements.txt'. Do NOT output a static HTML fallback.";
+        } else {
+            $userPrompt .= "\n\nCRITICAL ENFORCEMENT: Choose the best tech stack. If your chosen stack requires a server or build step (Node/PHP/Python), you MUST set the correct 'runtime' in ubiq.json and generate the required dependency files (package.json, composer.json, etc.). Do NOT default to static HTML unless it is a very simple request.";
+        }
+
+        try {
+            $payload = [];
+
+            // --- PAYLOAD CONSTRUCTION ---
+            if ($config['provider'] === 'gemini') {
+                // FIX: Use the official systemInstruction field for Gemini so it Obeys!
+                $payload = [
+                    'systemInstruction' => [
+                        'parts' => [['text' => $systemPrompt]]
+                    ],
+                    'contents' => [
+                        ['role' => 'user', 'parts' => [['text' => $userPrompt]]]
+                    ]
+                ];
+            } 
+            elseif ($config['provider'] === 'ollama') {
+                // ADDED: Options array to force longer outputs and stricter rules
+                $payload = [
+                    'model' => $config['model_name'],
+                    'messages' => [
+                        ['role' => 'system', 'content' => $systemPrompt],
+                        ['role' => 'user', 'content' => $userPrompt]
+                    ],
+                    'stream' => false,
+                    'options' => [
+                        'num_predict' => 8000, // Force Ollama to allow long multi-file outputs
+                        'temperature' => 0.1   // Lower temp makes it obey strict rules better
+                    ]
+                ];
+            } 
+            else {
+                $payload = [
+                    'model' => $config['model_name'],
+                    'messages' => [
+                        ['role' => 'system', 'content' => $systemPrompt],
+                        ['role' => 'user', 'content' => $userPrompt]
+                    ],
+                    'temperature' => 0.2,
+                    'max_tokens' => 8000, // Boosted for larger React projects
+                    'stream' => false
+                ];
+            }
+
+            // --- EXECUTE REQUEST ---
+            $response = Http::withHeaders($config['headers'])
+                ->timeout(120) 
+                ->post($config['url'], $payload);
+
+            if (!$response->successful()) throw new \Exception($response->body());
+
+            // --- PARSE RESPONSE ---
+            $data = $response->json();
+            $content = '';
+
+            if ($config['provider'] === 'gemini') {
+                $content = $data['candidates'][0]['content']['parts'][0]['text'] ?? '';
+            } else {
+                $content = $data['choices'][0]['message']['content'] ?? $data['message']['content'] ?? '';
+            }
+            
+            // Cleanup & Extraction
+            $content = preg_replace('/^```json/', '', $content);
+            $content = preg_replace('/```$/', '', $content);
+            
+            if (strpos($content, '{') !== 0) {
+                preg_match('/\{[\s\S]*\}/', $content, $matches);
+                if (!empty($matches[0])) $content = $matches[0];
+            }
+
+            $files = json_decode($content, true);
+
+            if (json_last_error() !== JSON_ERROR_NONE || empty($files)) {
+                throw new \Exception("AI response was not valid JSON. Response: " . substr($content, 0, 100) . "...");
+            }
+
+            // Save Files
+            $savedCount = 0;
+            foreach ($files as $path => $code) {
+                $project->files()->updateOrCreate(
+                    ['path' => $path],
+                    ['name' => basename($path), 'content' => $code, 'language' => $this->detectLanguage($path), 'is_deleted' => false]
+                );
+                
+                $fullPath = storage_path("app/workspaces/{$project->user_id}/{$project->id}/{$path}");
+                if (!file_exists(dirname($fullPath))) mkdir(dirname($fullPath), 0755, true);
+                file_put_contents($fullPath, $code);
+                
+                $savedCount++;
+            }
+
+            return response()->json(['message' => "Generated $savedCount files", 'model_used' => $model]);
+
+        } catch (\Exception $e) {
+            return response()->json(['error' => 'Generation failed: ' . $e->getMessage()], 500);
+        }
+    }
+
+    private function detectLanguage($filename) {
+        $ext = pathinfo($filename, PATHINFO_EXTENSION);
+        return match($ext) {
+            'js', 'jsx' => 'javascript',
+            'ts', 'tsx' => 'typescript',
+            'html' => 'html',
+            'css' => 'css',
+            'json' => 'json',
+            'php' => 'php',
+            'py' => 'python',
+            default => 'plaintext'
+        };
+    }
+
     /**
      * Code completion endpoint
      */
     public function complete(Request $request)
     {
-        // Validate input
         $validator = Validator::make($request->all(), [
             'code' => 'required|string|max:10000',
             'language' => 'required|string|max:50',
             'model' => 'nullable|string|max:100',
-            'max_tokens' => 'nullable|integer|min:10|max:500',
-            'temperature' => 'nullable|numeric|min:0|max:1',
-            'context_files' => 'nullable|array|max:5',
-            'context_files.*.path' => 'required|string',
-            'context_files.*.content' => 'required|string',
+            'api_keys' => 'nullable|array'
         ]);
 
         if ($validator->fails()) {
-            return response()->json([
-                'error' => 'Validation failed',
-                'messages' => $validator->errors()
-            ], 422);
+            return response()->json(['error' => 'Validation failed', 'messages' => $validator->errors()], 422);
         }
         
         $user = $request->user();
-        
-        // Check rate limit
         $rateLimitCheck = $this->checkRateLimit($user);
         if (!$rateLimitCheck['allowed']) {
-            return response()->json([
-                'error' => 'Rate limit exceeded',
-                'message' => 'You have exceeded your request quota for this hour.',
-                'retry_after' => $rateLimitCheck['retry_after'],
-                'remaining' => 0
-            ], 429);
+            return response()->json(['error' => 'Rate limit exceeded', 'retry_after' => $rateLimitCheck['retry_after']], 429);
         }
         
-        // Get user's preferred model or use provided
-        $userPreferences = $user->preferences;
-        $model = $request->model ?? ($userPreferences ? $userPreferences->preferred_model : 'codellama:7b');
+        $model = $request->model ?? ($user->preferences->preferred_model ?? 'codellama:7b');
+        $apiKeys = $request->input('api_keys', []);
+        $config = $this->getProviderConfig($model, $apiKeys);
+
+        if (!$config) return response()->json(['error' => 'Missing API Key for selected model'], 400);
         
-        // Check cache
-        $cacheKey = 'completion:' . md5($request->code . $model . $request->language);
-        
-        if ($cached = Cache::get($cacheKey)) {
-            return response()->json([
-                'completion' => $cached,
-                'model' => $model,
-                'cached' => true,
-                'remaining_requests' => $rateLimitCheck['remaining']
-            ]);
-        }
-        
+        $prompt = "You are an expert code completion engine. Output ONLY the code to complete the following {$request->language} snippet. Do not use Markdown blocks. Context:\n\n" . $request->code;
+
         try {
             $startTime = microtime(true);
+            $payload = [];
+
+            if ($config['provider'] === 'gemini') {
+                $payload = ['contents' => [['role' => 'user', 'parts' => [['text' => $prompt]]]]];
+            } else {
+                $payload = [
+                    'model' => $config['model_name'],
+                    'messages' => [
+                        ['role' => 'system', 'content' => 'You are a code completion tool. Output only raw code.'],
+                        ['role' => 'user', 'content' => $prompt]
+                    ],
+                    'max_tokens' => 100,
+                    'temperature' => 0.2,
+                    'stream' => false
+                ];
+            }
             
-            // Call inference API
-            $response = Http::timeout(60)->post($this->inferenceUrl . '/v1/completion', [
-                'code' => $request->code,
-                'language' => $request->language,
-                'model' => $model,
-                'max_tokens' => $request->max_tokens ?? 100,
-                'temperature' => $request->temperature ?? 0.2,
-                'context_files' => $request->context_files ?? [],
-                'api_keys' => $request->input('api_keys', []) // <--- ADDED: Pass keys to Python
-            ]);
+            $response = Http::withHeaders($config['headers'])->timeout(30)->post($config['url'], $payload);
+            
+            if (!$response->successful()) throw new \Exception('Provider Error: ' . $response->body());
+            
+            $result = $response->json();
+            $content = '';
+
+            if ($config['provider'] === 'gemini') {
+                $content = $result['candidates'][0]['content']['parts'][0]['text'] ?? '';
+            } else {
+                $content = $result['choices'][0]['message']['content'] ?? '';
+            }
             
             $latency = (microtime(true) - $startTime) * 1000;
             
-            if (!$response->successful()) {
-                throw new \Exception('Inference API returned error: ' . $response->body());
-            }
-            
-            $result = $response->json();
-            
-            // Cache result for 1 hour
-            Cache::put($cacheKey, $result['completion'], 3600);
-            
-            // Log usage
             UsageLog::create([
                 'user_id' => $user->id,
                 'request_type' => 'completion',
                 'model_used' => $model,
-                'tokens_output' => $result['tokens'] ?? 0,
                 'latency_ms' => $latency,
                 'success' => true,
                 'ip_address' => $request->ip(),
-                'user_agent' => $request->userAgent(),
             ]);
             
             return response()->json([
-                'completion' => $result['completion'],
+                'completion' => $content,
                 'model' => $model,
-                'tokens' => $result['tokens'] ?? 0,
                 'cached' => false,
-                'latency_ms' => round($latency, 2),
                 'remaining_requests' => $rateLimitCheck['remaining']
             ]);
             
         } catch (\Exception $e) {
-            UsageLog::create([
-                'user_id' => $user->id,
-                'request_type' => 'completion',
-                'model_used' => $model,
-                'success' => false,
-                'error_message' => $e->getMessage(),
-                'ip_address' => $request->ip(),
-            ]);
-            
-            return response()->json([
-                'error' => 'Completion failed',
-                'message' => 'Failed to generate code completion.',
-                'details' => env('APP_DEBUG') ? $e->getMessage() : null
-            ], 500);
+            return response()->json(['error' => 'Completion failed', 'details' => $e->getMessage()], 500);
         }
     }
     
     /**
-     * Chat endpoint (Supports Streaming & Regular Requests)
+     * Chat endpoint (Universal)
      */
     public function chat(Request $request)
     {
-        // 1. Validate Input
-        $validator = Validator::make($request->all(), [
-            'messages' => 'required|array|min:1',
-            'messages.*.role' => 'required|string|in:user,assistant,system',
-            'messages.*.content' => 'required|string',
-            'model' => 'nullable|string|max:100',
-            'context' => 'nullable|array',
-            'stream' => 'nullable|boolean',
+        $request->validate([
+            'messages' => 'required|array',
+            'model' => 'nullable|string',
+            'api_keys' => 'nullable|array'
         ]);
-
-        if ($validator->fails()) {
-            return response()->json([
-                'error' => 'Validation failed',
-                'messages' => $validator->errors()
-            ], 422);
-        }
         
         $user = $request->user();
-        
-        // 2. Check Rate Limit
-        $rateLimitCheck = $this->checkRateLimit($user);
-        if (!$rateLimitCheck['allowed']) {
-            return response()->json([
-                'error' => 'Rate limit exceeded',
-                'retry_after' => $rateLimitCheck['retry_after']
-            ], 429);
+        $model = $request->model ?? 'gpt-3.5-turbo';
+        $apiKeys = $request->input('api_keys', []);
+
+        $config = $this->getProviderConfig($model, $apiKeys);
+        if (!$config) {
+            return response()->json(['error' => 'Missing API Key'], 400);
         }
-        
-        // 3. Determine Model
-        $userPreferences = $user->preferences;
-        $model = $request->model ?? ($userPreferences ? $userPreferences->preferred_model : 'codellama:7b');
-        $shouldStream = $request->boolean('stream', false);
-        $inferenceUrl = $this->inferenceUrl;
 
-        // --- CONTEXT INJECTION LOGIC ---
-        $messages = $request->messages;
-        $clientContext = $request->input('context'); // Get the context sent from frontend
+        try {
+            $payload = [];
 
-        if ($clientContext && isset($clientContext['file'])) {
-            // Create a System Prompt for the file
-            $fileContext = $clientContext['file'];
-            $fileName = $fileContext['name'] ?? 'Current File';
-            $fileContent = $fileContext['content'] ?? '';
+            // A. GEMINI (Specific Structuring)
+            if ($config['provider'] === 'gemini') {
+                $geminiMessages = [];
+                $systemInstruction = null;
 
-            $systemMessage = [
-                'role' => 'system',
-                'content' => "You are an expert developer. The user is currently editing the following file.\n\n" .
-                             "--- BEGIN FILE: {$fileName} ---\n" .
-                             "{$fileContent}\n" .
-                             "--- END FILE ---\n\n" .
-                             "Use this context to answer questions specifically about this code. " .
-                             "If you provide code changes, output ONLY the code block."
-            ];
-
-            // Prepend this to the messages list
-            array_unshift($messages, $systemMessage);
-        }
-        // -------------------------------
-
-        // --- STREAMING MODE ---
-        if ($shouldStream) {
-            return response()->stream(function () use ($model, $messages, $inferenceUrl, $request) {
-                set_time_limit(0);
-                
-                $url = $inferenceUrl . '/v1/chat';
-                $options = [
-                    'http' => [
-                        'header'  => "Content-type: application/json\r\n",
-                        'method'  => 'POST',
-                        'content' => json_encode([
-                            'model' => $model,
-                            'messages' => $messages,
-                            'stream' => true,
-                            'api_keys' => $request->input('api_keys', []) // <--- ADDED: Pass keys to Python
-                        ]),
-                        'timeout' => 300 
-                    ]
-                ];
-                
-                $context = stream_context_create($options);
-                $stream = @fopen($url, 'r', false, $context);
-
-                if (!$stream) {
-                    $error = error_get_last();
-                    echo "data: " . json_encode(['error' => 'Failed to connect to AI server: ' . ($error['message'] ?? 'Unknown error')]) . "\n\n";
-                    ob_flush();
-                    flush();
-                    return;
-                }
-
-                while (!feof($stream)) {
-                    $line = fgets($stream);
-                    if ($line) {
-                        echo "data: " . trim($line) . "\n\n";
-                        if (ob_get_level() > 0) ob_flush();
-                        flush();
+                // Loop through messages to segregate System vs User/Model
+                foreach ($request->messages as $msg) {
+                    if ($msg['role'] === 'system') {
+                        $systemInstruction = ['parts' => [['text' => $msg['content']]]];
+                    } else {
+                        // Map 'assistant' -> 'model'
+                        $role = ($msg['role'] === 'assistant') ? 'model' : 'user';
+                        $geminiMessages[] = [
+                            'role' => $role,
+                            'parts' => [['text' => $msg['content']]]
+                        ];
                     }
                 }
-                
-                fclose($stream);
-                echo "data: [DONE]\n\n";
-                if (ob_get_level() > 0) ob_flush();
-                flush();
 
-            }, 200, [
-                'Content-Type' => 'text/event-stream',
-                'Cache-Control' => 'no-cache',
-                'Connection' => 'keep-alive',
-                'X-Accel-Buffering' => 'no'
-            ]);
-        }
-
-        // --- STANDARD MODE (Non-Streaming Fallback) ---
-        try {
-            $startTime = microtime(true);
-            
-            $response = Http::timeout(300)->post($this->inferenceUrl . '/v1/chat', [
-                'messages' => $messages,
-                'model' => $model,
-                'stream' => false,
-                'api_keys' => $request->input('api_keys', []) // <--- ADDED: Pass keys to Python
-            ]);
-            
-            $latency = (microtime(true) - $startTime) * 1000;
-            
-            if (!$response->successful()) {
-                $errorBody = $response->json();
-                $errorMessage = $errorBody['detail'] ?? $response->body();
-                throw new \Exception("AI Server Error: " . $errorMessage);
+                $payload = ['contents' => $geminiMessages];
+                if ($systemInstruction) {
+                    $payload['systemInstruction'] = $systemInstruction;
+                }
+            } 
+            // B. OLLAMA
+            elseif ($config['provider'] === 'ollama') {
+                $payload = [
+                    'model' => $config['model_name'],
+                    'messages' => $request->messages,
+                    'stream' => false,
+                ];
+            } 
+            // C. STANDARD (OpenAI)
+            else {
+                $payload = [
+                    'model' => $config['model_name'],
+                    'messages' => $request->messages,
+                    'stream' => false, 
+                    'max_tokens' => 2048
+                ];
             }
-            
-            $result = $response->json();
-            
-            UsageLog::create([
-                'user_id' => $user->id,
-                'request_type' => 'chat',
-                'model_used' => $model,
-                'tokens_input' => $result['prompt_eval_count'] ?? 0,
-                'tokens_output' => $result['eval_count'] ?? 0,
-                'latency_ms' => $latency,
-                'success' => true,
-                'ip_address' => $request->ip(),
-            ]);
-            
-            return response()->json([
-                'message' => $result['message'] ?? $result,
-                'model' => $model,
-                'tokens' => $result['eval_count'] ?? 0,
-                'latency_ms' => round($latency, 2),
-                'remaining_requests' => $rateLimitCheck['remaining']
-            ]);
 
-        } catch (\Illuminate\Http\Client\ConnectionException $e) {
-             UsageLog::create([
-                'user_id' => $user->id,
-                'request_type' => 'chat',
-                'model_used' => $model,
-                'success' => false,
-                'error_message' => 'Connection Timeout',
-            ]);
+            $response = Http::withHeaders($config['headers'])
+                ->timeout(120)
+                ->post($config['url'], $payload);
+
+            if (!$response->successful()) {
+                throw new \Exception('AI Provider Error: ' . $response->body());
+            }
+
+            $data = $response->json();
+            $content = '';
+
+            if ($config['provider'] === 'gemini') {
+                $content = $data['candidates'][0]['content']['parts'][0]['text'] ?? '';
+            } else {
+                $content = $data['choices'][0]['message']['content'] ?? $data['message']['content'] ?? '';
+            }
 
             return response()->json([
-                'error' => 'Connection Timeout',
-                'message' => "The model '$model' is taking too long to load. Try a smaller model.",
-                'details' => $e->getMessage()
-            ], 504);
-            
+                'message' => ['role' => 'assistant', 'content' => $content],
+                'model' => $model
+            ]);
+
         } catch (\Exception $e) {
-            UsageLog::create([
-                'user_id' => $user->id,
-                'request_type' => 'chat',
-                'model_used' => $model,
-                'success' => false,
-                'error_message' => $e->getMessage(),
-            ]);
-            
-            Log::error("Chat API Failed: " . $e->getMessage());
-            
-            return response()->json([
-                'error' => 'Chat failed',
-                'message' => 'Failed to process chat request.',
-                'details' => $e->getMessage()
-            ], 500);
+            return response()->json(['error' => $e->getMessage()], 500);
         }
     }
     
     /**
-     * Code review endpoint
+     * Code Review
      */
     public function review(Request $request)
     {
-        // ... (validation logic same as before) ...
-        $validator = Validator::make($request->all(), [
-            'code' => 'required|string|max:20000',
-            'language' => 'required|string|max:50',
-            'model' => 'nullable|string|max:100',
+        $request->validate([
+            'code' => 'required|string',
+            'language' => 'required|string',
+            'model' => 'nullable|string',
             'review_type' => 'nullable|array',
-            'review_type.*' => 'string|in:security,performance,best_practices,bugs,style',
+            'api_keys' => 'nullable|array'
         ]);
 
-        if ($validator->fails()) {
-            return response()->json(['error' => 'Validation failed', 'messages' => $validator->errors()], 422);
-        }
-        
         $user = $request->user();
         $rateLimitCheck = $this->checkRateLimit($user);
-        
         if (!$rateLimitCheck['allowed']) {
-            return response()->json(['error' => 'Rate limit exceeded', 'retry_after' => $rateLimitCheck['retry_after']], 429);
+            return response()->json(['error' => 'Rate limit exceeded'], 429);
         }
-        
-        $userPreferences = $user->preferences;
-        $model = $request->model ?? ($userPreferences ? $userPreferences->preferred_model : 'codellama:7b');
+
+        $model = $request->model ?? 'gpt-4o';
+        $apiKeys = $request->input('api_keys', []);
         
         $reviewTypes = $request->review_type ?? ['security', 'performance', 'best_practices'];
         $prompt = "Review the following {$request->language} code for " . implode(', ', $reviewTypes) . ":\n\n{$request->code}\n\nProvide a detailed review with specific suggestions.";
-        
+
+        $config = $this->getProviderConfig($model, $apiKeys);
+        if (!$config) return response()->json(['error' => 'Missing API Key'], 400);
+
         try {
-            $startTime = microtime(true);
-            
-            $response = Http::timeout(120)->post($this->inferenceUrl . '/v1/chat', [
-                'messages' => [
-                    ['role' => 'system', 'content' => 'You are an expert code reviewer.'],
-                    ['role' => 'user', 'content' => $prompt]
-                ],
-                'model' => $model,
-                'stream' => false,
-                'api_keys' => $request->input('api_keys', []) // <--- ADDED
-            ]);
-            
-            // ... (rest of review logic remains same) ...
-            $latency = (microtime(true) - $startTime) * 1000;
-            
-            if (!$response->successful()) {
-                throw new \Exception('Review API failed: ' . $response->body());
+            $payload = [];
+            if ($config['provider'] === 'gemini') {
+                $payload = ['contents' => [['role' => 'user', 'parts' => [['text' => "You are an expert code reviewer.\n" . $prompt]]]]];
+            } else {
+                $payload = [
+                    'model' => $config['model_name'],
+                    'messages' => [
+                        ['role' => 'system', 'content' => 'You are an expert code reviewer.'],
+                        ['role' => 'user', 'content' => $prompt]
+                    ],
+                    'max_tokens' => 2048
+                ];
             }
-            
+
+            $response = Http::withHeaders($config['headers'])->timeout(120)->post($config['url'], $payload);
+
+            if (!$response->successful()) throw new \Exception($response->body());
+
             $result = $response->json();
-            
-            UsageLog::create([
-                'user_id' => $user->id,
-                'request_type' => 'review',
-                'model_used' => $model,
-                'tokens_output' => $result['eval_count'] ?? 0,
-                'latency_ms' => $latency,
-                'success' => true,
-            ]);
-            
+            $content = '';
+
+            if ($config['provider'] === 'gemini') {
+                $content = $result['candidates'][0]['content']['parts'][0]['text'] ?? 'No review generated';
+            } else {
+                $content = $result['choices'][0]['message']['content'] ?? 'No review generated';
+            }
+
             return response()->json([
-                'review' => $result['message']['content'] ?? 'No review generated',
+                'review' => $content,
                 'model' => $model,
-                'review_types' => $reviewTypes,
-                'latency_ms' => round($latency, 2),
                 'remaining_requests' => $rateLimitCheck['remaining']
             ]);
-            
+
         } catch (\Exception $e) {
-            // ... (logging)
-            return response()->json(['error' => 'Review failed', 'message' => 'Failed to generate code review.', 'details' => $e->getMessage()], 500);
+            return response()->json(['error' => 'Review failed', 'details' => $e->getMessage()], 500);
         }
     }
     
     /**
-     * Debug help endpoint
+     * Debug Code
      */
     public function debug(Request $request)
     {
-        // ... (validation logic same as before) ...
-        $validator = Validator::make($request->all(), [
-            'code' => 'required|string|max:20000',
-            'error_message' => 'required|string|max:2000',
-            'language' => 'required|string|max:50',
-            'model' => 'nullable|string|max:100',
+        $request->validate([
+            'code' => 'required|string',
+            'error_message' => 'required|string',
+            'language' => 'required|string',
+            'model' => 'nullable|string',
+            'api_keys' => 'nullable|array'
         ]);
 
-        if ($validator->fails()) {
-            return response()->json(['error' => 'Validation failed', 'messages' => $validator->errors()], 422);
-        }
-        
         $user = $request->user();
         $rateLimitCheck = $this->checkRateLimit($user);
-        
-        if (!$rateLimitCheck['allowed']) {
-            return response()->json(['error' => 'Rate limit exceeded', 'retry_after' => $rateLimitCheck['retry_after']], 429);
-        }
-        
-        $userPreferences = $user->preferences;
-        $model = $request->model ?? ($userPreferences ? $userPreferences->preferred_model : 'codellama:7b');
+        if (!$rateLimitCheck['allowed']) return response()->json(['error' => 'Rate limit exceeded'], 429);
+
+        $model = $request->model ?? 'gpt-4o';
+        $apiKeys = $request->input('api_keys', []);
         
         $prompt = "Debug this {$request->language} code that produces the following error:\n\nError: {$request->error_message}\n\nCode:\n{$request->code}\n\nExplain the issue and provide a fix.";
-        
+
+        $config = $this->getProviderConfig($model, $apiKeys);
+        if (!$config) return response()->json(['error' => 'Missing API Key'], 400);
+
         try {
-            $response = Http::timeout(120)->post($this->inferenceUrl . '/v1/chat', [
-                'messages' => [
-                    ['role' => 'system', 'content' => 'You are an expert debugger.'],
-                    ['role' => 'user', 'content' => $prompt]
-                ],
-                'model' => $model,
-                'api_keys' => $request->input('api_keys', []) // <--- ADDED
-            ]);
-            
-            if (!$response->successful()) {
-                throw new \Exception('Debug API failed');
+            $payload = [];
+            if ($config['provider'] === 'gemini') {
+                $payload = ['contents' => [['role' => 'user', 'parts' => [['text' => "You are an expert debugger.\n" . $prompt]]]]];
+            } else {
+                $payload = [
+                    'model' => $config['model_name'],
+                    'messages' => [
+                        ['role' => 'system', 'content' => 'You are an expert debugger.'],
+                        ['role' => 'user', 'content' => $prompt]
+                    ],
+                    'max_tokens' => 2048
+                ];
             }
-            
+
+            $response = Http::withHeaders($config['headers'])->timeout(120)->post($config['url'], $payload);
+
+            if (!$response->successful()) throw new \Exception($response->body());
+
             $result = $response->json();
-            
+            $content = '';
+
+            if ($config['provider'] === 'gemini') {
+                $content = $result['candidates'][0]['content']['parts'][0]['text'] ?? 'No solution found';
+            } else {
+                $content = $result['choices'][0]['message']['content'] ?? 'No solution found';
+            }
+
             return response()->json([
-                'solution' => $result['message']['content'] ?? 'No solution generated',
+                'solution' => $content,
                 'model' => $model,
                 'remaining_requests' => $rateLimitCheck['remaining']
             ]);
-            
+
         } catch (\Exception $e) {
-            return response()->json(['error' => 'Debug failed', 'message' => 'Failed to generate debug solution.', 'details' => $e->getMessage()], 500);
+            return response()->json(['error' => 'Debug failed', 'details' => $e->getMessage()], 500);
         }
     }
     
     /**
-     * Code explanation endpoint
+     * Explain Code
      */
     public function explain(Request $request)
     {
-        // ... (validation logic same as before) ...
-        $validator = Validator::make($request->all(), [
-            'code' => 'required|string|max:20000',
-            'language' => 'required|string|max:50',
-            'model' => 'nullable|string|max:100',
+        $request->validate([
+            'code' => 'required|string',
+            'language' => 'required|string',
+            'model' => 'nullable|string',
+            'api_keys' => 'nullable|array'
         ]);
 
-        if ($validator->fails()) {
-            return response()->json(['error' => 'Validation failed', 'messages' => $validator->errors()], 422);
-        }
-        
         $user = $request->user();
         $rateLimitCheck = $this->checkRateLimit($user);
-        
-        if (!$rateLimitCheck['allowed']) {
-            return response()->json(['error' => 'Rate limit exceeded', 'retry_after' => $rateLimitCheck['retry_after']], 429);
-        }
-        
-        $userPreferences = $user->preferences;
-        $model = $request->model ?? ($userPreferences ? $userPreferences->preferred_model : 'codellama:7b');
+        if (!$rateLimitCheck['allowed']) return response()->json(['error' => 'Rate limit exceeded'], 429);
+
+        $model = $request->model ?? 'gpt-4o';
+        $apiKeys = $request->input('api_keys', []);
         
         $prompt = "Explain this {$request->language} code in detail:\n\n{$request->code}";
-        
+
+        $config = $this->getProviderConfig($model, $apiKeys);
+        if (!$config) return response()->json(['error' => 'Missing API Key'], 400);
+
         try {
-            $response = Http::timeout(120)->post($this->inferenceUrl . '/v1/chat', [
-                'messages' => [
-                    ['role' => 'system', 'content' => 'You are a helpful programming teacher.'],
-                    ['role' => 'user', 'content' => $prompt]
-                ],
-                'model' => $model,
-                'api_keys' => $request->input('api_keys', []) // <--- ADDED
-            ]);
-            
-            if (!$response->successful()) {
-                throw new \Exception('Explain API failed');
+            $payload = [];
+            if ($config['provider'] === 'gemini') {
+                $payload = ['contents' => [['role' => 'user', 'parts' => [['text' => "You are a helpful programming teacher.\n" . $prompt]]]]];
+            } else {
+                $payload = [
+                    'model' => $config['model_name'],
+                    'messages' => [
+                        ['role' => 'system', 'content' => 'You are a helpful programming teacher.'],
+                        ['role' => 'user', 'content' => $prompt]
+                    ],
+                    'max_tokens' => 2048
+                ];
             }
-            
+
+            $response = Http::withHeaders($config['headers'])->timeout(120)->post($config['url'], $payload);
+
+            if (!$response->successful()) throw new \Exception($response->body());
+
             $result = $response->json();
-            
+            $content = '';
+
+            if ($config['provider'] === 'gemini') {
+                $content = $result['candidates'][0]['content']['parts'][0]['text'] ?? 'No explanation found';
+            } else {
+                $content = $result['choices'][0]['message']['content'] ?? 'No explanation found';
+            }
+
             return response()->json([
-                'explanation' => $result['message']['content'] ?? 'No explanation generated',
+                'explanation' => $content,
                 'model' => $model,
                 'remaining_requests' => $rateLimitCheck['remaining']
             ]);
-            
+
         } catch (\Exception $e) {
-            return response()->json(['error' => 'Explanation failed', 'message' => 'Failed to generate code explanation.', 'details' => $e->getMessage()], 500);
+            return response()->json(['error' => 'Explanation failed', 'details' => $e->getMessage()], 500);
         }
     }
 }

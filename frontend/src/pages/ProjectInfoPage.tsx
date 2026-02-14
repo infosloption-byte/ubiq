@@ -110,7 +110,7 @@ export default function ProjectInfoPage() {
               return;
           }
 
-          const response = await axios.get(`http://localhost:8000/api/v1/projects/${id}/download`, {
+          const response = await axios.get(`${import.meta.env.VITE_API_URL}/projects/${id}/download`, {
               headers: { Authorization: `Bearer ${token}` },
               responseType: 'blob'
           });
@@ -156,7 +156,7 @@ export default function ProjectInfoPage() {
           if (currentPath) formData.append('parent_path', currentPath);
 
           try {
-              await axios.post(`http://localhost:8000/api/v1/projects/${id}/files/upload`, formData, {
+              await axios.post(`${import.meta.env.VITE_API_URL}/projects/${id}/files/upload`, formData, {
                   headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'multipart/form-data' }
               });
           } catch (e) { console.error(`Failed ${file.name}`, e); }

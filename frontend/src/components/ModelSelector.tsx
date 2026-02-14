@@ -1,10 +1,12 @@
 import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
+import axios from 'axios';
 import { aiAPI, userAPI, authAPI } from '../services/api';
 import { useAuthStore } from '../stores/authStore';
 import { 
-  ChevronUpIcon, CheckIcon, CpuChipIcon, ArrowPathIcon, 
-  CloudIcon, BoltIcon, ServerIcon, LockClosedIcon 
+  ChevronUpIcon, ChevronDownIcon, CheckIcon, CpuChipIcon, ArrowPathIcon, 
+  CloudIcon, BoltIcon, ServerIcon, LockClosedIcon,
+  Cog6ToothIcon 
 } from '@heroicons/react/24/outline';
 
 interface Model {
@@ -14,7 +16,14 @@ interface Model {
   parameter_size?: string;
 }
 
-export default function ModelSelector() {
+interface ModelSelectorProps {
+    aiMode: string; // 'cloud' or 'local'
+    selectedModel: string;
+    onSelectModel: (model: string) => void;
+    menuPosition?: 'top' | 'bottom'; // NEW: Controls which way the dropdown opens
+}
+
+export default function ModelSelector({ aiMode, selectedModel, onSelectModel, menuPosition = 'top' }: ModelSelectorProps) {
   const navigate = useNavigate();
   const { user, setUser } = useAuthStore();
   const [models, setModels] = useState<Model[]>([]);
@@ -23,6 +32,7 @@ export default function ModelSelector() {
   const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
   const dropdownRef = useRef<HTMLDivElement>(null);
 
+  // Close dropdown when clicking outside
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
       if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
@@ -33,63 +43,87 @@ export default function ModelSelector() {
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
+  // Load API keys from local storage
   useEffect(() => {
-    loadModels();
-    loadKeys();
-  }, []);
-
-  const loadKeys = () => {
     const stored = localStorage.getItem('ubiq_api_keys');
     if (stored) {
         try { setApiKeys(JSON.parse(stored)); } catch (e) {}
     }
-  };
+  }, [isOpen]); // Reload keys every time dropdown opens to catch updates
+
+  // Fetch models whenever aiMode changes
+  useEffect(() => {
+    loadModels();
+  }, [aiMode]);
 
   const loadModels = async () => {
+    setLoading(true);
+    setModels([]);
+
     try {
-      const response = await aiAPI.getModels();
-      // Ensure we set the array correctly
-      if (response.data && Array.isArray(response.data.models)) {
-          setModels(response.data.models);
-      } else {
-          setModels([]);
-      }
+        if (aiMode === 'local') {
+            // --- 1. LOCAL OLLAMA FETCH ---
+            try {
+                const response = await axios.get('http://localhost:11434/api/tags');
+                if (response.data && Array.isArray(response.data.models)) {
+                    const ollamaModels: Model[] = response.data.models.map((m: any) => ({
+                        name: m.name,
+                        provider: 'Ollama',
+                        size: m.size ? `${(m.size / 1024 / 1024 / 1024).toFixed(1)}GB` : undefined,
+                        parameter_size: m.details?.parameter_size || 'Unknown'
+                    }));
+                    setModels(ollamaModels);
+                    
+                    if (ollamaModels.length > 0 && (!selectedModel || !ollamaModels.find(m => m.name === selectedModel))) {
+                        onSelectModel(ollamaModels[0].name);
+                    }
+                }
+            } catch (err) {
+                console.error("Failed to connect to Local Ollama:", err);
+                setModels([]); 
+            }
+        } else {
+            // --- 2. CLOUD BACKEND FETCH ---
+            const response = await aiAPI.getModels();
+            if (response.data && Array.isArray(response.data.models)) {
+                const cloudModels = response.data.models;
+                setModels(cloudModels);
+
+                const pref = user?.preferences?.preferred_model;
+                if (pref && cloudModels.find((m: any) => m.name === pref)) {
+                     if (!selectedModel) onSelectModel(pref);
+                } else if (cloudModels.length > 0 && !selectedModel) {
+                     onSelectModel(cloudModels[0].name);
+                }
+            }
+        }
     } catch (error) {
       console.error('Failed to load models:', error);
-      // Optional: Set fallback models if API completely fails
       setModels([]); 
+    } finally {
+        setLoading(false);
     }
   };
 
-  const handleSelectModel = async (model: Model) => {
-    // API Key Check Logic
-    if (model.provider !== 'Ollama') {
-        const keyMap: Record<string, string> = {
-            'xAI': 'grok', 'Mistral': 'mistral', 'OpenRouter': 'openrouter', 'Google': 'google'
-        };
-        const keyName = keyMap[model.provider];
-        if (keyName && (!apiKeys[keyName] || apiKeys[keyName].trim() === '')) {
-            if (confirm(`${model.provider} API Key missing. Configure it now?`)) {
-                navigate('/settings');
-            }
-            setIsOpen(false);
-            return;
-        }
+  const handleSelectClick = async (model: Model, keyMissing: boolean) => {
+    // If key is missing, redirect to settings instead of selecting
+    if (aiMode === 'cloud' && keyMissing) {
+        setIsOpen(false);
+        navigate('/settings');
+        return;
     }
 
-    if (loading) return;
-    setLoading(true);
-    
-    try {
-      await userAPI.updatePreferences({ preferred_model: model.name });
-      const meResponse = await authAPI.me();
-      if (meResponse.data.user) setUser(meResponse.data.user);
-      setIsOpen(false);
-    } catch (error) {
-      console.error('Failed to update model:', error);
-    } finally {
-      setLoading(false);
+    onSelectModel(model.name);
+
+    if (aiMode === 'cloud') {
+        try {
+            await userAPI.updatePreferences({ preferred_model: model.name });
+            const meResponse = await authAPI.me();
+            if (meResponse.data.user) setUser(meResponse.data.user);
+        } catch (e) { console.error("Failed to save preference", e); }
     }
+    
+    setIsOpen(false);
   };
 
   const getDisplayName = (id: string) => {
@@ -98,59 +132,70 @@ export default function ModelSelector() {
       return parts.length > 1 ? parts[parts.length - 1] : id; 
   };
 
-  const currentModelId = user?.preferences?.preferred_model;
-  // Fallback to finding the model object, or creating a temporary one for display
-  const currentModel = models.find(m => m.name === currentModelId) 
-      || { name: currentModelId || '', provider: 'Unknown' };
-      
-  const displayLabel = getDisplayName(currentModel.name || 'Select Model');
-
-  // --- GROUPING LOGIC ---
-  const localModels = models.filter(m => m.provider === 'Ollama');
-  const cloudModels = models.filter(m => m.provider !== 'Ollama');
+  const displayLabel = getDisplayName(selectedModel || 'Select Model');
+  const displayModels = models; 
 
   const isKeyMissing = (provider: string) => {
-      const keyMap: Record<string, string> = { 'xAI': 'grok', 'Mistral': 'mistral', 'OpenRouter': 'openrouter', 'Google': 'google' };
+      if (aiMode === 'local') return false;
+      // Map 'xAI' -> 'grok', 'Mistral' -> 'mistral', etc. matching SettingsPage keys
+      const keyMap: Record<string, string> = { 
+          'xAI': 'grok', 
+          'Mistral': 'mistral', 
+          'OpenRouter': 'openrouter', 
+          'Google': 'google' 
+      };
       const keyName = keyMap[provider];
       return keyName && (!apiKeys[keyName] || apiKeys[keyName].trim() === '');
   };
 
   const ModelOption = ({ model }: { model: Model }) => {
-      const isSelected = currentModelId === model.name;
-      const isCloud = model.provider !== 'Ollama';
+      const isSelected = selectedModel === model.name;
+      const isCloud = aiMode === 'cloud';
       const keyMissing = isCloud && isKeyMissing(model.provider);
 
       return (
         <button
-          onClick={() => handleSelectModel(model)}
+          onClick={() => handleSelectClick(model, keyMissing)}
           disabled={loading}
           className={`w-full text-left px-3 py-2.5 rounded-lg flex items-center gap-3 transition-colors group relative ${
-            isSelected ? 'bg-ubiq-accent/10 border border-ubiq-accent/20' : 'hover:bg-white/5 border border-transparent'
-          } ${keyMissing ? 'opacity-70' : ''}`}
+            isSelected 
+                ? 'bg-ubiq-accent/10 border border-ubiq-accent/20' 
+                : 'hover:bg-white/5 border border-transparent'
+          } ${keyMissing ? 'opacity-80' : ''}`}
         >
+          {/* Icon Status */}
           <div className={`p-1.5 rounded-md flex-shrink-0 ${
+             keyMissing ? 'bg-red-500/10 text-red-400' : 
              isSelected ? 'bg-ubiq-accent text-white' : 'bg-ubiq-800 text-slate-400 group-hover:text-slate-300'
           }`}>
-            {keyMissing ? <LockClosedIcon className="w-4 h-4 text-red-400" /> : 
+            {keyMissing ? <LockClosedIcon className="w-4 h-4" /> : 
              isCloud ? <CloudIcon className="w-4 h-4" /> : <CpuChipIcon className="w-4 h-4" />}
           </div>
           
           <div className="flex-1 min-w-0">
             <div className="flex items-center justify-between">
               <span className={`text-xs font-semibold truncate ${
-                isSelected ? 'text-ubiq-accent' : keyMissing ? 'text-slate-400' : 'text-slate-200'
+                keyMissing ? 'text-slate-400' : isSelected ? 'text-ubiq-accent' : 'text-slate-200'
               }`}>
                 {getDisplayName(model.name)}
               </span>
-              {isSelected && <CheckIcon className="w-3.5 h-3.5 text-ubiq-accent" />}
+              {isSelected && !keyMissing && <CheckIcon className="w-3.5 h-3.5 text-ubiq-accent" />}
             </div>
             
-            <div className="flex items-center gap-2 text-[10px] text-slate-500 mt-0.5">
-              <span className={`px-1.5 py-0.5 rounded ${isCloud ? 'bg-indigo-500/10 text-indigo-400' : 'bg-emerald-500/10 text-emerald-400'}`}>
+            <div className="flex items-center justify-between mt-0.5">
+              <span className={`px-1.5 py-0.5 rounded text-[10px] ${isCloud ? 'bg-indigo-500/10 text-indigo-400' : 'bg-emerald-500/10 text-emerald-400'}`}>
                   {model.provider}
               </span>
-              {model.parameter_size && model.parameter_size !== 'Unknown' && (
-                  <span className="text-slate-600">{model.parameter_size}</span>
+              
+              {/* ACTION CALL TO ACTION or SIZE */}
+              {keyMissing ? (
+                  <span className="text-[10px] font-bold text-red-400 bg-red-500/10 px-2 py-0.5 rounded flex items-center gap-1 hover:bg-red-500/20 transition-colors">
+                      Setup Key &rarr;
+                  </span>
+              ) : (
+                  <span className="text-[10px] text-slate-600">
+                      {model.parameter_size !== 'Unknown' ? model.parameter_size : model.size}
+                  </span>
               )}
             </div>
           </div>
@@ -159,32 +204,39 @@ export default function ModelSelector() {
   };
 
   return (
-    <div className="relative" ref={dropdownRef}>
+    <div className="relative w-full" ref={dropdownRef}>
       {/* Trigger Button */}
       <button
         onClick={() => setIsOpen(!isOpen)}
         disabled={loading}
-        className="flex items-center gap-2 bg-ubiq-900 hover:bg-ubiq-800 border border-white/10 rounded-lg px-3 py-1.5 text-xs font-medium transition-all text-slate-300 hover:text-white group min-w-[180px]"
+        className="w-full flex items-center justify-between gap-2 bg-ubiq-900 hover:bg-ubiq-800 border border-white/10 rounded-lg px-3 py-2 text-xs font-medium transition-all text-slate-300 hover:text-white group min-w-[180px]"
         title="Change AI Model"
       >
-        {loading ? (
-           <ArrowPathIcon className="w-3.5 h-3.5 animate-spin text-ubiq-accent" />
-        ) : currentModel?.provider !== 'Ollama' && currentModel?.provider !== 'Unknown' ? (
-           <CloudIcon className="w-3.5 h-3.5 text-indigo-400" />
-        ) : (
-           <CpuChipIcon className="w-3.5 h-3.5 text-emerald-400" />
-        )}
-        
-        <div className="flex flex-col items-start flex-1 min-w-0">
-            <span className="truncate w-full text-left">{loading ? 'Switching...' : displayLabel}</span>
+        <div className="flex items-center gap-2 overflow-hidden">
+            {loading ? (
+               <ArrowPathIcon className="w-3.5 h-3.5 animate-spin text-ubiq-accent shrink-0" />
+            ) : aiMode === 'cloud' ? (
+               <CloudIcon className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+            ) : (
+               <CpuChipIcon className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+            )}
+            
+            <span className="truncate text-left">{loading ? 'Loading...' : displayLabel}</span>
         </div>
         
-        <ChevronUpIcon className={`w-3 h-3 text-slate-500 transition-transform duration-200 ${isOpen ? 'rotate-180' : ''}`} />
+        {/* Dynamic Chevron based on menu position */}
+        {menuPosition === 'top' ? (
+            <ChevronUpIcon className={`w-3 h-3 shrink-0 text-slate-500 transition-transform duration-200 ${isOpen ? 'rotate-180' : ''}`} />
+        ) : (
+            <ChevronDownIcon className={`w-3 h-3 shrink-0 text-slate-500 transition-transform duration-200 ${isOpen ? 'rotate-180' : ''}`} />
+        )}
       </button>
 
-      {/* Dropdown Menu */}
+      {/* Dynamic Dropdown Menu Positioning */}
       {isOpen && (
-        <div className="absolute bottom-full left-0 mb-2 w-80 bg-ubiq-950/95 backdrop-blur-xl border border-white/10 rounded-xl shadow-2xl z-50 animate-fade-in origin-bottom-left overflow-hidden ring-1 ring-black/50">
+        <div className={`absolute left-0 w-full min-w-[280px] bg-ubiq-950/95 backdrop-blur-xl border border-white/10 rounded-xl shadow-2xl z-[100] animate-fade-in overflow-hidden ring-1 ring-black/50 ${
+            menuPosition === 'top' ? 'bottom-full mb-2 origin-bottom-left' : 'top-full mt-2 origin-top-left'
+        }`}>
           
           <div className="px-4 py-3 border-b border-white/5 bg-white/5 flex justify-between items-center">
             <h3 className="text-[10px] font-bold text-slate-400 uppercase tracking-widest flex items-center gap-2">
@@ -193,44 +245,42 @@ export default function ModelSelector() {
             <span className="text-[10px] text-slate-500">{models.length} Ready</span>
           </div>
           
-          <div className="max-h-[400px] overflow-y-auto custom-scrollbar p-2 space-y-4">
+          {/* Scrollable Model List */}
+          <div className="max-h-[350px] overflow-y-auto custom-scrollbar p-2 space-y-1">
             {models.length === 0 ? (
               <div className="px-4 py-8 text-sm text-slate-500 text-center flex flex-col items-center gap-2">
-                  <ArrowPathIcon className="w-5 h-5 animate-spin"/> Loading available models...
+                  {aiMode === 'local' ? (
+                      <>
+                        <p className="text-red-400">Ollama not detected</p>
+                        <p className="text-[10px]">Run: <code className="bg-black/30 px-1 rounded">ollama serve</code></p>
+                      </>
+                  ) : (
+                      <><ArrowPathIcon className="w-5 h-5 animate-spin"/> Loading available models...</>
+                  )}
               </div>
             ) : (
-              <>
-                {/* --- CLOUD MODELS GROUP --- */}
-                {cloudModels.length > 0 && (
-                    <div>
-                        <div className="px-2 pb-1.5 pt-1 text-[10px] font-bold text-indigo-400 uppercase tracking-wider flex items-center gap-1.5">
-                            <BoltIcon className="w-3 h-3" /> Cloud Intelligence
-                        </div>
-                        <div className="space-y-1">
-                            {cloudModels.map(m => <ModelOption key={m.name} model={m} />)}
-                        </div>
-                    </div>
-                )}
-
-                {/* --- LOCAL MODELS GROUP --- */}
-                {localModels.length > 0 && (
-                    <div className={cloudModels.length > 0 ? "pt-2 border-t border-white/5" : ""}>
-                        <div className="px-2 pb-1.5 pt-2 text-[10px] font-bold text-emerald-500/80 uppercase tracking-wider flex items-center gap-1.5">
-                            <CpuChipIcon className="w-3 h-3" /> Local Free Models
-                        </div>
-                        <div className="space-y-1">
-                            {localModels.map(m => <ModelOption key={m.name} model={m} />)}
-                        </div>
-                    </div>
-                )}
-              </>
+              <div>
+                <div className={`px-2 pb-1.5 pt-1 text-[10px] font-bold uppercase tracking-wider flex items-center gap-1.5 ${aiMode === 'cloud' ? 'text-indigo-400' : 'text-emerald-400'}`}>
+                    {aiMode === 'cloud' ? <><BoltIcon className="w-3 h-3" /> Cloud Intelligence</> : <><CpuChipIcon className="w-3 h-3" /> Local Models</>}
+                </div>
+                <div className="space-y-1">
+                    {displayModels.map(m => <ModelOption key={m.name} model={m} />)}
+                </div>
+              </div>
             )}
           </div>
-          
-          <div className="px-4 py-2 border-t border-white/5 bg-ubiq-900/50 text-[10px] text-slate-500 flex justify-between">
-            <span>Server: <strong>Online</strong></span>
-            <button onClick={() => navigate('/settings')} className="hover:text-white transition-colors">Manage Keys &rarr;</button>
-          </div>
+
+          {/* Footer for Cloud Mode */}
+          {aiMode === 'cloud' && (
+              <div className="border-t border-white/5 bg-black/20 p-2">
+                  <button 
+                    onClick={() => { setIsOpen(false); navigate('/settings'); }}
+                    className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-xs text-slate-300 hover:text-white transition-colors"
+                  >
+                      <Cog6ToothIcon className="w-3.5 h-3.5" /> Configure API Keys
+                  </button>
+              </div>
+          )}
         </div>
       )}
     </div>

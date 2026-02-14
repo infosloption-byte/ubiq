@@ -4,12 +4,14 @@ import { useAuthStore } from '../stores/authStore';
 import { authAPI, projectAPI, userAPI } from '../services/api';
 import Layout from '../components/Layout';
 import CreateProjectDialog from '../components/CreateProjectDialog'; 
+import AiGeneratorModal from '../components/AiGeneratorModal'; // <--- IMPORT THIS
 import { 
   FolderIcon, 
   DocumentTextIcon, 
   ChatBubbleLeftRightIcon, 
   PlusIcon,
-  ClockIcon
+  ClockIcon,
+  SparklesIcon // <--- IMPORT THIS
 } from '@heroicons/react/24/outline';
 
 interface Project {
@@ -35,10 +37,10 @@ export default function DashboardPage() {
   const [stats, setStats] = useState<Stats | null>(null);
   const [loading, setLoading] = useState(true);
   
-  // State for Dialog
+  // State for Dialogs
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
+  const [isAiModalOpen, setIsAiModalOpen] = useState(false); // <--- NEW STATE
 
-  // Define loadData outside useEffect so we can pass it to the dialog
   const loadData = async () => {
     try {
       const [userData, projectData, statsData] = await Promise.all([
@@ -77,19 +79,31 @@ export default function DashboardPage() {
       <div className="p-8 max-w-7xl mx-auto space-y-8">
         
         {/* Welcome Header */}
-        <div className="flex items-center justify-between">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div>
             <h1 className="text-2xl font-bold text-white">Dashboard</h1>
             <p className="text-slate-400 text-sm mt-1">Overview of your activity and projects</p>
           </div>
-          {/* Button opens modal */}
-          <button 
-            onClick={() => setIsCreateDialogOpen(true)}
-            className="btn-primary shadow-lg shadow-ubiq-accent/20 flex items-center gap-2 px-4 py-2 rounded-lg bg-ubiq-accent hover:bg-ubiq-accent-hover text-white transition-colors"
-          >
-            <PlusIcon className="w-5 h-5" />
-            <span>New Project</span>
-          </button>
+          
+          <div className="flex gap-3">
+            {/* AI Generator Button */}
+            <button 
+              onClick={() => setIsAiModalOpen(true)}
+              className="flex items-center gap-2 px-4 py-2 rounded-lg bg-purple-600 hover:bg-purple-500 text-white transition-all shadow-lg shadow-purple-900/20 font-medium text-sm"
+            >
+              <SparklesIcon className="w-5 h-5" />
+              <span>Generate with AI</span>
+            </button>
+
+            {/* Manual Create Button */}
+            <button 
+              onClick={() => setIsCreateDialogOpen(true)}
+              className="flex items-center gap-2 px-4 py-2 rounded-lg bg-ubiq-accent hover:bg-ubiq-accent-hover text-white transition-colors shadow-lg shadow-ubiq-accent/20 text-sm font-medium"
+            >
+              <PlusIcon className="w-5 h-5" />
+              <span>New Project</span>
+            </button>
+          </div>
         </div>
 
         {/* Stats Grid */}
@@ -119,14 +133,18 @@ export default function DashboardPage() {
                <FolderIcon className="w-12 h-12 text-slate-600 mx-auto mb-4" />
                <h3 className="text-white font-medium mb-1">No projects found</h3>
                <p className="text-slate-500 text-sm mb-4">Get started by creating your first AI-powered project.</p>
-               <button onClick={() => setIsCreateDialogOpen(true)} className="text-ubiq-accent hover:text-white text-sm font-medium">Create Project &rarr;</button>
+               
+               <div className="flex justify-center gap-3">
+                   <button onClick={() => setIsCreateDialogOpen(true)} className="text-ubiq-accent hover:text-white text-sm font-medium">Create Project</button>
+                   <span className="text-slate-600">|</span>
+                   <button onClick={() => setIsAiModalOpen(true)} className="text-purple-400 hover:text-white text-sm font-medium flex items-center gap-1"><SparklesIcon className="w-4 h-4"/> Generate with AI</button>
+               </div>
             </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {projects.map((project) => (
                 <Link 
                   key={project.id} 
-                  // LINK TO PROJECT INFO PAGE (Not Editor)
                   to={`/projects/${project.id}`} 
                   className="glass-panel p-5 rounded-xl hover:border-ubiq-accent/50 hover:bg-ubiq-900 transition-all group"
                 >
@@ -145,10 +163,19 @@ export default function DashboardPage() {
                   <p className="text-slate-500 text-xs mb-4 line-clamp-2 h-8">
                     {project.description || "No description provided."}
                   </p>
+                  {/* THIS LINE FOR THE TIMESTAMP */}
+                  <span className="text-[10px] text-slate-500 mt-1">
+                      Created: {new Date(project.created_at).toLocaleString('en-US', {
+                          month: 'short',
+                          day: 'numeric',
+                          hour: '2-digit',
+                          minute: '2-digit'
+                      })}
+                  </span>
                   
                   <div className="flex items-center text-xs text-slate-600 pt-4 border-t border-white/5">
                     <ClockIcon className="w-3.5 h-3.5 mr-1.5" />
-                    <span>Updated {new Date(project.updated_at).toLocaleDateString()}</span>
+                    <span>Last Updated {new Date(project.updated_at).toLocaleDateString()}</span>
                   </div>
                 </Link>
               ))}
@@ -156,14 +183,16 @@ export default function DashboardPage() {
           )}
         </div>
 
-        {/* Create Dialog */}
+        {/* --- MODALS --- */}
         <CreateProjectDialog 
             isOpen={isCreateDialogOpen} 
             onClose={() => setIsCreateDialogOpen(false)} 
-            onSuccess={() => {
-                loadData(); 
-                setIsCreateDialogOpen(false);
-            }} 
+            onSuccess={() => { loadData(); setIsCreateDialogOpen(false); }} 
+        />
+        
+        <AiGeneratorModal 
+            isOpen={isAiModalOpen} 
+            onClose={() => setIsAiModalOpen(false)} 
         />
 
       </div>

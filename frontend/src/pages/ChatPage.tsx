@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { useNavigate, useParams } from 'react-router-dom'; // Hooks for URL Sync
+import { useNavigate, useParams } from 'react-router-dom';
 import Layout from '../components/Layout';
 import ChatInterface from '../components/ChatInterface';
 import ConfirmDialog from '../components/ConfirmDialog';
@@ -12,7 +12,9 @@ import {
   SparklesIcon,
   XMarkIcon,
   ClockIcon,
-  PencilSquareIcon
+  PencilSquareIcon,
+  ServerStackIcon,
+  CpuChipIcon
 } from '@heroicons/react/24/outline';
 
 interface ChatSession {
@@ -24,7 +26,7 @@ interface ChatSession {
 
 export default function ChatPage() {
   const navigate = useNavigate();
-  const { sessionId } = useParams<{ sessionId: string }>(); // Read URL param
+  const { sessionId } = useParams<{ sessionId: string }>();
 
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [currentSession, setCurrentSession] = useState<number | null>(null);
@@ -35,6 +37,9 @@ export default function ChatPage() {
   const [isEditingTitle, setIsEditingTitle] = useState(false);
   const [editedTitle, setEditedTitle] = useState('');
   const titleInputRef = useRef<HTMLInputElement>(null);
+
+  // AI Mode State (Cloud vs Local)
+  const [aiMode, setAiMode] = useState(localStorage.getItem('ai_mode') || 'cloud');
 
   // Delete Modal State
   const [deleteModal, setDeleteModal] = useState<{ isOpen: boolean; sessionId: number | null }>({ 
@@ -67,7 +72,6 @@ export default function ChatPage() {
 
   const loadSessions = async () => {
     try {
-      // Calls getSessions without params -> Backend returns only Global chats (project_id=NULL)
       const response = await chatAPI.getSessions(); 
       setSessions(response.data.sessions || []);
     } catch (error) {
@@ -79,10 +83,8 @@ export default function ChatPage() {
 
   const handleNewSession = async () => {
     try {
-      // Create Global Chat (no project_id)
       const response = await chatAPI.createSession({ title: "New Chat" });
       await loadSessions();
-      // Navigate to new URL
       navigate(`/chat/${response.data.session.id}`);
       setShowMobileHistory(false);
     } catch (error) {
@@ -104,7 +106,6 @@ export default function ChatPage() {
       const updated = sessions.filter(s => s.id !== idToDelete);
       setSessions(updated);
       
-      // If deleting active session, redirect appropriately
       if (currentSession === idToDelete) {
           if (updated.length > 0) {
               navigate(`/chat/${updated[0].id}`);
@@ -120,13 +121,18 @@ export default function ChatPage() {
   };
 
   const selectSession = (id: number) => {
-    // Just navigate, the useEffect will handle state update
     navigate(`/chat/${id}`);
     setShowMobileHistory(false);
     setIsEditingTitle(false);
   };
 
-  // --- TITLE EDITING ---
+  // --- ACTIONS ---
+  const handleAiModeChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const mode = e.target.value;
+    setAiMode(mode);
+    localStorage.setItem('ai_mode', mode);
+  };
+
   const startEditing = () => {
     const session = sessions.find(s => s.id === currentSession);
     if (session) {
@@ -249,28 +255,45 @@ export default function ChatPage() {
             <div className="absolute top-0 left-0 right-0 h-14 md:h-16 z-30 flex items-center justify-between px-4 md:px-6 pointer-events-none">
                <div className="absolute inset-0 bg-gradient-to-b from-ubiq-950/95 via-ubiq-950/70 to-transparent backdrop-blur-[1px]"></div>
                
-               <div className="relative flex items-center gap-3 w-full pointer-events-auto">
-                 <button onClick={() => setShowMobileHistory(true)} className="md:hidden p-2 -ml-2 text-slate-400 hover:text-white">
-                   <ClockIcon className="w-5 h-5" />
-                 </button>
+               <div className="relative flex items-center justify-between w-full pointer-events-auto">
+                 <div className="flex items-center gap-3">
+                     <button onClick={() => setShowMobileHistory(true)} className="md:hidden p-2 -ml-2 text-slate-400 hover:text-white">
+                       <ClockIcon className="w-5 h-5" />
+                     </button>
 
-                 <div className="flex-1 min-w-0 flex items-center gap-2 group">
-                    {isEditingTitle ? (
-                        <input 
-                            ref={titleInputRef}
-                            type="text" 
-                            value={editedTitle}
-                            onChange={(e) => setEditedTitle(e.target.value)}
-                            onBlur={saveTitle}
-                            onKeyDown={handleTitleKeyDown}
-                            className="bg-ubiq-900 border border-ubiq-accent/50 text-white text-xs md:text-sm font-medium px-2 py-1 rounded-md w-full max-w-md focus:outline-none focus:ring-1 focus:ring-ubiq-accent shadow-lg"
-                        />
-                    ) : (
-                        <button onClick={startEditing} className="text-slate-300/90 font-medium text-xs md:text-sm tracking-wide truncate hover:text-white hover:bg-white/5 px-2 py-1 rounded-md transition-all flex items-center gap-2" title="Click to rename">
-                            {activeSessionTitle}
-                            <PencilSquareIcon className="w-3 h-3 opacity-0 group-hover:opacity-50" />
-                        </button>
-                    )}
+                     <div className="flex-1 min-w-0 flex items-center gap-2 group">
+                        {isEditingTitle ? (
+                            <input 
+                                ref={titleInputRef}
+                                type="text" 
+                                value={editedTitle}
+                                onChange={(e) => setEditedTitle(e.target.value)}
+                                onBlur={saveTitle}
+                                onKeyDown={handleTitleKeyDown}
+                                className="bg-ubiq-900 border border-ubiq-accent/50 text-white text-xs md:text-sm font-medium px-2 py-1 rounded-md w-full max-w-md focus:outline-none focus:ring-1 focus:ring-ubiq-accent shadow-lg"
+                            />
+                        ) : (
+                            <button onClick={startEditing} className="text-slate-300/90 font-medium text-xs md:text-sm tracking-wide truncate hover:text-white hover:bg-white/5 px-2 py-1 rounded-md transition-all flex items-center gap-2" title="Click to rename">
+                                {activeSessionTitle}
+                                <PencilSquareIcon className="w-3 h-3 opacity-0 group-hover:opacity-50" />
+                            </button>
+                        )}
+                     </div>
+                 </div>
+
+                 {/* --- AI MODE TOGGLE (NEW) --- */}
+                 <div className="relative">
+                    <select 
+                        value={aiMode} 
+                        onChange={handleAiModeChange}
+                        className="bg-ubiq-950 border border-white/10 text-xs text-slate-400 rounded px-2 py-1 pr-6 focus:outline-none focus:border-ubiq-accent appearance-none cursor-pointer hover:text-white"
+                    >
+                        <option value="cloud">Cloud (GPT-4)</option>
+                        <option value="local">Local (Ollama)</option>
+                    </select>
+                    <div className="absolute right-2 top-1.5 pointer-events-none">
+                        {aiMode === 'cloud' ? <ServerStackIcon className="w-3 h-3 text-indigo-400" /> : <CpuChipIcon className="w-3 h-3 text-green-400" />}
+                    </div>
                  </div>
                </div>
             </div>
@@ -283,6 +306,7 @@ export default function ChatPage() {
                  <ChatInterface 
                    sessionId={currentSession} 
                    onSessionUpdate={loadSessions} 
+                   aiMode={aiMode} // Pass the mode
                  />
               </div>
             ) : (

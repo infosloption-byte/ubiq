@@ -29,11 +29,39 @@ export default function RegisterPage() {
     setError('');
     
     try {
+      // 1. Log that we are starting
+      console.log("Starting registration...");
+      
       const response = await authAPI.register(formData);
-      setToken(response.data.token);
-      navigate('/dashboard');
+      
+      // 2. Log the EXACT response structure to the Console
+      console.log("Full Response Object:", response);
+      console.log("Response Data:", response.data);
+      
+      // 3. Check if token exists before setting
+      if (response.data && response.data.token) {
+          console.log("Token found:", response.data.token);
+          setToken(response.data.token);
+          navigate('/dashboard');
+      } else {
+          console.error("Token MISSING in response!");
+          setError("Registration succeeded, but token was missing.");
+      }
+
     } catch (err: any) {
-      setError(err.response?.data?.message || 'Registration failed');
+      // 4. Log the ACTUAL error to the console
+      console.error("Registration Logic Crash:", err);
+
+      if (err.response) {
+          // Server responded with a status code outside 2xx range
+          setError(err.response?.data?.message || 'Server rejected registration');
+      } else if (err.request) {
+          // Request was made but no response received
+          setError('No response from server. Check your connection.');
+      } else {
+          // Something happened in setting up the request OR processing the result
+          setError('App Error: ' + err.message);
+      }
     } finally {
       setLoading(false);
     }

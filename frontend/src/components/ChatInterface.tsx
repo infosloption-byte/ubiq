@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { useAuthStore } from '../stores/authStore';
-import { chatAPI, streamChat, generateTitle } from '../services/api';
+import { chatAPI, generateTitle } from '../services/api';
+import { aiService } from '../services/aiService'; 
 import ModelSelector from './ModelSelector'; 
 import ReactMarkdown from 'react-markdown';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
@@ -35,6 +36,7 @@ interface ChatInterfaceProps {
   onApplyCode?: (code: string) => void;
   autoPrompt?: string | null;
   onAutoPromptClear?: () => void;
+  aiMode?: string; // Cloud vs Local Mode
 }
 
 export default function ChatInterface({ 
@@ -43,7 +45,8 @@ export default function ChatInterface({
   activeContext,
   onApplyCode,
   autoPrompt,
-  onAutoPromptClear
+  onAutoPromptClear,
+  aiMode = 'cloud' 
 }: ChatInterfaceProps) {
   
   const { user } = useAuthStore();
@@ -54,6 +57,9 @@ export default function ChatInterface({
   const [pendingAttachments, setPendingAttachments] = useState<Attachment[]>([]);
   const [abortController, setAbortController] = useState<AbortController | null>(null);
   
+  // NEW: Track Selected Model Here
+  const [selectedModel, setSelectedModel] = useState<string>('');
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -156,17 +162,19 @@ export default function ChatInterface({
     setIsLoading(true);
 
     try {
+      // 1. Add User Message
       if (isNewUserMessage) {
         const tempUserMsg: Message = { role: 'user', content, created_at: new Date().toISOString() };
         setMessages(prev => [...prev, tempUserMsg]);
-        await chatAPI.sendMessage(sessionId, { content });
+        if (aiMode === 'cloud') {
+            await chatAPI.sendMessage(sessionId, { content }); 
+        }
       }
 
+      // 2. Add Placeholder
       setMessages(prev => [...prev, { role: 'assistant', content: '', created_at: new Date().toISOString() }]);
 
-      const preferred = user?.preferences?.preferred_model;
-      const modelToSend = (typeof preferred === 'string' && preferred.trim() !== '') ? preferred : 'codellama:7b';
-      
+      // 3. Prepare Context
       const contextMessages = messages
         .filter(m => m.content && m.content.trim() !== '') 
         .map(m => ({ role: m.role, content: m.content }));
@@ -184,70 +192,45 @@ export default function ChatInterface({
           contextMessages.unshift({ role: 'system', content: systemPrompt });
       }
 
-      const storedKeys = localStorage.getItem('ubiq_api_keys');
-      const apiKeys = storedKeys ? JSON.parse(storedKeys) : {};
-
-      let fullContent = '';
-      
-      await streamChat(
-        contextMessages, 
-        modelToSend,
-        (chunk) => {
-          fullContent += chunk;
-          setMessages(prev => {
-            const newMsgs = [...prev];
-            const lastIndex = newMsgs.length - 1;
-            if (newMsgs[lastIndex]) newMsgs[lastIndex].content = fullContent;
-            return newMsgs;
-          });
-        },
-        async () => {
-          setIsLoading(false);
-          setAbortController(null);
-          
-          if (fullContent.trim()) {
-              await chatAPI.sendMessage(sessionId, { content: fullContent, role: 'assistant' });
-              
-              if (messages.length <= 1) { 
-                  await generateTitle(sessionId, content); 
-                  if (onSessionUpdate) onSessionUpdate(); 
-              }
-          } else {
-              setMessages(prev => {
-                  const newMsgs = [...prev];
-                  const lastIndex = newMsgs.length - 1;
-                  if (newMsgs[lastIndex] && !newMsgs[lastIndex].content.includes("**Error:**")) {
-                      newMsgs[lastIndex].content = "*(No response received from AI)*";
-                  }
-                  return newMsgs;
-              });
-          }
-        },
-        (error) => {
-          setMessages(prev => {
-             const newMsgs = [...prev];
-             const lastIndex = newMsgs.length - 1;
-             
-             if (newMsgs[lastIndex]) {
-                 if (!newMsgs[lastIndex].content) {
-                     newMsgs[lastIndex].content = `**Error:** ${error}`;
-                 } else {
-                     newMsgs[lastIndex].content += `\n\n**Error:** ${error}`;
-                 }
-             }
-             return newMsgs;
-          });
-          setIsLoading(false);
-          setAbortController(null);
-        },
-        controller.signal,
-        apiKeys
+      // 4. Call AI Service (Now passes the selected model)
+      const response = await aiService.chat(
+          content, 
+          contextMessages, 
+          aiMode, 
+          selectedModel, // <--- PASSING THE SELECTED MODEL
+          undefined 
       );
 
-    } catch (error) {
+      // 5. Update UI
+      setMessages(prev => {
+          const newMsgs = [...prev];
+          const lastIndex = newMsgs.length - 1;
+          if (newMsgs[lastIndex]) newMsgs[lastIndex].content = response.content;
+          return newMsgs;
+      });
+
+      // 6. Post-Processing
+      if (aiMode === 'cloud' && response.content) {
+           await chatAPI.sendMessage(sessionId, { content: response.content, role: 'assistant' });
+           if (messages.length <= 1) { 
+              await generateTitle(sessionId, content); 
+              if (onSessionUpdate) onSessionUpdate(); 
+           }
+      }
+
+    } catch (error: any) {
       console.error('Chat processing failed:', error);
-      setIsLoading(false);
-      setAbortController(null);
+      setMessages(prev => {
+         const newMsgs = [...prev];
+         const lastIndex = newMsgs.length - 1;
+         if (newMsgs[lastIndex]) {
+             newMsgs[lastIndex].content = `**Error:** ${error.message || "Failed to connect to AI."}`;
+         }
+         return newMsgs;
+      });
+    } finally {
+        setIsLoading(false);
+        setAbortController(null);
     }
   };
 
@@ -319,8 +302,7 @@ export default function ChatInterface({
       <div className="flex-1 overflow-y-auto px-4 md:px-4 py-6 scroll-smooth custom-scrollbar">
         <div className="max-w-3xl mx-auto space-y-6 pb-32">
           
-          {/* --- ZERO STATE (MODIFIED LOGIC) --- */}
-          {/* Only hide if messages exist. Staging attachments shouldn't hide the greeting. */}
+          {/* --- ZERO STATE --- */}
           {messages.length === 0 && !isLoading ? (
               <div className="flex flex-col items-center justify-center min-h-[60vh] text-center space-y-8 animate-fade-in">
                   <div className="space-y-2">
@@ -332,6 +314,7 @@ export default function ChatInterface({
                       </h1>
                       <p className="text-slate-500 text-sm md:text-base">
                           How can I help you build today?
+                          {aiMode === 'local' && <span className="block text-green-400 text-xs mt-2 font-mono">Running on Local Intelligence (Ollama)</span>}
                       </p>
                   </div>
 
@@ -451,7 +434,14 @@ export default function ChatInterface({
 
             <div className="flex items-center justify-between px-1 pb-0.5">
                 <div className="flex items-center gap-1 md:gap-2">
-                    <div className="scale-90 origin-left"><ModelSelector /></div>
+                    {/* ModelSelector: Always Visible now, with dynamic mode passing */}
+                    <div className="scale-90 origin-left">
+                        <ModelSelector 
+                            aiMode={aiMode} 
+                            selectedModel={selectedModel} 
+                            onSelectModel={setSelectedModel} 
+                        />
+                    </div>
                     
                     <button 
                         onClick={() => fileInputRef.current?.click()} 
@@ -472,7 +462,9 @@ export default function ChatInterface({
                 )}
             </div>
           </div>
-          <div className="text-center mt-2 text-[10px] text-slate-600 font-medium hidden md:block">AI can make mistakes. Check important info.</div>
+          <div className="text-center mt-2 text-[10px] text-slate-600 font-medium hidden md:block">
+            {aiMode === 'local' ? 'Running locally. Data stays on your machine.' : 'AI can make mistakes. Check important info.'}
+          </div>
         </div>
       </div>
     </div>

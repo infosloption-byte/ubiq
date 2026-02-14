@@ -1,15 +1,27 @@
 import { Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
+import { useEffect } from 'react';
+import axios from 'axios';
 import { 
   Terminal, Zap, Shield, Cpu, 
   Code2, Sparkles, Globe, ArrowRight, 
-  CheckCircle2, Play, CloudLightning, Key, Lock, Download
+  CheckCircle2, Play, CloudLightning, Key, Lock, Download,
+  BookOpenIcon // <--- Fixed Import
 } from 'lucide-react';
 
 export default function LandingPage() {
+
+  useEffect(() => {
+    // Fire and forget visit tracking
+    const trackVisit = async () => {
+        try {
+            await axios.post(`${import.meta.env.VITE_API_URL}/visit`);
+        } catch (e) { /* ignore errors for analytics */ }
+    };
+    trackVisit();
+  }, []);
+
   return (
-    // FIX: "h-screen overflow-y-auto" allows this page to scroll independently 
-    // even if the global app (IDE) has "overflow: hidden" on the body.
     <div className="h-screen w-full overflow-y-auto overflow-x-hidden bg-[#050509] text-slate-300 font-sans selection:bg-ubiq-accent/30 selection:text-ubiq-accent scroll-smooth">
       
       {/* --- NAVBAR --- */}
@@ -25,7 +37,9 @@ export default function LandingPage() {
           <div className="hidden md:flex items-center gap-8 text-sm font-medium">
             <a href="#features" className="hover:text-white transition-colors">Features</a>
             <a href="#use-cases" className="hover:text-white transition-colors">Use Cases</a>
-            <a href="#how-it-works" className="hover:text-white transition-colors">How it Works</a>
+            <Link to="/guide" className="hover:text-white transition-colors flex items-center gap-1.5">
+               <BookOpenIcon className="w-4 h-4" /> Guide
+            </Link>
           </div>
 
           <div className="flex items-center gap-4">
@@ -82,9 +96,9 @@ export default function LandingPage() {
             <Link to="/register" className="w-full md:w-auto px-8 py-3.5 bg-white text-black font-semibold rounded-lg hover:bg-slate-200 transition-all shadow-[0_0_20px_rgba(255,255,255,0.3)] flex items-center justify-center gap-2">
               <Zap className="w-4 h-4" /> Start Coding Free
             </Link>
-            <a href="#demo" className="w-full md:w-auto px-8 py-3.5 bg-white/5 border border-white/10 text-white font-semibold rounded-lg hover:bg-white/10 transition-all flex items-center justify-center gap-2 backdrop-blur-sm">
-              <Play className="w-4 h-4 fill-current" /> Watch Demo
-            </a>
+            <Link to="/guide" className="w-full md:w-auto px-8 py-3.5 bg-white/5 border border-white/10 text-white font-semibold rounded-lg hover:bg-white/10 transition-all flex items-center justify-center gap-2 backdrop-blur-sm">
+              <BookOpenIcon className="w-4 h-4" /> Setup Guide
+            </Link>
           </motion.div>
         </div>
 
@@ -262,21 +276,91 @@ export default function LandingPage() {
           <div className="max-w-4xl mx-auto border-t border-white/5 pt-16">
              <div className="grid md:grid-cols-3 gap-8 text-center">
                 <div className="relative">
-                    <div className="w-12 h-12 rounded-full bg-slate-800 text-white font-bold flex items-center justify-center mx-auto mb-4 border border-white/10">1</div>
-                    <h4 className="text-white font-semibold mb-2 flex items-center justify-center gap-2"><Download className="w-4 h-4" /> Install Ollama</h4>
-                    <p className="text-sm text-slate-500">Download and run Ollama locally to enable free, offline models.</p>
+                   <div className="w-12 h-12 rounded-full bg-slate-800 text-white font-bold flex items-center justify-center mx-auto mb-4 border border-white/10">1</div>
+                   <h4 className="text-white font-semibold mb-2 flex items-center justify-center gap-2"><Download className="w-4 h-4" /> Install Ollama</h4>
+                   <p className="text-sm text-slate-500">Download and run Ollama locally to enable free, offline models.</p>
                 </div>
                 <div className="relative">
-                    <div className="w-12 h-12 rounded-full bg-slate-800 text-white font-bold flex items-center justify-center mx-auto mb-4 border border-white/10">2</div>
-                    <h4 className="text-white font-semibold mb-2 flex items-center justify-center gap-2"><Key className="w-4 h-4" /> Get API Keys</h4>
-                    <p className="text-sm text-slate-500">Get keys from OpenAI, Anthropic, or Google AI Studio.</p>
+                   <div className="w-12 h-12 rounded-full bg-slate-800 text-white font-bold flex items-center justify-center mx-auto mb-4 border border-white/10">2</div>
+                   <h4 className="text-white font-semibold mb-2 flex items-center justify-center gap-2"><Key className="w-4 h-4" /> Get API Keys</h4>
+                   <p className="text-sm text-slate-500">Get keys from OpenAI, Anthropic, or Google AI Studio.</p>
                 </div>
                 <div className="relative">
-                    <div className="w-12 h-12 rounded-full bg-slate-800 text-white font-bold flex items-center justify-center mx-auto mb-4 border border-white/10">3</div>
-                    <h4 className="text-white font-semibold mb-2 flex items-center justify-center gap-2"><Lock className="w-4 h-4" /> Connect Securely</h4>
-                    <p className="text-sm text-slate-500">Enter keys in Ubiq Settings. They are encrypted and stored only on your device.</p>
+                   <div className="w-12 h-12 rounded-full bg-slate-800 text-white font-bold flex items-center justify-center mx-auto mb-4 border border-white/10">3</div>
+                   <h4 className="text-white font-semibold mb-2 flex items-center justify-center gap-2"><Lock className="w-4 h-4" /> Connect Securely</h4>
+                   <p className="text-sm text-slate-500">Enter keys in Ubiq Settings. They are encrypted and stored only on your device.</p>
                 </div>
              </div>
+          </div>
+        </div>
+      </section>
+
+      {/* --- COMPARISON SECTION (NEW) --- */}
+      <section className="py-24 bg-[#0B0B10] border-t border-white/5">
+        <div className="max-w-5xl mx-auto px-6">
+          <div className="text-center mb-16">
+            <h2 className="text-3xl font-bold text-white mb-4">Stop paying for AI markup</h2>
+            <p className="text-slate-400">Compare Ubiq with other AI editors.</p>
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse">
+              <thead>
+                <tr className="border-b border-white/10">
+                  <th className="py-4 px-6 text-sm font-medium text-slate-500 uppercase tracking-wider">Feature</th>
+                  <th className="py-4 px-6 text-sm font-bold text-white bg-indigo-500/10 border-t-2 border-indigo-500">Ubiq Editor</th>
+                  <th className="py-4 px-6 text-sm font-medium text-slate-400">Cursor / Copilot</th>
+                  <th className="py-4 px-6 text-sm font-medium text-slate-400">VS Code (Vanilla)</th>
+                </tr>
+              </thead>
+              <tbody className="text-sm">
+                <tr className="border-b border-white/5">
+                  <td className="py-4 px-6 text-slate-300 font-medium">Local AI (Offline)</td>
+                  <td className="py-4 px-6 text-green-400 font-bold bg-indigo-500/5">✅ Yes (Native)</td>
+                  <td className="py-4 px-6 text-slate-500">❌ No</td>
+                  <td className="py-4 px-6 text-slate-500">❌ No</td>
+                </tr>
+                <tr className="border-b border-white/5">
+                  <td className="py-4 px-6 text-slate-300 font-medium">Cost Model</td>
+                  <td className="py-4 px-6 text-green-400 font-bold bg-indigo-500/5">Wholesale (BYOK)</td>
+                  <td className="py-4 px-6 text-slate-400">$20/mo subscription</td>
+                  <td className="py-4 px-6 text-slate-400">Free</td>
+                </tr>
+                <tr className="border-b border-white/5">
+                  <td className="py-4 px-6 text-slate-300 font-medium">Privacy</td>
+                  <td className="py-4 px-6 text-green-400 font-bold bg-indigo-500/5">Keys on Device</td>
+                  <td className="py-4 px-6 text-slate-400">Cloud Managed</td>
+                  <td className="py-4 px-6 text-slate-400">N/A</td>
+                </tr>
+                <tr>
+                  <td className="py-4 px-6 text-slate-300 font-medium">Model Choice</td>
+                  <td className="py-4 px-6 text-green-400 font-bold bg-indigo-500/5">Any (Grok, Mistral, GPT)</td>
+                  <td className="py-4 px-6 text-slate-400">Locked to Provider</td>
+                  <td className="py-4 px-6 text-slate-400">Extensions needed</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      {/* --- FAQ SECTION (NEW) --- */}
+      <section className="py-24 bg-[#050509]">
+        <div className="max-w-3xl mx-auto px-6">
+          <h2 className="text-3xl font-bold text-white mb-12 text-center">Frequently Asked Questions</h2>
+          <div className="space-y-6">
+            <FaqItem 
+              question="Is my API Key safe?" 
+              answer="Yes. We use a 'Bring Your Own Key' architecture. Your API keys are stored in your browser's LocalStorage and are never saved to our database. They are only used to proxy requests to the AI providers." 
+            />
+            <FaqItem 
+              question="Can I use this offline?" 
+              answer="Absolutely. If you install Ollama and switch Ubiq to 'Local Mode', you can code, get autocompletions, and chat with AI without an internet connection." 
+            />
+            <FaqItem 
+              question="Which models are supported?" 
+              answer="For Cloud: GPT-4o, Claude 3.5 Sonnet, Gemini 1.5 Pro, Grok Beta, and Mistral Large. For Local: Anything Ollama supports (Llama 3, Deepseek, Codellama, etc)." 
+            />
           </div>
         </div>
       </section>
@@ -329,6 +413,15 @@ function UseCaseItem({ title, desc }: { title: string, desc: string }) {
         <h4 className="text-white font-bold text-lg">{title}</h4>
         <p className="text-slate-400">{desc}</p>
       </div>
+    </div>
+  );
+}
+
+function FaqItem({ question, answer }: { question: string, answer: string }) {
+  return (
+    <div className="border border-white/10 rounded-xl p-6 bg-[#0B0B10]">
+      <h3 className="text-lg font-semibold text-white mb-2">{question}</h3>
+      <p className="text-slate-400 text-sm leading-relaxed">{answer}</p>
     </div>
   );
 }

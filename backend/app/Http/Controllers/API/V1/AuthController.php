@@ -284,12 +284,15 @@ class AuthController extends Controller
             // Create Token
             $token = $user->createToken('auth_token')->plainTextToken;
 
+            $frontendUrl = env('FRONTEND_URL', 'https://ubiq-editor.space');
+
             // Redirect to Frontend with Token
             // CHANGE THIS URL to your actual frontend URL
-            return redirect("http://localhost:3000/auth/callback?token={$token}");
+            return redirect("{$frontendUrl}/auth/callback?token={$token}");
 
         } catch (\Exception $e) {
-            return redirect("http://localhost:3000/login?error=Google login failed");
+            $frontendUrl = env('FRONTEND_URL', 'https://ubiq-editor.space');
+            return redirect("{$frontendUrl}/login?error=Google login failed");
         }
     }
 }

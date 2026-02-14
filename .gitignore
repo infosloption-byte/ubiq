@@ -8,3 +8,4 @@ id_rsa
 .DS_Store
 dist/
 build/
+inference-server/

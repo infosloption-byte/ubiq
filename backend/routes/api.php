@@ -9,6 +9,9 @@ use App\Http\Controllers\API\V1\ChatController;
 use App\Http\Controllers\API\V1\CompletionController;
 use App\Http\Controllers\API\V1\ModelController;
 use App\Http\Controllers\API\V1\UsageController;
+use App\Http\Controllers\API\V1\AiController;
+use App\Http\Controllers\API\V1\AdminController;
+use App\Http\Controllers\API\V1\GitController;
 
 // FIX: Define a named 'login' route that returns JSON 401
 // This prevents the "Route [login] not defined" error when auth fails
@@ -21,6 +24,7 @@ Route::get('/login', function () {
 
 Route::prefix('v1')->group(function () {
     // Public routes
+    Route::post('/visit', [UsageController::class, 'recordVisit']);
     Route::post('/auth/register', [AuthController::class, 'register']);
     Route::post('/auth/login', [AuthController::class, 'login']);
 
@@ -31,6 +35,13 @@ Route::prefix('v1')->group(function () {
     ->where('path', '.*');
     
     // Protected routes
+
+    Route::middleware(['auth:sanctum', 'admin'])->prefix('admin')->group(function () {
+        Route::get('/stats', [AdminController::class, 'stats']);
+        Route::get('/users', [AdminController::class, 'getUsers']);
+        Route::delete('/users/{id}', [AdminController::class, 'deleteUser']);
+    });
+
     Route::middleware('auth:sanctum')->group(function () {
         // Authentication
         Route::post('/auth/logout', [AuthController::class, 'logout']);
@@ -50,6 +61,32 @@ Route::prefix('v1')->group(function () {
         Route::post('projects/{project}/files/upload', [App\Http\Controllers\API\V1\FileController::class, 'upload']);
         Route::get('projects/{project}/download', [App\Http\Controllers\API\V1\ProjectController::class, 'download']);
         Route::get('projects/{project}/files/{file}/serve', [App\Http\Controllers\API\V1\FileController::class, 'serve']);
+        Route::post('projects/{project}/run', [App\Http\Controllers\API\V1\ProjectController::class, 'runProject']);
+
+        //Project Git 
+        // Route::prefix('projects/{project}/git')->group(function () {
+        //     Route::get('/status', [GitController::class, 'status']);
+        //     // Route::post('/add', [GitController::class, 'add']);
+        //     // Route::post('/commit', [GitController::class, 'commit']);
+        //     // Route::post('/reset', [GitController::class, 'reset']);
+        //     // Route::post('/pull', [GitController::class, 'pull']);
+        //     // Route::post('/push', [GitController::class, 'push']);
+
+        //     Route::post('projects/{project}/git/create-pr', [GitController::class, 'createPr']);
+        //     Route::get('projects/{project}/git/status', [GitController::class, 'status']);
+        // });
+
+
+        // Add this new route for AI Generation
+        Route::post('ai/generate', [App\Http\Controllers\API\V1\CompletionController::class, 'generate']);
+        Route::post('projects/{project}/scaffold', [ProjectController::class, 'scaffold']);
+        Route::post('projects/{project}/seed-chat', [ProjectController::class, 'seedChat']);
+        Route::post('chat/message', [App\Http\Controllers\API\V1\CompletionController::class, 'chat']);
+
+        Route::prefix('projects/{project}/git')->group(function () {
+            Route::get('/status', [GitController::class, 'status']);
+            Route::post('/create-pr', [GitController::class, 'createPr']); // <--- THIS WAS MISSING
+        });
         
         // Chat Sessions
         Route::get('/chat/sessions', [ChatController::class, 'index']);
@@ -74,7 +111,8 @@ Route::prefix('v1')->group(function () {
         Route::post('/ai/explain', [CompletionController::class, 'explain']);
         
         // Models
-        Route::get('/ai/models', [ModelController::class, 'index']);
+        // Route::get('/ai/models', [ModelController::class, 'index']);
+        Route::get('/ai/models', [AiController::class, 'getModels']);
         
         // User & Stats
         Route::get('/user/preferences', [AuthController::class, 'getPreferences']);
