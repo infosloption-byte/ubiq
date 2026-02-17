@@ -5,14 +5,14 @@ import {
   Terminal, Cloud, Cpu, Code2, 
   MessageSquare, Key, BookOpen, 
   ArrowLeft, CheckCircle2, ChevronRight,
-  Menu, X, AlertTriangle, ShieldAlert, Globe, Download // <-- Added Download Icon
+  Menu, X, AlertTriangle, ShieldAlert, Globe, Download, Settings
 } from 'lucide-react';
 
 export default function GuidePage() {
   const [activeSection, setActiveSection] = useState('intro');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
-  // Handle Scroll Spy to highlight TOC items
+  // Handle Scroll Spy
   useEffect(() => {
     const handleScroll = () => {
       const sections = ['intro', 'cloud-ai', 'local-ai', 'editor', 'chat', 'troubleshooting', 'shortcuts'];
@@ -70,7 +70,6 @@ export default function GuidePage() {
             </div>
           </div>
 
-          {/* Desktop CTA */}
           <div className="hidden md:flex items-center gap-4">
             <Link to="/login" className="text-sm font-medium hover:text-white transition-colors">Sign In</Link>
             <Link to="/register" className="text-sm font-semibold bg-white text-black px-4 py-2 rounded-full hover:bg-slate-200 transition-colors">
@@ -78,7 +77,6 @@ export default function GuidePage() {
             </Link>
           </div>
 
-          {/* Mobile Menu Toggle */}
           <button onClick={() => setMobileMenuOpen(!mobileMenuOpen)} className="md:hidden text-slate-400 hover:text-white">
             {mobileMenuOpen ? <X className="w-6 h-6" /> : <Menu className="w-6 h-6" />}
           </button>
@@ -176,53 +174,46 @@ export default function GuidePage() {
           {/* 3. LOCAL SETUP */}
           <Section id="local-ai" title="Setup Local AI (Ollama)" icon={Terminal} active={activeSection === 'local-ai'}>
             <p className="text-slate-400 mb-6">
-              To use AI locally and privately, you need to run <strong>Ollama</strong> on your machine. Since Ubiq runs in your browser, you must explicitly allow the browser to connect to your local Ollama instance.
+              To use AI locally, you must run <strong>Ollama</strong> on your machine. Because Ubiq runs in the browser, you must configure Ollama to accept connections from our domain.
             </p>
 
-            <div className="space-y-6">
+            <div className="space-y-8">
               
-              {/* --- NEW OS-SPECIFIC INSTALLATION UI --- */}
+              {/* STEP 1: INSTALL */}
               <div className="step">
-                <h4 className="text-white font-bold mb-3">1. Install Ollama</h4>
+                <h4 className="text-white font-bold mb-3 flex items-center gap-2">
+                  <span className="w-6 h-6 rounded-full bg-slate-800 flex items-center justify-center text-xs">1</span> Install Ollama
+                </h4>
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-3">
                   {/* Windows */}
-                  <div className="bg-[#0B0B10] border border-white/10 rounded-xl p-5 flex flex-col justify-between hover:border-emerald-500/30 transition-colors">
-                    <div>
-                      <h5 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Windows</h5>
-                      <p className="text-xs text-slate-500 mb-4 leading-relaxed">Download the official installer for Windows 10 and 11.</p>
-                    </div>
-                    <a href="https://ollama.com/download/OllamaSetup.exe" className="w-full flex items-center justify-center gap-2 text-sm bg-white/5 hover:bg-emerald-600 hover:text-white text-slate-300 py-2 px-4 rounded-lg transition-all border border-white/5 hover:border-transparent">
+                  <div className="bg-[#0B0B10] border border-white/10 rounded-xl p-5 hover:border-emerald-500/30 transition-colors">
+                    <h5 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Windows</h5>
+                    <a href="https://ollama.com/download/OllamaSetup.exe" className="w-full flex items-center justify-center gap-2 text-sm bg-white/5 hover:bg-emerald-600 hover:text-white text-slate-300 py-2 px-4 rounded-lg transition-all border border-white/5 hover:border-transparent mt-4">
                       <Download className="w-4 h-4"/> Download .exe
                     </a>
                   </div>
-
                   {/* macOS */}
-                  <div className="bg-[#0B0B10] border border-white/10 rounded-xl p-5 flex flex-col justify-between hover:border-emerald-500/30 transition-colors">
-                    <div>
-                      <h5 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">macOS</h5>
-                      <p className="text-xs text-slate-500 mb-4 leading-relaxed">Download for Apple Silicon (M1/M2/M3) or Intel Macs.</p>
-                    </div>
-                    <a href="https://ollama.com/download/Ollama-darwin.zip" className="w-full flex items-center justify-center gap-2 text-sm bg-white/5 hover:bg-emerald-600 hover:text-white text-slate-300 py-2 px-4 rounded-lg transition-all border border-white/5 hover:border-transparent">
+                  <div className="bg-[#0B0B10] border border-white/10 rounded-xl p-5 hover:border-emerald-500/30 transition-colors">
+                    <h5 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">macOS</h5>
+                    <a href="https://ollama.com/download/Ollama-darwin.zip" className="w-full flex items-center justify-center gap-2 text-sm bg-white/5 hover:bg-emerald-600 hover:text-white text-slate-300 py-2 px-4 rounded-lg transition-all border border-white/5 hover:border-transparent mt-4">
                       <Download className="w-4 h-4"/> Download .zip
                     </a>
                   </div>
-
                   {/* Linux */}
-                  <div className="bg-[#0B0B10] border border-white/10 rounded-xl p-5 flex flex-col justify-between hover:border-emerald-500/30 transition-colors">
-                    <div>
-                      <h5 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Linux</h5>
-                      <p className="text-xs text-slate-500 mb-4 leading-relaxed">Run this command in your terminal to install via script.</p>
-                    </div>
-                    <code className="block w-full bg-black/50 border border-white/10 rounded-lg p-2.5 text-[10px] text-emerald-400 font-mono select-all text-center">
+                  <div className="bg-[#0B0B10] border border-white/10 rounded-xl p-5 hover:border-emerald-500/30 transition-colors">
+                    <h5 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Linux</h5>
+                    <code className="block w-full bg-black/50 border border-white/10 rounded-lg p-2 mt-4 text-[10px] text-emerald-400 font-mono select-all text-center">
                       curl -fsSL https://ollama.com/install.sh | sh
                     </code>
                   </div>
                 </div>
               </div>
 
+              {/* STEP 2: MODELS */}
               <div className="step">
-                <h4 className="text-white font-bold mb-2">2. Pull Code-Optimized Models</h4>
-                <p className="text-sm text-slate-400 mb-3">Open your terminal and pull one or more of these recommended models for coding:</p>
+                <h4 className="text-white font-bold mb-2 flex items-center gap-2">
+                  <span className="w-6 h-6 rounded-full bg-slate-800 flex items-center justify-center text-xs">2</span> Pull Models
+                </h4>
                 <div className="bg-black/50 border border-white/10 rounded-lg overflow-hidden">
                     <table className="w-full text-left text-sm text-slate-300">
                         <thead className="bg-white/5 text-xs uppercase text-slate-500">
@@ -230,44 +221,74 @@ export default function GuidePage() {
                         </thead>
                         <tbody className="divide-y divide-white/5 font-mono">
                             <tr><td className="px-4 py-3">qwen2.5-coder:7b</td><td className="px-4 py-3 hidden sm:table-cell">4.7 GB</td><td className="px-4 py-3 text-right text-emerald-400 select-all">ollama pull qwen2.5-coder:7b</td></tr>
-                            <tr><td className="px-4 py-3">qwen2.5-coder:1.5b</td><td className="px-4 py-3 hidden sm:table-cell">986 MB</td><td className="px-4 py-3 text-right text-emerald-400 select-all">ollama pull qwen2.5-coder:1.5b</td></tr>
-                            <tr><td className="px-4 py-3">starcoder2:7b</td><td className="px-4 py-3 hidden sm:table-cell">4.0 GB</td><td className="px-4 py-3 text-right text-emerald-400 select-all">ollama pull starcoder2:7b</td></tr>
                             <tr><td className="px-4 py-3">deepseek-coder:6.7b</td><td className="px-4 py-3 hidden sm:table-cell">3.8 GB</td><td className="px-4 py-3 text-right text-emerald-400 select-all">ollama pull deepseek-coder:6.7b</td></tr>
-                            <tr><td className="px-4 py-3">codellama:7b</td><td className="px-4 py-3 hidden sm:table-cell">3.8 GB</td><td className="px-4 py-3 text-right text-emerald-400 select-all">ollama pull codellama:7b</td></tr>
                         </tbody>
                     </table>
                 </div>
               </div>
 
+              {/* STEP 3: ENVIRONMENT VARS (UPDATED) */}
               <div className="step relative overflow-hidden rounded-xl border border-yellow-500/20 bg-yellow-500/5 p-6">
                 <div className="absolute top-0 left-0 w-1 h-full bg-yellow-500/50"></div>
                 <h4 className="text-yellow-200 font-bold mb-3 flex items-center gap-2">
-                  3. Allow Browser Connection (CRITICAL)
+                  <Settings className="w-5 h-5"/> 3. Configure Connection (CRITICAL)
                 </h4>
                 <p className="text-sm text-slate-300 mb-4">
-                  By default, Ollama blocks external web pages from accessing it. You must restart Ollama and set the <code>OLLAMA_ORIGINS</code> variable to our domain. <strong>First, make sure the Ollama app is closed from your system tray.</strong> Then run the appropriate command:
+                  By default, Ollama blocks browser requests. You must set the <code>OLLAMA_ORIGINS</code> variable to <code>*</code> to allow connection.
                 </p>
                 
-                <div className="space-y-4">
-                  <div>
-                    <div className="text-xs font-bold text-slate-500 uppercase mb-1">Windows (PowerShell)</div>
-                    <code className="block bg-black/40 border border-white/5 rounded-lg p-3 font-mono text-xs text-emerald-400 select-all">
-                      $env:OLLAMA_ORIGINS="https://ubiq-editor.space"; ollama serve
-                    </code>
+                <div className="space-y-6">
+                  
+                  {/* WINDOWS INSTRUCTIONS */}
+                  <div className="bg-black/40 border border-white/5 rounded-lg p-4">
+                    <div className="flex items-center gap-2 mb-2">
+                        <span className="text-xs font-bold text-blue-400 uppercase">Windows (Permanent)</span>
+                    </div>
+                    <ol className="list-decimal list-inside text-xs text-slate-400 space-y-1.5 ml-1">
+                        <li>Close Ollama from the taskbar (bottom right).</li>
+                        <li>Press <strong>Win + R</strong>, type <code>rundll32 sysdm.cpl,EditEnvironmentVariables</code> and hit Enter.</li>
+                        <li>Under <strong>User variables</strong>, click <strong>New...</strong></li>
+                        <li>Variable name: <code className="text-emerald-300">OLLAMA_ORIGINS</code>, Value: <code className="text-emerald-300">*</code></li>
+                        <li>(Optional) Variable name: <code className="text-emerald-300">OLLAMA_HOST</code>, Value: <code className="text-emerald-300">0.0.0.0</code> (Recommended for WSL/Docker)</li>
+                        <li>Click OK, then restart the Ollama app.</li>
+                    </ol>
                   </div>
-                  <div>
-                    <div className="text-xs font-bold text-slate-500 uppercase mb-1">Mac / Linux (Terminal)</div>
-                    <code className="block bg-black/40 border border-white/5 rounded-lg p-3 font-mono text-xs text-emerald-400 select-all">
-                      OLLAMA_ORIGINS="https://ubiq-editor.space" ollama serve
-                    </code>
+
+                  {/* MAC INSTRUCTIONS */}
+                  <div className="bg-black/40 border border-white/5 rounded-lg p-4">
+                    <div className="flex items-center gap-2 mb-2">
+                        <span className="text-xs font-bold text-purple-400 uppercase">macOS (Application)</span>
+                    </div>
+                    <ol className="list-decimal list-inside text-xs text-slate-400 space-y-1.5 ml-1">
+                        <li>Quit the Ollama application completely.</li>
+                        <li>Open Terminal and run this command:</li>
+                        <code className="block mt-1 p-2 bg-black/60 rounded text-emerald-300 select-all">launchctl setenv OLLAMA_ORIGINS "*"</code>
+                        <li>Restart the Ollama application.</li>
+                    </ol>
                   </div>
+
+                  {/* LINUX INSTRUCTIONS */}
+                  <div className="bg-black/40 border border-white/5 rounded-lg p-4">
+                    <div className="flex items-center gap-2 mb-2">
+                        <span className="text-xs font-bold text-orange-400 uppercase">Linux (Systemd)</span>
+                    </div>
+                    <ol className="list-decimal list-inside text-xs text-slate-400 space-y-1.5 ml-1">
+                        <li>Run: <code className="bg-black/60 px-1 rounded">sudo systemctl edit ollama.service</code></li>
+                        <li>Add these lines under <code>[Service]</code>:</li>
+                        <pre className="block mt-1 p-2 bg-black/60 rounded text-emerald-300 text-[10px]">
+[Service]
+Environment="OLLAMA_ORIGINS=*"
+Environment="OLLAMA_HOST=0.0.0.0"</pre>
+                        <li>Save, then run: <code className="bg-black/60 px-1 rounded">sudo systemctl daemon-reload && sudo systemctl restart ollama</code></li>
+                    </ol>
+                  </div>
+
                 </div>
-                <p className="text-xs text-slate-400 mt-4 italic">Note: Keep this terminal window open while using Ubiq Local Mode. No router port forwarding is required.</p>
               </div>
             </div>
           </Section>
 
-          {/* 4. EDITOR FEATURES */}
+          {/* ... (Rest of Sections: Editor, Chat, Troubleshooting, Shortcuts) ... */}
           <Section id="editor" title="Using the Editor" icon={Code2} active={activeSection === 'editor'}>
             <p className="text-slate-400 mb-6">
               Our editor is built on Monaco (the same core as VS Code), so it supports standard shortcuts and features.
@@ -312,16 +333,12 @@ export default function GuidePage() {
                 </p>
                 <div className="bg-black/40 p-4 rounded-lg space-y-4">
                   <div>
-                    <p className="text-xs text-slate-400 uppercase font-bold mb-1">1. Check OLLAMA_ORIGINS</p>
-                    <p className="text-sm text-slate-300">Ensure you have completely quit the Ollama app from your system tray, and started it via the terminal using the command in Step 3 above.</p>
+                    <p className="text-xs text-slate-400 uppercase font-bold mb-1">1. Did you restart Ollama?</p>
+                    <p className="text-sm text-slate-300">Environment variables only take effect after the application fully restarts. Use the "Quit" option in the tray icon.</p>
                   </div>
                   <div>
-                    <p className="text-xs text-slate-400 uppercase font-bold mb-1">2. Check Browser Shields & Ad-Blockers</p>
-                    <p className="text-sm text-slate-300">Browsers like <strong>Brave</strong>, or extensions like <strong>uBlock Origin</strong>, often block websites from talking to `localhost` to prevent tracking. Try disabling shields or ad-blockers for `ubiq-editor.space`.</p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-slate-400 uppercase font-bold mb-1">3. Check Windows Defender / Firewall</p>
-                    <p className="text-sm text-slate-300">Your OS firewall might be blocking port `11434`. Ensure Ollama is allowed through your local firewall for private networks. (Note: You do NOT need to open ports on your router).</p>
+                    <p className="text-xs text-slate-400 uppercase font-bold mb-1">2. Check Browser Shields</p>
+                    <p className="text-sm text-slate-300">Browsers like <strong>Brave</strong> or extensions like <strong>uBlock Origin</strong> often block localhost connections. Disable them for this site.</p>
                   </div>
                 </div>
               </div>

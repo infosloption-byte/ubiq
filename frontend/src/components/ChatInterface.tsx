@@ -1,8 +1,8 @@
 import { useState, useRef, useEffect } from 'react';
 import { useAuthStore } from '../stores/authStore';
 import { chatAPI, generateTitle } from '../services/api';
-import { aiService } from '../services/aiService'; 
-import ModelSelector from './ModelSelector'; 
+import { aiService } from '../services/aiService';
+import ModelSelector from './ModelSelector';
 import ReactMarkdown from 'react-markdown';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
@@ -10,7 +10,8 @@ import {
   PaperAirplaneIcon, StopIcon, SparklesIcon, UserIcon, 
   ClipboardIcon, CheckIcon, ArrowPathIcon, PhotoIcon, 
   DocumentTextIcon, ArrowDownOnSquareIcon, XMarkIcon,
-  CommandLineIcon, WrenchScrewdriverIcon, AcademicCapIcon, RocketLaunchIcon
+  CommandLineIcon, WrenchScrewdriverIcon, AcademicCapIcon, RocketLaunchIcon,
+  Cog6ToothIcon // [Modified] Added Icon
 } from '@heroicons/react/24/outline';
 
 interface Message {
@@ -57,8 +58,11 @@ export default function ChatInterface({
   const [pendingAttachments, setPendingAttachments] = useState<Attachment[]>([]);
   const [abortController, setAbortController] = useState<AbortController | null>(null);
   
-  // NEW: Track Selected Model Here
   const [selectedModel, setSelectedModel] = useState<string>('');
+
+  // [Modified] Settings State for Remote Ollama
+  const [showSettings, setShowSettings] = useState(false);
+  const [ollamaUrl, setOllamaUrl] = useState(localStorage.getItem('ubiq_ollama_url') || 'http://localhost:11434');
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -98,6 +102,12 @@ export default function ChatInterface({
         }
         processMessage(lastUserMsg.content, false);
     }
+  };
+
+  // [Modified] Save the custom URL
+  const handleSaveSettings = () => {
+      localStorage.setItem('ubiq_ollama_url', ollamaUrl);
+      setShowSettings(false);
   };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -162,7 +172,6 @@ export default function ChatInterface({
     setIsLoading(true);
 
     try {
-      // 1. Add User Message
       if (isNewUserMessage) {
         const tempUserMsg: Message = { role: 'user', content, created_at: new Date().toISOString() };
         setMessages(prev => [...prev, tempUserMsg]);
@@ -171,10 +180,8 @@ export default function ChatInterface({
         }
       }
 
-      // 2. Add Placeholder
       setMessages(prev => [...prev, { role: 'assistant', content: '', created_at: new Date().toISOString() }]);
 
-      // 3. Prepare Context
       const contextMessages = messages
         .filter(m => m.content && m.content.trim() !== '') 
         .map(m => ({ role: m.role, content: m.content }));
@@ -192,16 +199,22 @@ export default function ChatInterface({
           contextMessages.unshift({ role: 'system', content: systemPrompt });
       }
 
-      // 4. Call AI Service (Now passes the selected model)
+      // [Modified] Prepare Config for Remote Ollama
+      const apiConfig: any = {};
+      if (aiMode === 'local') {
+          // Retrieve latest URL from storage
+          const currentUrl = localStorage.getItem('ubiq_ollama_url') || 'http://localhost:11434';
+          apiConfig.api_keys = { ollama_url: currentUrl };
+      }
+
       const response = await aiService.chat(
           content, 
           contextMessages, 
           aiMode, 
-          selectedModel, // <--- PASSING THE SELECTED MODEL
-          undefined 
+          selectedModel,
+          apiConfig // [Modified] Pass config as 5th argument
       );
 
-      // 5. Update UI
       setMessages(prev => {
           const newMsgs = [...prev];
           const lastIndex = newMsgs.length - 1;
@@ -209,7 +222,6 @@ export default function ChatInterface({
           return newMsgs;
       });
 
-      // 6. Post-Processing
       if (aiMode === 'cloud' && response.content) {
            await chatAPI.sendMessage(sessionId, { content: response.content, role: 'assistant' });
            if (messages.length <= 1) { 
@@ -302,7 +314,6 @@ export default function ChatInterface({
       <div className="flex-1 overflow-y-auto px-4 md:px-4 py-6 scroll-smooth custom-scrollbar">
         <div className="max-w-3xl mx-auto space-y-6 pb-32">
           
-          {/* --- ZERO STATE --- */}
           {messages.length === 0 && !isLoading ? (
               <div className="flex flex-col items-center justify-center min-h-[60vh] text-center space-y-8 animate-fade-in">
                   <div className="space-y-2">
@@ -314,7 +325,7 @@ export default function ChatInterface({
                       </h1>
                       <p className="text-slate-500 text-sm md:text-base">
                           How can I help you build today?
-                          {aiMode === 'local' && <span className="block text-green-400 text-xs mt-2 font-mono">Running on Local Intelligence (Ollama)</span>}
+                          {aiMode === 'local' && <span className="block text-green-400 text-xs mt-2 font-mono">Running on Local/Remote Intelligence</span>}
                       </p>
                   </div>
 
@@ -334,7 +345,6 @@ export default function ChatInterface({
                   </div>
               </div>
           ) : (
-              // --- MESSAGE LIST ---
               messages.map((msg, idx) => (
                 <div key={idx} className={`flex gap-3 ${msg.role === 'user' ? 'flex-row-reverse' : 'flex-row'}`}>
                   <div className={`w-7 h-7 rounded-full flex-shrink-0 flex items-center justify-center text-[10px] ring-1 ring-white/10 shadow-lg mt-1 ${msg.role === 'user' ? 'bg-ubiq-800 text-slate-300' : 'bg-gradient-to-tr from-indigo-600 to-purple-600 text-white'}`}>
@@ -392,9 +402,23 @@ export default function ChatInterface({
              </div>
           )}
 
+          {/* [Modified] Settings Popover for Remote Ollama */}
+          {showSettings && (
+              <div className="absolute -top-16 left-0 right-0 bg-ubiq-900/95 backdrop-blur-md border border-white/10 p-3 rounded-lg z-30 shadow-xl animate-fade-in-up flex items-center gap-2">
+                  <span className="text-[10px] uppercase font-bold text-slate-400 whitespace-nowrap">Ollama URL:</span>
+                  <input 
+                      type="text" 
+                      value={ollamaUrl} 
+                      onChange={(e) => setOllamaUrl(e.target.value)}
+                      placeholder="http://localhost:11434"
+                      className="flex-1 bg-black/50 border border-white/10 rounded px-2 py-1 text-xs text-white focus:border-ubiq-accent outline-none"
+                  />
+                  <button onClick={handleSaveSettings} className="bg-ubiq-accent px-3 py-1 text-xs text-white rounded hover:bg-indigo-500 font-bold">Save</button>
+              </div>
+          )}
+
           <div className={`relative glass-panel rounded-2xl p-2 shadow-2xl ring-1 ring-white/10 focus-within:ring-ubiq-accent/50 transition-all flex flex-col gap-2 bg-ubiq-900/90 backdrop-blur-xl ${activeContext ? 'rounded-tl-none' : ''}`}>
             
-            {/* --- ATTACHMENT STAGING AREA --- */}
             {pendingAttachments.length > 0 && (
                 <div className="flex gap-2 p-2 overflow-x-auto custom-scrollbar border-b border-white/5 mb-1">
                     {pendingAttachments.map((att, idx) => (
@@ -410,7 +434,6 @@ export default function ChatInterface({
                                 </div>
                             )}
                             
-                            {/* Remove Button */}
                             <button 
                                 onClick={() => removeAttachment(idx)}
                                 className="absolute -top-1.5 -right-1.5 bg-red-500 text-white rounded-full p-0.5 shadow-md hover:bg-red-600 transition-colors transform scale-0 group-hover:scale-100"
@@ -434,13 +457,23 @@ export default function ChatInterface({
 
             <div className="flex items-center justify-between px-1 pb-0.5">
                 <div className="flex items-center gap-1 md:gap-2">
-                    {/* ModelSelector: Always Visible now, with dynamic mode passing */}
-                    <div className="scale-90 origin-left">
+                    {/* [Modified] Model Selector + Settings Icon */}
+                    <div className="scale-90 origin-left flex items-center gap-1">
                         <ModelSelector 
                             aiMode={aiMode} 
                             selectedModel={selectedModel} 
                             onSelectModel={setSelectedModel} 
                         />
+                        {/* Only show settings gear if in LOCAL mode */}
+                        {aiMode === 'local' && (
+                            <button 
+                                onClick={() => setShowSettings(!showSettings)}
+                                className={`p-1.5 rounded-lg transition-colors ${showSettings ? 'text-white bg-white/10' : 'text-slate-500 hover:text-white hover:bg-white/5'}`}
+                                title="Configure Remote/Local Connection"
+                            >
+                                <Cog6ToothIcon className="w-4 h-4" />
+                            </button>
+                        )}
                     </div>
                     
                     <button 
@@ -463,7 +496,11 @@ export default function ChatInterface({
             </div>
           </div>
           <div className="text-center mt-2 text-[10px] text-slate-600 font-medium hidden md:block">
-            {aiMode === 'local' ? 'Running locally. Data stays on your machine.' : 'AI can make mistakes. Check important info.'}
+            {aiMode === 'local' ? (
+                <span className="flex items-center justify-center gap-1">
+                    Running on <span className="text-emerald-400 font-mono">{ollamaUrl.includes('localhost') ? 'Localhost' : 'Remote EC2'}</span> (Ollama)
+                </span>
+            ) : 'AI can make mistakes. Check important info.'}
           </div>
         </div>
       </div>

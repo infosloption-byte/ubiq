@@ -24,7 +24,13 @@ class ChatController extends Controller
         if ($request->has('project_id')) {
             $query->where('project_id', $request->input('project_id'));
         } else {
+            // GLOBAL CHATS (Dashboard)
             $query->whereNull('project_id');
+            
+            // --- FIX: Filter out "Project Generation" logs ---
+            // These are the scaffolding logs created by the AI Architect.
+            // They should not appear in your normal "New Chat" list.
+            $query->where('title', '!=', 'Project Generation');
         }
 
         // Sort by newest first

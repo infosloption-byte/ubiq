@@ -349,19 +349,39 @@ class ProjectController extends Controller
         if ($project->user_id !== $request->user()->id) abort(403);
 
         $zipFileName = 'project_' . $project->id . '.zip';
-        $zipPath = storage_path('app/public/' . $zipFileName);
+        // Use system temp dir to avoid permission issues
+        $zipPath = sys_get_temp_dir() . '/' . $zipFileName;
 
         $zip = new \ZipArchive;
-        if ($zip->open($zipPath, \ZipArchive::CREATE) === TRUE) {
+        if ($zip->open($zipPath, \ZipArchive::CREATE | \ZipArchive::OVERWRITE) === TRUE) {
             $path = $this->getProjectPath($project);
+            
+            if (!FileSystem::exists($path)) {
+                 $zip->close();
+                 return response()->json(['error' => 'Project files not found'], 404);
+            }
+
             $files = FileSystem::allFiles($path);
+            
             foreach ($files as $file) {
-                if (str_contains($file->getRelativePathname(), '.git/')) continue;
-                $zip->addFile($file->getPathname(), $file->getRelativePathname());
+                $relativePath = $file->getRelativePathname();
+
+                // --- NEW: SKIP HEAVY FOLDERS ---
+                // We check if the path starts with these folders to exclude them entirely
+                if (
+                    str_starts_with($relativePath, '.git/') || 
+                    str_starts_with($relativePath, 'node_modules/') || 
+                    str_starts_with($relativePath, 'vendor/')
+                    //str_starts_with($relativePath, 'storage/') // Optional: Skip Laravel storage logs/cache
+                ) {
+                    continue;
+                }
+                
+                $zip->addFile($file->getPathname(), $relativePath);
             }
             $zip->close();
         } else {
-            return response()->json(['error' => 'Could not create zip'], 500);
+            return response()->json(['error' => 'Could not create zip archive'], 500);
         }
 
         return response()->download($zipPath)->deleteFileAfterSend(true);
@@ -377,75 +397,344 @@ class ProjectController extends Controller
         }
 
         $workspacePath = $this->getProjectPath($project);
+        $baseHostPath = env('HOST_WORKSPACE_PATH', '/home/ubuntu/ubiq/backend/storage/app/workspaces');
+        $hostMountPath = $baseHostPath . "/{$project->user_id}/{$project->id}";
         
         // 1. Detect Runtime
-        $ubiqJsonPath = $workspacePath . '/ubiq.json';
-        $runtime = 'static'; 
+        $runtimeInfo = $this->detectRuntime($workspacePath);
+        $runtime = $runtimeInfo['runtime'];
+        $framework = $runtimeInfo['framework'];
+
+        // 2. Generate Recipe (startup.sh)
+        $startupScript = $this->generateStartupScript($runtime, $framework);
         
-        if (\Illuminate\Support\Facades\File::exists($ubiqJsonPath)) {
-            $config = json_decode(file_get_contents($ubiqJsonPath), true);
-            $runtime = $config['runtime'] ?? 'static';
-        }
+        // --- CRITICAL FIX: Enforce Unix Line Endings (\n) ---
+        // Windows uses \r\n, which breaks Linux shells ("install\r: command not found")
+        $startupScript = str_replace(["\r\n", "\r"], "\n", $startupScript);
 
-        // --- AGGRESSIVE AUTO-DETECTION OVERRIDE ---
-        if (\Illuminate\Support\Facades\File::exists($workspacePath . '/package.json')) {
-            $runtime = 'node';
-        } elseif (\Illuminate\Support\Facades\File::exists($workspacePath . '/composer.json') || \Illuminate\Support\Facades\File::exists($workspacePath . '/artisan')) {
-            $runtime = 'php';
-        } elseif (\Illuminate\Support\Facades\File::exists($workspacePath . '/requirements.txt') || \Illuminate\Support\Facades\File::exists($workspacePath . '/main.py')) {
-            $runtime = 'python';
-        }
+        // WRITE TO DISK
+        file_put_contents($workspacePath . '/startup.sh', $startupScript);
+        chmod($workspacePath . '/startup.sh', 0755);
 
+        // SYNC TO DATABASE
+        $project->files()->updateOrCreate(
+            ['path' => 'startup.sh'],
+            [
+                'name' => 'startup.sh',
+                'content' => $startupScript,
+                'language' => 'shell',
+                'size_bytes' => strlen($startupScript),
+                'is_deleted' => false
+            ]
+        );
+
+        // --- FIX: SYNC LOG TO DB ---
+        // We put a placeholder in the DB so the file doesn't look "Empty" in the editor
+        // The real logs are still streamed from disk via getBuildLog()
+        $logPlaceholder = "[Ubiq] Build process started. Check the 'Live Server Logs' panel for real-time output.";
+        $project->files()->updateOrCreate(
+            ['path' => 'startup.log'],
+            [
+                'name' => 'startup.log',
+                'content' => $logPlaceholder, 
+                'language' => 'plaintext',
+                'size_bytes' => strlen($logPlaceholder),
+                'is_deleted' => false
+            ]
+        );
+
+        // RESET LOGS
+        file_put_contents($workspacePath . '/startup.log', "[Ubiq] Initializing Container...\n");
+
+        // 3. Container Config
         $containerName = "ubiq_project_{$project->id}";
         $port = 8000 + ($project->id % 1000); 
 
-        $baseHostPath = env('HOST_WORKSPACE_PATH', '/home/ubuntu/ubiq/backend/storage/app/workspaces');
-        $hostMountPath = $baseHostPath . "/{$project->user_id}/{$project->id}";
+        Process::run("docker stop {$containerName}");
+        Process::run("docker rm {$containerName}");
 
-        \Illuminate\Support\Facades\Process::run("docker stop {$containerName}");
-        \Illuminate\Support\Facades\Process::run("docker rm {$containerName}");
+        // 4. Select Image
+        $image = "nginx:alpine"; 
+        $internalPort = 80;
 
-        $cmd = "";
-        if ($runtime === 'static') {
-            $cmd = "docker run -d --name {$containerName} -p {$port}:80 -v " . escapeshellarg($hostMountPath) . ":/usr/share/nginx/html nginx:alpine";
-            
-        } elseif ($runtime === 'node') {
-            $cmd = "docker run -d --name {$containerName} -p {$port}:5173 -v " . escapeshellarg($hostMountPath) . ":/app -w /app node:20-alpine sh -c 'npm install && npm run dev -- --host 0.0.0.0'";
-            
-        } elseif ($runtime === 'python') {
-            $cmd = "docker run -d --name {$containerName} -p {$port}:8000 -v " . escapeshellarg($hostMountPath) . ":/app -w /app python:3.11-alpine sh -c 'if [ -f requirements.txt ]; then pip install -r requirements.txt; fi && if [ -f manage.py ]; then python manage.py runserver 0.0.0.0:8000; else python main.py; fi'";
-            
-        } elseif ($runtime === 'php') {
-            // Uses official composer image which includes PHP.
-            // Automatically detects Laravel (artisan) vs Standard PHP
-            $cmd = "docker run -d --name {$containerName} -p {$port}:8000 -v " . escapeshellarg($hostMountPath) . ":/app -w /app composer:2.7 sh -c 'if [ -f composer.json ]; then composer install --ignore-platform-reqs; fi && if [ -f artisan ]; then php artisan serve --host=0.0.0.0 --port=8000; elif [ -d public ]; then php -S 0.0.0.0:8000 -t public/; else php -S 0.0.0.0:8000; fi'";
-            
-        } else {
-            return response()->json(['error' => 'Unsupported runtime'], 400);
+        switch ($runtime) {
+            case 'node': $image = "node:20-alpine"; $internalPort = 5173; break;
+            case 'php': $image = "composer:2.7"; $internalPort = 8000; break;
+            case 'python': $image = "python:3.11-alpine"; $internalPort = 8000; break;
+            case 'java': $image = "amazoncorretto:17-alpine-jdk"; $internalPort = 8080; break;
         }
 
-        // Execute the command with a slightly longer timeout just in case
-        $result = \Illuminate\Support\Facades\Process::timeout(120)->run($cmd);
+        // 5. Run Docker
+        $cmd = "docker run -d --name {$containerName} -p {$port}:{$internalPort} -e PORT={$internalPort} -v " . escapeshellarg($hostMountPath) . ":/app -w /app {$image} sh -c 'sh startup.sh > startup.log 2>&1 || tail -f /dev/null'";
 
-        // --- NEW: RETURN RAW ERRORS ---
+        $result = Process::timeout(120)->run($cmd);
+
         if ($result->failed()) {
-            \Illuminate\Support\Facades\Log::error("Docker Run Failed: " . $result->errorOutput());
-            return response()->json([
-                'error' => 'Build process failed.',
-                'command' => $cmd,
-                'details' => $result->errorOutput() ?: $result->output() // Send raw Docker/NPM logs to frontend
-            ], 500);
+            return response()->json(['error' => 'Docker failed', 'details' => $result->errorOutput()], 500);
         }
 
         $serverIp = '3.88.204.62'; 
         
-        // --- NEW: RETURN EXECUTED COMMAND ON SUCCESS ---
         return response()->json([
-            'message' => 'Project is running!',
+            'message' => 'Project booting...',
             'url' => "http://{$serverIp}:{$port}",
             'port' => $port,
             'runtime' => $runtime,
-            'command' => $cmd 
+            'framework' => $framework,
+            'command' => $cmd
         ]);
+    }
+
+    /**
+     * NEW: Fetch the real-time build logs
+     */
+    public function getBuildLog(Request $request, Project $project)
+    {
+        if ($project->user_id !== $request->user()->id) abort(403);
+        
+        $logPath = $this->getProjectPath($project) . '/startup.log';
+        
+        if (file_exists($logPath)) {
+            $content = file_get_contents($logPath);
+            return response()->json(['log' => $content]);
+        }
+        
+        return response()->json(['log' => 'Waiting for logs...']);
+    }
+
+    private function detectRuntime($path)
+    {
+        if (FileSystem::exists($path . '/pom.xml') || FileSystem::exists($path . '/build.gradle')) {
+            return ['runtime' => 'java', 'framework' => 'spring'];
+        }
+        if (FileSystem::exists($path . '/artisan')) {
+            return ['runtime' => 'php', 'framework' => 'laravel'];
+        }
+        if (FileSystem::exists($path . '/composer.json')) {
+            return ['runtime' => 'php', 'framework' => 'raw'];
+        }
+        if (FileSystem::exists($path . '/manage.py')) {
+            return ['runtime' => 'python', 'framework' => 'django'];
+        }
+        if (FileSystem::exists($path . '/requirements.txt')) {
+            return ['runtime' => 'python', 'framework' => 'flask']; // Assumption
+        }
+        if (FileSystem::exists($path . '/package.json')) {
+            $content = file_get_contents($path . '/package.json');
+            if (str_contains($content, '"next"')) return ['runtime' => 'node', 'framework' => 'nextjs'];
+            if (str_contains($content, '"react"')) return ['runtime' => 'node', 'framework' => 'react'];
+            if (str_contains($content, '"vue"')) return ['runtime' => 'node', 'framework' => 'vue'];
+            return ['runtime' => 'node', 'framework' => 'node'];
+        }
+        return ['runtime' => 'static', 'framework' => 'html'];
+    }
+
+    private function generateStartupScript($runtime, $framework)
+    {
+        $header = "#!/bin/sh\n\n# --- UBIQ AUTO-GENERATED STARTUP SCRIPT ---\necho \"[Ubiq] Booting {$framework}...\"\n";
+        
+        // --- FIX: Install System Dependencies (Git/Zip) for Alpine ---
+        $installDeps = "";
+        if ($runtime === 'node') $installDeps = "apk add --no-cache git";
+        if ($runtime === 'php') $installDeps = "apk add --no-cache git zip unzip libzip-dev sqlite-dev nodejs npm";
+        if ($runtime === 'python') $installDeps = "apk add --no-cache git build-base libffi-dev";
+
+        $header .= $installDeps . "\n\n";
+        
+        switch ($framework) {
+            case 'laravel':
+                return $header . <<<EOT
+                # 0. AUTO-HEAL: Fix broken artisan file
+                echo "[Ubiq] Verifying artisan script..."
+                cat <<'PHP_SCRIPT' > artisan
+                #!/usr/bin/env php
+                <?php
+                define('LARAVEL_START', microtime(true));
+
+                if (file_exists(__DIR__.'/vendor/autoload.php')) {
+                    require __DIR__.'/vendor/autoload.php';
+                } else {
+                    fwrite(STDERR, "Vendor autoload not found. Please run composer install.\\n");
+                    exit(1);
+                }
+
+                if (!file_exists(__DIR__.'/bootstrap/app.php')) {
+                    fwrite(STDERR, "Bootstrap file not found at bootstrap/app.php\\n");
+                    exit(1);
+                }
+
+                \$app = require_once __DIR__.'/bootstrap/app.php';
+
+                \$kernel = \$app->make(Illuminate\Contracts\Console\Kernel::class);
+
+                \$status = \$kernel->handle(
+                    \$input = new Symfony\Component\Console\Input\ArgvInput,
+                    new Symfony\Component\Console\Output\ConsoleOutput
+                );
+
+                \$kernel->terminate(\$input, \$status);
+
+                exit(\$status);
+                PHP_SCRIPT
+
+                # 1. PRE-INSTALL: Create Dirs & Fix Permissions
+                echo "[Ubiq] Configuring directories & permissions..."
+                mkdir -p storage/framework/sessions storage/framework/views storage/framework/cache storage/logs bootstrap/cache
+                chmod -R 777 storage bootstrap/cache 2>/dev/null || true
+                chmod +x artisan
+
+                # 2. VERSION ENFORCER: Upgrade dependencies for Laravel 11
+                if grep -q "Application::configure" bootstrap/app.php; then
+                    echo "[Ubiq] Detected Laravel 11 syntax. Upgrading dependencies..."
+                    sed -i 's/"laravel\/framework": *"[^"]*"/"laravel\/framework": "^11.0"/' composer.json
+                    sed -i 's/"laravel\/sanctum": *"[^"]*"/"laravel\/sanctum": "^4.0"/' composer.json
+                    sed -i 's/"laravel\/tinker": *"[^"]*"/"laravel\/tinker": "^2.9"/' composer.json
+                    sed -i 's/"nunomaduro\/collision": *"[^"]*"/"nunomaduro\/collision": "^8.1"/' composer.json
+                    sed -i 's/"spatie\/laravel-ignition": *"[^"]*"/"spatie\/laravel-ignition": "^2.4"/' composer.json
+                    sed -i 's/"phpunit\/phpunit": *"[^"]*"/"phpunit\/phpunit": "^10.5"/' composer.json
+                fi
+
+                # 3. Install PHP Dependencies
+                echo "[Ubiq] Installing Composer dependencies..."
+                composer config -g platform-check false
+                composer config --no-plugins allow-plugins.kylekatarnls/update-helper true
+                composer install --ignore-platform-reqs --no-interaction
+
+                # 4. FRONTEND BUILD
+                if [ -f package.json ]; then
+                    echo "[Ubiq] Detected package.json. Installing Frontend Dependencies..."
+                    npm install
+                    
+                    # AUTO-HEAL: Create missing bootstrap.js
+                    # FIX: Used printf instead of HereDoc to avoid indentation/syntax errors
+                    if [ -f resources/js/app.js ] && [ ! -f resources/js/bootstrap.js ]; then
+                        echo "[Ubiq] Missing resources/js/bootstrap.js detected. Creating default..."
+                        mkdir -p resources/js
+                        printf "import axios from 'axios';\\nwindow.axios = axios;\\nwindow.axios.defaults.headers.common['X-Requested-With'] = 'XMLHttpRequest';\\n" > resources/js/bootstrap.js
+                    fi
+
+                    echo "[Ubiq] Building Frontend Assets..."
+                    npm run build
+                fi
+
+                # 5. Environment Setup (Fixes Unsupported Cipher Error)
+                if [ ! -f .env ]; then
+                    echo "[Ubiq] Creating .env file..."
+                    cp .env.example .env
+                fi
+                
+                # Force Key Generation if missing or empty
+                if ! grep -q "^APP_KEY=base64:" .env; then
+                    echo "[Ubiq] Generating missing App Key..."
+                    php artisan key:generate --force
+                fi
+
+                # Ensure DB exists
+                if [ ! -f database/database.sqlite ]; then
+                    touch database/database.sqlite
+                fi
+
+                # 6. Migrations
+                echo "[Ubiq] Running migrations..."
+                php artisan migrate --force
+
+                # 7. Serve
+                echo "[Ubiq] Starting Server..."
+                php artisan serve --host=0.0.0.0 --port=8000
+                EOT;
+
+            case 'react':
+            case 'vue':
+                // --- VITE AUTO-FIX ---
+                return $header . <<<EOT
+                echo "[Ubiq] Installing NPM packages..."
+                npm install
+
+                # CRITICAL FIX: Vite requires index.html in the ROOT.
+                # If AI put it in public/, we move it to root automatically.
+                if [ -f "public/index.html" ] && [ ! -f "index.html" ]; then
+                    echo "[Ubiq] Detected index.html in public/. Moving to root for Vite compatibility..."
+                    mv public/index.html .
+                fi
+
+                echo "[Ubiq] Starting Development Server..."
+                if [ -f "vite.config.js" ] || [ -f "vite.config.ts" ]; then
+                    # Run Vite directly to ensure port/host binding works correctly
+                    echo "[Ubiq] Detected Vite config. Launching via npx..."
+                    npx vite --host 0.0.0.0 --port 5173
+                else
+                    # Fallback
+                    npm run dev -- --host 0.0.0.0 --port 5173
+                fi
+                EOT;
+
+            case 'nextjs':
+                return $header . <<<EOT
+                echo "[Ubiq] Installing NPM packages..."
+                npm install
+
+                echo "[Ubiq] Starting Next.js..."
+                npx next dev -p 5173 -H 0.0.0.0
+                EOT;
+
+            case 'django':
+                return $header . <<<EOT
+                echo "[Ubiq] Installing Python requirements..."
+                if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+                echo "[Ubiq] Migrating Database..."
+                python manage.py migrate
+
+                echo "[Ubiq] Starting Django Server..."
+                python manage.py runserver 0.0.0.0:8000
+                EOT;
+
+            case 'spring':
+                return $header . <<<EOT
+                echo "[Ubiq] Preparing Java Environment..."
+                chmod +x mvnw 2>/dev/null || true
+                chmod +x gradlew 2>/dev/null || true
+
+                if [ -f mvnw ]; then
+                    echo "[Ubiq] Running Maven..."
+                    ./mvnw spring-boot:run -Dspring-boot.run.arguments=--server.port=8080
+                elif [ -f gradlew ]; then
+                    echo "[Ubiq] Running Gradle..."
+                    ./gradlew bootRun --args='--server.port=8080'
+                else
+                    echo "Error: No build wrapper found."
+                    exit 1
+                fi
+                EOT;
+
+            case 'node': 
+                return $header . <<<EOT
+                echo "[Ubiq] Installing dependencies..."
+                npm install
+
+                echo "[Ubiq] Starting Node..."
+                if grep -q '"start":' package.json; then
+                    npm start
+                elif [ -f index.js ]; then
+                    node index.js
+                elif [ -f app.js ]; then
+                    node app.js
+                else
+                    echo "Error: Could not determine entry point."
+                    exit 1
+                fi
+                EOT;
+
+            default: 
+                // Static: If index.html is in public, Nginx needs to know, or we move it.
+                return $header . <<<EOT
+                if [ -f "public/index.html" ] && [ ! -f "index.html" ]; then
+                    echo "[Ubiq] Promoting public/index.html to root..."
+                    mv public/index.html .
+                fi
+                echo '[Ubiq] Static site ready.'
+                tail -f /dev/null
+                EOT;
+        }
     }
 }

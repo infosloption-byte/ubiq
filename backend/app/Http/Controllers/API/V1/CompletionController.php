@@ -29,14 +29,9 @@ class CompletionController extends Controller
         if (str_contains($modelId, 'gemini')) {
             $key = isset($apiKeys['google']) ? trim($apiKeys['google']) : null;
             if (!$key) return null;
-            
-            // Clean model name: remove 'models/' if present to avoid duplication in URL
-            // e.g. "models/gemini-1.5-pro" -> "gemini-1.5-pro"
             $cleanModel = str_replace('models/', '', $modelId);
-            
             return [
                 'provider' => 'gemini',
-                // Using v1beta as it supports systemInstruction and latest models
                 'url' => "https://generativelanguage.googleapis.com/v1beta/models/{$cleanModel}:generateContent?key={$key}",
                 'headers' => ['Content-Type' => 'application/json'],
                 'model_name' => $cleanModel
@@ -83,10 +78,19 @@ class CompletionController extends Controller
             ];
         }
 
-        // 5. LOCAL (OLLAMA)
+        // 5. OLLAMA (Local vs Remote)
+        // If 'ollama_url' is provided, we treat it as Remote.
+        // If NOT provided, we default to 'http://host.docker.internal:11434' (Local).
+        
+        $baseUrl = 'http://host.docker.internal:11434'; // Default Local
+        
+        if (isset($apiKeys['ollama_url']) && filter_var($apiKeys['ollama_url'], FILTER_VALIDATE_URL)) {
+            $baseUrl = rtrim($apiKeys['ollama_url'], '/');
+        }
+
         return [
             'provider' => 'ollama',
-            'url' => 'http://host.docker.internal:11434/api/chat',
+            'url' => "{$baseUrl}/api/chat",
             'headers' => [],
             'model_name' => $modelId,
             'is_local' => true
@@ -140,7 +144,6 @@ class CompletionController extends Controller
         }
 
         // --- TRULY DYNAMIC POLYGLOT SYSTEM PROMPT ---
-        // --- TRULY DYNAMIC POLYGLOT SYSTEM PROMPT ---
         $systemPrompt = "You are an Expert Full Stack Architect.
         TASK: Generate a complete, production-ready web application workspace.
         
@@ -158,15 +161,20 @@ class CompletionController extends Controller
                 -> \"php\": For ANY PHP framework or pure PHP (Laravel, CodeIgniter, Symfony, etc.).
                 -> \"python\": For ANY Python framework (Django, Flask, FastAPI, etc.).
            - \"entry\": The primary file to execute or serve.
+
+        3. FRAMEWORK STANDARDS (STRICT):
+           - React/Vue/Vite: You MUST place 'index.html' in the ROOT directory. Do NOT put it in 'public/'. The 'public/' folder is only for static assets like images.
+           - Laravel: Follow standard Laravel structure (index.php in public/).
+           - Next.js: Use the 'app/' directory router structure.
         
-        3. DEPENDENCY ENFORCEMENT & PORT STANDARDIZATION:
+        4. DEPENDENCY ENFORCEMENT & PORT STANDARDIZATION:
            - If runtime is \"node\", you MUST generate a valid 'package.json' with a \"dev\" script. 
            - CRITICAL: You MUST configure the \"dev\" script to run on port 5173 and bind to 0.0.0.0. 
-             (Examples: \"vite --port 5173 --host\", \"next dev -p 5173 -H 0.0.0.0\", \"ng serve --port 5173 --host 0.0.0.0\").
-           - If runtime is \"php\", generate a 'composer.json' (if using packages) and standard directory structure.
+             (Examples: \"vite --port 5173 --host 0.0.0.0\", \"next dev -p 5173 -H 0.0.0.0\", \"ng serve --port 5173 --host 0.0.0.0\").
+           - If runtime is \"php\", generate 'composer.json'. CRITICAL: If building Laravel, you MUST include the 'artisan' , 'public/index.php', AND 'bootstrap/app.php'.
            - If runtime is \"python\", generate a 'requirements.txt'.
           
-        4. Provide ALL necessary code to make the app actually run. Do not leave placeholders.";
+        5. Provide ALL necessary code to make the app actually run. Do not leave placeholders.";
         
         $userPrompt = "Create this app: " . $request->prompt;
 
@@ -232,9 +240,9 @@ class CompletionController extends Controller
             }
 
             // --- EXECUTE REQUEST ---
-            $response = Http::withHeaders($config['headers'])
-                ->timeout(120) 
-                ->post($config['url'], $payload);
+            if (!$response->successful()) {
+                throw new \Exception("Provider Error ({$response->status()}): " . substr($response->body(), 0, 200));
+            }
 
             if (!$response->successful()) throw new \Exception($response->body());
 

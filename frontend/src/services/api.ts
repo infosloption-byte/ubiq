@@ -81,6 +81,12 @@ export const projectAPI = {
             model 
         }),
   runProject: (projectId: number) => api.post(`/projects/${projectId}/run`),
+  getBuildLog: (projectId: number) => api.get(`/projects/${projectId}/build-log`),
+};
+
+export const terminalAPI = {
+    execute: (projectId: number, command: string) => 
+        api.post(`/projects/${projectId}/terminal`, { command })
 };
 
 export const fileAPI = {

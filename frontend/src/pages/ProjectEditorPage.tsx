@@ -12,16 +12,27 @@ import { buildFileTree, type FileNode } from '../utils/fileUtils';
 import Editor, { DiffEditor, type OnMount } from "@monaco-editor/react";
 import FilePreview from '../components/FilePreview';
 import ProjectRunner from '../components/panels/ProjectRunner';
+import TerminalPanel from '../components/panels/TerminalPanel';
 import { 
   CodeBracketIcon, ChatBubbleLeftRightIcon, XMarkIcon, ArrowPathIcon, 
   CheckIcon, NoSymbolIcon, PlusIcon, FolderPlusIcon, MagnifyingGlassIcon,
   CloudArrowUpIcon, EyeIcon, ServerStackIcon, CpuChipIcon,
-  FolderIcon, CommandLineIcon, PlayIcon
+  FolderIcon, CommandLineIcon, PlayIcon, ArrowDownOnSquareIcon, Cog6ToothIcon
 } from '@heroicons/react/24/outline';
 
 export default function ProjectEditorPage() {
   const { id } = useParams<{ id: string }>();
   const projectId = Number(id);
+
+  // --- STATE for Settings Modal ---
+  const [showSettings, setShowSettings] = useState(false);
+  const [ollamaUrl, setOllamaUrl] = useState(localStorage.getItem('ubiq_ollama_url') || 'http://localhost:11434');
+
+  const handleSaveSettings = () => {
+      localStorage.setItem('ubiq_ollama_url', ollamaUrl);
+      setShowSettings(false);
+      alert("Connection URL updated!");
+  };
 
   // Get Search Params
   const [searchParams] = useSearchParams();
@@ -77,6 +88,8 @@ export default function ProjectEditorPage() {
   const editorRef = useRef<any>(null);
   const monacoRef = useRef<any>(null);
   const debounceRef = useRef<NodeJS.Timeout | null>(null);
+
+  const [showTerminal, setShowTerminal] = useState(false);
   
   // FIX: Track if tabs have been restored to prevent re-running on every file update
   const restoredRef = useRef(false);
@@ -172,6 +185,18 @@ export default function ProjectEditorPage() {
           }
       }
   }, [fileSearch, files]);
+
+  const refreshFiles = async () => {
+      try {
+          // FIX: Use fileAPI.getAll instead of projectAPI.getFiles
+          const res = await fileAPI.getAll(projectId);
+          setFiles(res.data.files || []); 
+          // Re-build the tree structure from the flat list
+          setFileTree(buildFileTree(res.data.files || []));
+      } catch (error) {
+          console.error("Failed to refresh file tree:", error);
+      }
+  };
 
   const isBinaryFile = (filename: string) => {
       const ext = filename.split('.').pop()?.toLowerCase();
@@ -369,18 +394,30 @@ export default function ProjectEditorPage() {
   const handleSave = async (contentToSave?: string) => {
       if (!activeFile?.fileId) return;
       setIsSaving(true);
+      
       try {
-          const content = contentToSave !== undefined ? contentToSave : fileContent;
+          // Priority: 1. Passed Argument (Diff View), 2. Editor Instance (Most Accurate), 3. State Fallback
+          let content = contentToSave;
+          if (content === undefined) {
+              content = editorRef.current ? editorRef.current.getValue() : fileContent;
+          }
+          
           await fileAPI.update(activeFile.fileId, { content: content });
           
-          // FIX: Update Local Files State immediately so we don't need a refresh
+          // Update Local Files State immediately
           setFiles(prevFiles => prevFiles.map(f => 
               f.id === activeFile.fileId ? { ...f, content: content } : f
           ));
+          setFileContent(content || ''); // Sync state just in case
 
       } catch (e) { console.error("Save failed", e); } 
       finally { setIsSaving(false); }
   };
+
+  // --- REF FOR COMMAND BINDING ---
+  // We need a ref to handleSave so Monaco commands (which are bound once) always see the latest version
+  const handleSaveRef = useRef(handleSave);
+  useEffect(() => { handleSaveRef.current = handleSave; }, [handleSave]);
 
   const handleApplyCode = (newCode: string) => {
       if (!activeFile) { alert("Please open a file."); return; }
@@ -404,7 +441,10 @@ export default function ProjectEditorPage() {
   const handleEditorMount: OnMount = (editor, monaco) => {
       editorRef.current = editor;
       monacoRef.current = monaco;
-      editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => { handleSave(); });
+      // FIX: Use handleSaveRef to ensure we call the fresh function instance
+      editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => { 
+          handleSaveRef.current(); 
+      });
 
       // Action 1: Explain
       editor.addAction({
@@ -460,6 +500,8 @@ export default function ProjectEditorPage() {
                         
                         const storedKeys = localStorage.getItem('ubiq_api_keys');
                         const apiKeys = storedKeys ? JSON.parse(storedKeys) : {};
+                        const currentOllamaUrl = localStorage.getItem('ubiq_ollama_url');
+                        if (currentOllamaUrl) apiKeys['ollama_url'] = currentOllamaUrl;
 
                         try {
                             const res = await aiAPI.completion({ 
@@ -540,6 +582,25 @@ export default function ProjectEditorPage() {
                         </div>
                     </div>
 
+                    {/* Explorer Header with Refresh Button */}
+                    <div className="h-12 flex items-center justify-between px-4 border-b border-white/5 shrink-0 group">
+                        <div className="flex items-center gap-2 overflow-hidden">
+                            <FolderIcon className="w-4 h-4 text-ubiq-accent" />
+                            <span className="text-xs font-bold text-slate-300 uppercase tracking-wider truncate">
+                                {project?.name || 'Project'}
+                            </span>
+                        </div>
+
+                        {/* NEW: Refresh Button */}
+                        <button 
+                            onClick={refreshFiles} 
+                            className="p-1.5 text-slate-500 hover:text-white hover:bg-white/10 rounded-md transition-all"
+                            title="Refresh File Tree"
+                        >
+                            <ArrowPathIcon className="w-4 h-4" />
+                        </button>
+                    </div>
+
                     <div className="flex-1 overflow-y-auto p-2 custom-scrollbar bg-ubiq-900">
                         <FileTree nodes={fileTree} onSelectFile={handleFileSelect} onDeleteNode={openDeleteModal} onCreateNode={openCreateModal} selectedFileId={activeFile?.fileId} />
                     </div>
@@ -561,62 +622,136 @@ export default function ProjectEditorPage() {
         {/* Hidden File Input */}
         <input type="file" ref={fileInputRef} onChange={handleFileUpload} className="hidden" multiple />
 
-        {/* CENTER PANEL (Editor) */}
+        {/* CENTER PANEL (Editor + Terminal Split) */}
         <div className="flex-1 flex flex-col min-w-0 bg-[#1e1e1e] relative">
-           <EditorTabs files={openFiles} activeFileId={activeFile?.fileId || null} onSelect={handleFileSelect} onClose={closeTab} />
-           <div className="h-12 bg-[#1e1e1e] border-b border-white/5 flex items-center justify-between px-4 shrink-0">
-              {proposedContent !== null ? (
-                  <div className="flex items-center gap-3 animate-fade-in"><span className="text-xs font-bold text-amber-400 uppercase">Diff View</span><button onClick={handleAcceptDiff} disabled={!showEditor || isSaving} className="text-green-400 text-xs flex gap-1"><CheckIcon className="w-3.5 h-3.5"/> Accept</button><button onClick={handleRejectDiff} disabled={!showEditor || isSaving} className="text-red-400 text-xs flex gap-1"><NoSymbolIcon className="w-3.5 h-3.5"/> Reject</button></div>
-              ) : (
-                  <span className="text-xs text-slate-400 font-mono truncate">{activeFile ? activeFile.path : 'No file selected'}</span>
-              )}
-              <div className="flex items-center gap-2">
-                 {activeFile && (
-                     <button 
-                        onClick={() => setShowPreview(!showPreview)} 
-                        className={`p-1.5 transition-colors flex items-center gap-2 text-xs rounded-md ${showPreview ? 'bg-ubiq-accent text-white' : 'text-slate-500 hover:text-white hover:bg-white/10'}`}
-                        title={showPreview ? "Back to Code" : "Preview File"}
-                     >
-                        {showPreview ? <CodeBracketIcon className="w-4 h-4" /> : <EyeIcon className="w-4 h-4" />}
-                        <span className="hidden md:inline">{showPreview ? 'Code' : 'Preview'}</span>
-                     </button>
-                 )}
-                 <button onClick={() => handleSave()} className="p-1.5 hover:text-white text-slate-500"><ArrowPathIcon className={`w-4 h-4 ${isSaving?'animate-spin':''}`} /></button>
-                 
-                 {/* NEW: Toggle Buttons for Right Panel */}
-                 <div className="flex bg-black/30 rounded-lg p-0.5 ml-2 border border-white/5">
-                     <button 
-                        onClick={() => setRightPanelContent(rightPanelContent === 'runner' ? null : 'runner')} 
-                        className={`p-1.5 rounded-md transition-colors ${rightPanelContent === 'runner' ? 'bg-emerald-600/20 text-emerald-400' : 'text-slate-500 hover:text-white'}`}
-                        title="Run Project"
-                     >
-                        <PlayIcon className="w-5 h-5" />
-                     </button>
-                     <button 
-                        onClick={() => setRightPanelContent(rightPanelContent === 'chat' ? null : 'chat')} 
-                        className={`p-1.5 rounded-md transition-colors ${rightPanelContent === 'chat' ? 'bg-ubiq-accent/20 text-ubiq-accent' : 'text-slate-500 hover:text-white'}`}
-                        title="AI Chat"
-                     >
-                        <ChatBubbleLeftRightIcon className="w-5 h-5" />
-                     </button>
-                 </div>
-              </div>
-           </div>
-           <div className="flex-1 relative overflow-hidden">
-              {!showEditor ? (
-                  <div className="absolute inset-0 flex items-center justify-center bg-[#1e1e1e]"><div className="w-5 h-5 border-2 border-slate-600 border-t-slate-400 rounded-full animate-spin" /></div>
-              ) : activeFile ? (
-                  showPreview ? (
-                      <FilePreview file={activeFile} content={fileContent} projectId={projectId} allFiles={files} />
-                  ) : proposedContent !== null ? (
-                      <DiffEditor key={`diff-${activeFile.fileId}`} height="100%" theme="vs-dark" original={fileContent} modified={proposedContent} language={getLanguageFromFilename(activeFile.name)} options={{ minimap: {enabled:false}, fontSize: 14, automaticLayout: true, readOnly: true }} />
-                  ) : (
-                      <Editor key={`editor-${activeFile.fileId}`} height="100%" theme="vs-dark" value={fileContent} onChange={(v) => setFileContent(v||'')} onMount={handleEditorMount} language={getLanguageFromFilename(activeFile.name)} options={{ minimap: {enabled:false}, fontSize: 14, automaticLayout: true, inlineSuggest: { enabled: true } }} />
-                  )
-              ) : (
-                  <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-600 bg-[#1e1e1e]"><CodeBracketIcon className="w-16 h-16 mb-4 opacity-20" /><p className="text-sm">Select a file</p></div>
-              )}
-           </div>
+            
+            {/* TOP HALF: Main Editor Area (Dynamic Height) */}
+            <div className={`flex-1 flex flex-col min-h-0 transition-all duration-300 ${showTerminal ? 'h-[60%]' : 'h-full'}`}>
+                
+                {/* 1. Tabs */}
+                <EditorTabs files={openFiles} activeFileId={activeFile?.fileId || null} onSelect={handleFileSelect} onClose={closeTab} />
+                
+                {/* 2. Toolbar */}
+                <div className="h-12 bg-[#1e1e1e] border-b border-white/5 flex items-center justify-between px-4 shrink-0">
+                    {/* Left Side: File Info or Diff Actions */}
+                    {proposedContent !== null ? (
+                        <div className="flex items-center gap-3 animate-fade-in">
+                            <span className="text-xs font-bold text-amber-400 uppercase">Diff View</span>
+                            <button onClick={handleAcceptDiff} disabled={!showEditor || isSaving} className="text-green-400 text-xs flex gap-1 items-center hover:text-green-300">
+                                <CheckIcon className="w-3.5 h-3.5"/> Accept
+                            </button>
+                            <button onClick={handleRejectDiff} disabled={!showEditor || isSaving} className="text-red-400 text-xs flex gap-1 items-center hover:text-red-300">
+                                <NoSymbolIcon className="w-3.5 h-3.5"/> Reject
+                            </button>
+                        </div>
+                    ) : (
+                        <span className="text-xs text-slate-400 font-mono truncate">{activeFile ? activeFile.path : 'No file selected'}</span>
+                    )}
+
+                    {/* Right Side: Actions & Toggles */}
+                    <div className="flex items-center gap-2">
+                        {activeFile && (
+                            <button 
+                                onClick={() => setShowPreview(!showPreview)} 
+                                className={`p-1.5 transition-colors flex items-center gap-2 text-xs rounded-md ${showPreview ? 'bg-ubiq-accent text-white' : 'text-slate-500 hover:text-white hover:bg-white/10'}`}
+                                title={showPreview ? "Back to Code" : "Preview File"}
+                            >
+                                {showPreview ? <CodeBracketIcon className="w-4 h-4" /> : <EyeIcon className="w-4 h-4" />}
+                                <span className="hidden md:inline">{showPreview ? 'Code' : 'Preview'}</span>
+                            </button>
+                        )}
+                        
+                        {/* --- NEW: VISIBLE SAVE BUTTON --- */}
+                        <button 
+                            onClick={() => handleSave()} 
+                            disabled={isSaving}
+                            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md transition-colors border ${isSaving ? 'border-amber-500/30 text-amber-400 bg-amber-500/10' : 'border-white/10 text-slate-300 bg-white/5 hover:bg-white/10 hover:text-white hover:border-white/20'}`}
+                            title="Save File (Ctrl+S)"
+                        >
+                            {isSaving ? <ArrowPathIcon className="w-3.5 h-3.5 animate-spin" /> : <ArrowDownOnSquareIcon className="w-3.5 h-3.5" />}
+                            <span className="text-xs font-medium">{isSaving ? 'Saving...' : 'Save'}</span>
+                        </button>
+                        
+                        <div className="w-px h-4 bg-white/10 mx-1"></div>
+                        
+                        {/* Toggle Group */}
+                        <div className="flex bg-black/30 rounded-lg p-0.5 ml-2 border border-white/5">
+                            {/* Terminal Toggle */}
+                            <button 
+                                onClick={() => setShowTerminal(!showTerminal)} 
+                                className={`p-1.5 transition-colors flex items-center gap-2 text-xs rounded-md ${showTerminal ? 'bg-white/10 text-white' : 'text-slate-500 hover:text-white'}`}
+                                title="Toggle Terminal"
+                            >
+                                <CommandLineIcon className="w-4 h-4" />
+                            </button>
+                            
+                            {/* Run Project Toggle */}
+                            <button 
+                                onClick={() => setRightPanelContent(rightPanelContent === 'runner' ? null : 'runner')} 
+                                className={`p-1.5 rounded-md transition-colors ${rightPanelContent === 'runner' ? 'bg-emerald-600/20 text-emerald-400' : 'text-slate-500 hover:text-white'}`}
+                                title="Run Project"
+                            >
+                                <PlayIcon className="w-5 h-5" />
+                            </button>
+                            
+                            {/* Chat Toggle */}
+                            <button 
+                                onClick={() => setRightPanelContent(rightPanelContent === 'chat' ? null : 'chat')} 
+                                className={`p-1.5 rounded-md transition-colors ${rightPanelContent === 'chat' ? 'bg-ubiq-accent/20 text-ubiq-accent' : 'text-slate-500 hover:text-white'}`}
+                                title="AI Chat"
+                            >
+                                <ChatBubbleLeftRightIcon className="w-5 h-5" />
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                {/* 3. Editor / Preview Area */}
+                <div className="flex-1 relative overflow-hidden">
+                    {!showEditor ? (
+                        <div className="absolute inset-0 flex items-center justify-center bg-[#1e1e1e]">
+                            <div className="w-5 h-5 border-2 border-slate-600 border-t-slate-400 rounded-full animate-spin" />
+                        </div>
+                    ) : activeFile ? (
+                        showPreview ? (
+                            <FilePreview file={activeFile} content={fileContent} projectId={projectId} allFiles={files} />
+                        ) : proposedContent !== null ? (
+                            <DiffEditor 
+                                key={`diff-${activeFile.fileId}`} 
+                                height="100%" 
+                                theme="vs-dark" 
+                                original={fileContent} 
+                                modified={proposedContent} 
+                                language={getLanguageFromFilename(activeFile.name)} 
+                                options={{ minimap: { enabled: false }, fontSize: 14, automaticLayout: true, readOnly: true }} 
+                            />
+                        ) : (
+                            <Editor 
+                                key={`editor-${activeFile.fileId}`} 
+                                height="100%" 
+                                theme="vs-dark" 
+                                value={fileContent} 
+                                onChange={(v) => setFileContent(v || '')} 
+                                onMount={handleEditorMount} 
+                                language={getLanguageFromFilename(activeFile.name)} 
+                                options={{ minimap: { enabled: false }, fontSize: 14, automaticLayout: true, inlineSuggest: { enabled: true } }} 
+                            />
+                        )
+                    ) : (
+                        <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-600 bg-[#1e1e1e]">
+                            <CodeBracketIcon className="w-16 h-16 mb-4 opacity-20" />
+                            <p className="text-sm">Select a file</p>
+                        </div>
+                    )}
+                </div>
+            </div>
+
+            {/* BOTTOM HALF: Terminal Panel (Conditional) */}
+            {showTerminal && (
+                <div className="h-[40%] shrink-0 border-t border-white/10 animate-slide-up bg-[#0c0c0c]">
+                    <TerminalPanel projectId={projectId} />
+                </div>
+            )}
         </div>
 
         {/* RIGHT PANEL (Dynamic: Chat or Runner) */}
@@ -627,24 +762,61 @@ export default function ProjectEditorPage() {
               {/* Conditional Rendering based on state */}
               {rightPanelContent === 'chat' ? (
                   <>
-                      {/* Existing Chat Header */}
                       <div className="h-12 flex items-center justify-between px-4 border-b border-white/5 bg-ubiq-900/50 shrink-0">
                          <div className="flex items-center gap-2"><span className="text-sm font-medium text-slate-200">AI Assistant</span></div>
                          <div className="flex items-center gap-2">
-                            <div className="relative">
-                                <select value={aiMode} onChange={handleAiModeChange} className="bg-ubiq-950 border border-white/10 text-xs text-slate-400 rounded px-2 py-1 pr-6 focus:outline-none focus:border-ubiq-accent appearance-none cursor-pointer hover:text-white">
+                            <div className="relative flex items-center bg-black/30 rounded-lg p-0.5 border border-white/5">
+                                <select value={aiMode} onChange={handleAiModeChange} className="bg-transparent text-xs text-slate-400 rounded px-2 py-1 focus:outline-none appearance-none cursor-pointer hover:text-white">
                                     <option value="cloud">Cloud (GPT-4)</option>
-                                    <option value="local">Local (Ollama)</option>
+                                    <option value="local">Remote / Local (Ollama)</option>
                                 </select>
-                                <div className="absolute right-2 top-1.5 pointer-events-none">{aiMode === 'cloud' ? <ServerStackIcon className="w-3 h-3 text-indigo-400" /> : <CpuChipIcon className="w-3 h-3 text-green-400" />}</div>
+                                
+                                {/* SETTINGS BUTTON */}
+                                {aiMode === 'local' && (
+                                    <button 
+                                        onClick={() => setShowSettings(!showSettings)}
+                                        className={`p-1 mx-1 rounded transition-colors ${showSettings ? 'text-white bg-white/10' : 'text-slate-500 hover:text-white hover:bg-white/5'}`}
+                                        title="Configure Connection"
+                                    >
+                                        <Cog6ToothIcon className="w-3.5 h-3.5" />
+                                    </button>
+                                )}
                             </div>
-                            <button onClick={() => setRightPanelContent(null)} className="text-slate-500 hover:text-white"><XMarkIcon className="w-4 h-4" /></button>
+                            <div className="text-xs">
+                                {aiMode === 'cloud' ? <ServerStackIcon className="w-3 h-3 text-indigo-400" /> : <CpuChipIcon className="w-3 h-3 text-green-400" />}
+                            </div>
+                            <button onClick={() => setRightPanelContent(null)} className="text-slate-500 hover:text-white ml-2"><XMarkIcon className="w-4 h-4" /></button>
                          </div>
                       </div>
-                      {aiMode === 'local' && <div className="bg-green-500/10 border-b border-green-500/20 px-4 py-2 text-[10px] text-green-300">Ensure Ollama is running: <code className="bg-black/30 px-1 rounded">OLLAMA_ORIGINS="*" ollama serve</code></div>}
+
+                      {/* SETTINGS MODAL */}
+                      {showSettings && (
+                          <div className="absolute top-12 left-0 right-0 bg-ubiq-900 border-b border-white/10 p-4 z-50 shadow-xl animate-slide-down">
+                              <label className="block text-[10px] uppercase font-bold text-slate-500 mb-2">Ollama API URL</label>
+                              <div className="flex gap-2">
+                                  <input 
+                                      type="text" 
+                                      value={ollamaUrl} 
+                                      onChange={(e) => setOllamaUrl(e.target.value)}
+                                      placeholder="http://34.221.x.x:11434"
+                                      className="flex-1 bg-black/50 border border-white/10 rounded px-2 py-1.5 text-xs text-white focus:border-ubiq-accent outline-none"
+                                  />
+                                  <button onClick={handleSaveSettings} className="bg-ubiq-accent px-3 py-1 text-xs text-white rounded hover:bg-indigo-500">Save</button>
+                              </div>
+                              <p className="text-[10px] text-slate-500 mt-2">Use AWS EC2 Public IP or 'http://host.docker.internal:11434' for local.</p>
+                          </div>
+                      )}
+
                       <div className="flex-1 overflow-hidden relative">
                          {chatSessionId ? (
-                             <ChatInterface sessionId={chatSessionId} activeContext={{ projectStructure: getProjectStructureContext(), currentFile: activeFile ? { name: activeFile.name, content: fileContent } : undefined }} onApplyCode={handleApplyCode} autoPrompt={autoPrompt} onAutoPromptClear={() => setAutoPrompt(null)} aiMode={aiMode} />
+                             <ChatInterface 
+                                 sessionId={chatSessionId} 
+                                 activeContext={{ projectStructure: getProjectStructureContext(), currentFile: activeFile ? { name: activeFile.name, content: fileContent } : undefined }} 
+                                 onApplyCode={handleApplyCode} 
+                                 autoPrompt={autoPrompt} 
+                                 onAutoPromptClear={() => setAutoPrompt(null)} 
+                                 aiMode={aiMode} 
+                             />
                          ) : null}
                       </div>
                   </>

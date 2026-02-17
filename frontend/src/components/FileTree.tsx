@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { 
   FolderIcon, 
   DocumentIcon, 
@@ -28,9 +28,21 @@ export default function FileTree({ nodes, onSelectFile, onDeleteNode, onCreateNo
     setExpanded(prev => ({ ...prev, [path]: !prev[path] }));
   };
 
+  // --- NEW: Sort Nodes (Folders Top, then Files, both Alphabetical) ---
+  const sortedNodes = useMemo(() => {
+    return [...nodes].sort((a, b) => {
+        // 1. Primary Sort: Folders before Files
+        if (a.type === 'folder' && b.type !== 'folder') return -1;
+        if (a.type !== 'folder' && b.type === 'folder') return 1;
+        
+        // 2. Secondary Sort: Alphabetical by Name
+        return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+    });
+  }, [nodes]);
+
   return (
-    <div className="select-none text-sm">
-      {nodes.map((node) => {
+    <div className="select-none text-sm font-medium">
+      {sortedNodes.map((node) => {
         const isExpanded = expanded[node.path];
         
         // FIX: Ensure only valid fileIds are marked selected. Folders (undefined id) are ignored.
@@ -43,8 +55,8 @@ export default function FileTree({ nodes, onSelectFile, onDeleteNode, onCreateNo
             <div
               className={`group flex items-center justify-between py-1.5 pr-2 cursor-pointer transition-colors ${
                 isSelected 
-                  ? 'bg-ubiq-accent/20 text-white' // Highlight Only Active File
-                  : 'text-slate-400 hover:text-slate-200 hover:bg-white/5' // Default Hover
+                  ? 'bg-ubiq-accent/20 text-white border-l-2 border-ubiq-accent' // Highlight Only Active File
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-white/5 border-l-2 border-transparent' // Default Hover
               }`}
               style={{ paddingLeft: `${paddingLeft}px` }}
               onClick={(e) => {
@@ -54,32 +66,37 @@ export default function FileTree({ nodes, onSelectFile, onDeleteNode, onCreateNo
             >
               <div className="flex items-center gap-1.5 truncate min-w-0">
                 {node.type === 'folder' && (
-                  <span className="shrink-0 text-slate-500">
+                  <span className="shrink-0 text-slate-500 hover:text-white transition-colors">
                     {isExpanded ? <ChevronDownIcon className="w-3 h-3" /> : <ChevronRightIcon className="w-3 h-3" />}
                   </span>
                 )}
+                
+                {/* Spacer for files so they align with folders */}
+                {node.type !== 'folder' && <div className="w-3 h-3 shrink-0" />}
+
                 {node.type === 'folder' ? (
-                  <FolderIcon className={`w-4 h-4 shrink-0 ${isExpanded ? 'text-ubiq-accent' : 'text-slate-500'}`} />
+                  <FolderIcon className={`w-4 h-4 shrink-0 ${isExpanded ? 'text-ubiq-accent' : 'text-slate-500 group-hover:text-slate-300'}`} />
                 ) : (
-                  <DocumentIcon className="w-4 h-4 shrink-0 opacity-70" />
+                  <DocumentIcon className={`w-4 h-4 shrink-0 ${isSelected ? 'text-ubiq-accent' : 'opacity-70'}`} />
                 )}
-                <span className="truncate">{node.name}</span>
+                
+                <span className={`truncate ${node.type === 'folder' ? 'font-semibold' : ''}`}>{node.name}</span>
               </div>
 
-              {/* Actions Area */}
+              {/* Actions Area - Only visible on hover */}
               <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                 {node.type === 'folder' && (
                   <>
                     <button 
                       onClick={(e) => { e.stopPropagation(); onCreateNode('file', node.path); setExpanded(p => ({...p, [node.path]: true})); }}
-                      className="p-1 hover:text-white hover:bg-white/10 rounded" 
+                      className="p-1 text-slate-400 hover:text-white hover:bg-white/10 rounded" 
                       title="New File"
                     >
                       <PlusIcon className="w-3 h-3" />
                     </button>
                     <button 
                       onClick={(e) => { e.stopPropagation(); onCreateNode('folder', node.path); setExpanded(p => ({...p, [node.path]: true})); }}
-                      className="p-1 hover:text-white hover:bg-white/10 rounded" 
+                      className="p-1 text-slate-400 hover:text-white hover:bg-white/10 rounded" 
                       title="New Folder"
                     >
                       <FolderPlusIcon className="w-3 h-3" />
@@ -89,7 +106,7 @@ export default function FileTree({ nodes, onSelectFile, onDeleteNode, onCreateNo
                 
                 <button 
                   onClick={(e) => { e.stopPropagation(); onDeleteNode(node); }}
-                  className="p-1 hover:text-red-400 hover:bg-white/10 rounded" 
+                  className="p-1 text-slate-500 hover:text-red-400 hover:bg-red-500/10 rounded transition-colors" 
                   title="Delete"
                 >
                   <TrashIcon className="w-3 h-3" />

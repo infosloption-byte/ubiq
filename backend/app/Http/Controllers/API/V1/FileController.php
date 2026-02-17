@@ -28,12 +28,20 @@ class FileController extends Controller
 
     public function index(Request $request, Project $project)
     {
-        if ($project->user_id !== $request->user()->id) return response()->json(['error' => 'Unauthorized'], 403);
+        if ($project->user_id !== $request->user()->id) {
+            return response()->json(['error' => 'Unauthorized'], 403);
+        }
 
-        $files = $project->files()
-            ->where('is_deleted', false)
-            ->select(['id', 'project_id', 'name', 'path', 'content', 'language', 'size_bytes', 'updated_at']) 
-            ->get();
+        // 1. Define the physical path
+        $projectPath = storage_path("app/workspaces/{$project->user_id}/{$project->id}");
+        
+        // Ensure directory exists
+        if (!FileSystem::exists($projectPath)) {
+            FileSystem::makeDirectory($projectPath, 0755, true);
+        }
+
+        // 2. Scan disk for real files (Flat List)
+        $files = $this->scanDirectory($projectPath, $projectPath, $project);
 
         return response()->json(['files' => $files]);
     }
@@ -112,6 +120,30 @@ class FileController extends Controller
         return response()->json(['message' => "Deleted $deleted files"]);
     }
 
+    /**
+     * Delete a single file resource (Route: DELETE /api/v1/files/{file})
+     */
+    public function destroy(Request $request, File $file)
+    {
+        // 1. Authorization
+        if ($file->project->user_id !== $request->user()->id) {
+            return response()->json(['error' => 'Unauthorized'], 403);
+        }
+
+        // 2. Delete from Disk
+        // Reconstruct the full path using the project ID structure
+        $fullPath = storage_path("app/workspaces/{$file->project->user_id}/{$file->project->id}/{$file->path}");
+        
+        if (FileSystem::exists($fullPath)) {
+            FileSystem::delete($fullPath);
+        }
+
+        // 3. Delete from Database
+        $file->delete();
+
+        return response()->json(['message' => 'File deleted successfully']);
+    }
+
     public function upload(Request $request, Project $project)
     {
         $request->validate(['file' => 'required|file|max:10240']);
@@ -163,5 +195,55 @@ class FileController extends Controller
         $mimeTypes = ['html'=>'text/html', 'css'=>'text/css', 'js'=>'application/javascript'];
         
         return response($file->content)->header('Content-Type', $mimeTypes[$ext] ?? 'text/plain');
+    }
+
+    /**
+     * Recursively scans the disk and syncs new files to the DB
+     */
+    private function scanDirectory($dir, $basePath, $project, &$results = []) {
+        $items = scandir($dir);
+
+        foreach ($items as $item) {
+            if ($item === '.' || $item === '..') continue;
+            if ($item === '.git') continue; 
+            
+            // SKIP HEAVY FOLDERS to keep IDE fast
+            if ($item === 'node_modules' || $item === 'vendor' || $item === '__pycache__') {
+                // Add the folder itself so user sees it exists, but don't scan contents
+                $relativePath = ltrim(substr($dir . '/' . $item, strlen($basePath)), '/');
+                $results[] = [
+                    'id' => 0, // Folders don't need real IDs
+                    'project_id' => $project->id,
+                    'name' => $item,
+                    'path' => $relativePath,
+                    'language' => 'folder', // Frontend treats this as a folder
+                    'updated_at' => now()
+                ];
+                continue;
+            }
+
+            $fullPath = $dir . '/' . $item;
+            $relativePath = ltrim(substr($fullPath, strlen($basePath)), '/');
+
+            if (is_dir($fullPath)) {
+                $this->scanDirectory($fullPath, $basePath, $project, $results);
+            } else {
+                // It's a file. We need to make sure it has an ID in the DB.
+                // This "Sync on Read" strategy ensures files created by Docker can be opened.
+                $fileRecord = \App\Models\File::firstOrCreate(
+                    ['project_id' => $project->id, 'path' => $relativePath],
+                    [
+                        'name' => $item,
+                        'content' => '', // Lazy load content to speed up listing
+                        'language' => pathinfo($item, PATHINFO_EXTENSION),
+                        'size_bytes' => filesize($fullPath),
+                        'is_deleted' => false
+                    ]
+                );
+
+                $results[] = $fileRecord;
+            }
+        }
+        return $results;
     }
 }

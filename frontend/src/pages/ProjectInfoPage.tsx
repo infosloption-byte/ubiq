@@ -9,7 +9,7 @@ import {
   FolderIcon, DocumentTextIcon, ArrowDownTrayIcon, CloudArrowUpIcon, 
   CodeBracketIcon, ChevronRightIcon, ClockIcon, ArrowLeftIcon, 
   TrashIcon, PencilSquareIcon, ArrowDownOnSquareIcon, EyeIcon, 
-  XMarkIcon 
+  XMarkIcon, ArrowPathIcon 
 } from '@heroicons/react/24/outline';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
@@ -39,6 +39,9 @@ export default function ProjectInfoPage() {
   // --- NEW: Delete State ---
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
+
+  const [downloadStatus, setDownloadStatus] = useState<'idle' | 'compressing' | 'downloading'>('idle');
+  const [downloadProgress, setDownloadProgress] = useState(0);
 
   useEffect(() => {
     loadData();
@@ -102,7 +105,6 @@ export default function ProjectInfoPage() {
   // --- ACTIONS ---
   const handleProjectDownload = async () => {
       try {
-          // FIX: Check 'auth_token' first (Google Auth support)
           const token = localStorage.getItem('auth_token') || localStorage.getItem('token') || JSON.parse(localStorage.getItem('auth-storage') || '{}').state?.token;
           
           if (!token) {
@@ -110,23 +112,49 @@ export default function ProjectInfoPage() {
               return;
           }
 
+          // 1. Set status to Compressing (Waiting for server)
+          setDownloadStatus('compressing');
+          setDownloadProgress(0);
+
           const response = await axios.get(`${import.meta.env.VITE_API_URL}/projects/${id}/download`, {
               headers: { Authorization: `Bearer ${token}` },
-              responseType: 'blob'
+              responseType: 'blob',
+              onDownloadProgress: (progressEvent) => {
+                  // 2. Once bytes start arriving, switch to Downloading
+                  if (downloadStatus !== 'downloading') {
+                      setDownloadStatus('downloading');
+                  }
+                  
+                  if (progressEvent.total) {
+                      const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+                      setDownloadProgress(percentCompleted);
+                  }
+              }
           });
+
+          // 3. Handle File Save
           const url = window.URL.createObjectURL(new Blob([response.data]));
           const link = document.createElement('a');
           link.href = url;
           link.setAttribute('download', `${project.name}.zip`);
           document.body.appendChild(link);
           link.click();
+          
+          // Cleanup
+          window.URL.revokeObjectURL(url);
+          document.body.removeChild(link);
+          
       } catch (e) {
           console.error("Download failed", e);
           alert("Failed to download project.");
+      } finally {
+          // Reset after a short delay so user sees 100%
+          setTimeout(() => {
+              setDownloadStatus('idle');
+              setDownloadProgress(0);
+          }, 1000);
       }
   };
-
-  
 
   const handleFileDownload = (file: any) => {
       const blob = new Blob([file.content || ''], { type: 'text/plain' });
@@ -370,9 +398,43 @@ export default function ProjectInfoPage() {
                     <div className="glass-panel p-5 rounded-xl space-y-3">
                         <h3 className="text-white font-bold text-sm mb-2">Project Actions</h3>
                         
-                        <button onClick={handleProjectDownload} className="w-full flex items-center justify-between px-4 py-3 bg-ubiq-900 hover:bg-ubiq-800 border border-white/5 rounded-lg text-sm text-slate-300 transition-colors group">
-                            <span className="flex items-center gap-2"><ArrowDownOnSquareIcon className="w-4 h-4 text-blue-400" /> Download ZIP</span>
-                            <ArrowDownTrayIcon className="w-4 h-4 opacity-0 group-hover:opacity-100 transition-opacity" />
+                        {/* UPDATED DOWNLOAD BUTTON */}
+                        <button 
+                            onClick={handleProjectDownload} 
+                            disabled={downloadStatus !== 'idle'}
+                            className="w-full flex flex-col justify-center px-4 py-3 bg-ubiq-900 hover:bg-ubiq-800 border border-white/5 rounded-lg text-sm text-slate-300 transition-colors group relative overflow-hidden"
+                        >
+                            {/* Standard State */}
+                            {downloadStatus === 'idle' && (
+                                <div className="flex items-center justify-between w-full">
+                                    <span className="flex items-center gap-2"><ArrowDownOnSquareIcon className="w-4 h-4 text-blue-400" /> Download ZIP</span>
+                                    <ArrowDownTrayIcon className="w-4 h-4 opacity-0 group-hover:opacity-100 transition-opacity" />
+                                </div>
+                            )}
+
+                            {/* Compressing State */}
+                            {downloadStatus === 'compressing' && (
+                                <div className="flex items-center gap-3 w-full animate-pulse">
+                                    <ArrowPathIcon className="w-4 h-4 animate-spin text-ubiq-accent" />
+                                    <span className="text-ubiq-accent font-medium">Compressing Files...</span>
+                                </div>
+                            )}
+
+                            {/* Downloading State */}
+                            {downloadStatus === 'downloading' && (
+                                <div className="w-full">
+                                    <div className="flex justify-between text-xs mb-1">
+                                        <span className="text-emerald-400 font-bold">Downloading...</span>
+                                        <span className="text-white">{downloadProgress}%</span>
+                                    </div>
+                                    <div className="w-full h-1 bg-ubiq-950 rounded-full overflow-hidden">
+                                        <div 
+                                            className="h-full bg-emerald-500 transition-all duration-300 ease-out" 
+                                            style={{ width: `${downloadProgress}%` }}
+                                        />
+                                    </div>
+                                </div>
+                            )}
                         </button>
 
                         <button onClick={() => setEditModalOpen(true)} className="w-full flex items-center justify-between px-4 py-3 bg-ubiq-900 hover:bg-ubiq-800 border border-white/5 rounded-lg text-sm text-slate-300 transition-colors group">

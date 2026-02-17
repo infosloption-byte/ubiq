@@ -62,6 +62,8 @@ Route::prefix('v1')->group(function () {
         Route::get('projects/{project}/download', [App\Http\Controllers\API\V1\ProjectController::class, 'download']);
         Route::get('projects/{project}/files/{file}/serve', [App\Http\Controllers\API\V1\FileController::class, 'serve']);
         Route::post('projects/{project}/run', [App\Http\Controllers\API\V1\ProjectController::class, 'runProject']);
+        Route::post('projects/{project}/terminal', [App\Http\Controllers\API\V1\TerminalController::class, 'execute']);
+        Route::get('projects/{project}/build-log', [App\Http\Controllers\API\V1\ProjectController::class, 'getBuildLog']);
 
         //Project Git 
         // Route::prefix('projects/{project}/git')->group(function () {

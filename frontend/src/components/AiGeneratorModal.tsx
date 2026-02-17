@@ -1,8 +1,8 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { aiService } from '../services/aiService';
 import { projectAPI } from '../services/api';
-import { Sparkles, X, Loader2, Cloud, Cpu } from 'lucide-react';
+import { Sparkles, X, Loader2, Cloud, Cpu, Globe, Settings, Save } from 'lucide-react';
 import ModelSelector from './ModelSelector'; 
 
 interface AiGeneratorModalProps {
@@ -13,15 +13,34 @@ interface AiGeneratorModalProps {
 export default function AiGeneratorModal({ isOpen, onClose }: AiGeneratorModalProps) {
     const navigate = useNavigate();
     
+    // --- STATE ---
     const [prompt, setPrompt] = useState('');
     const [loading, setLoading] = useState(false);
     const [status, setStatus] = useState('');
     
-    // Model Selection State
-    const [aiMode, setAiMode] = useState<'cloud' | 'local'>('cloud');
-    const [selectedModel, setSelectedModel] = useState('gpt-4o'); // Default
+    // AI Configuration
+    const [aiMode, setAiMode] = useState<'cloud' | 'local' | 'remote'>('cloud');
+    const [selectedModel, setSelectedModel] = useState('gpt-4o'); 
+    
+    // Remote Connection Settings
+    const [showSettings, setShowSettings] = useState(false);
+    const [remoteUrl, setRemoteUrl] = useState(localStorage.getItem('ubiq_remote_url') || 'http://localhost:11434');
 
+    // Save remote URL to local storage
+    const handleSaveSettings = () => {
+        localStorage.setItem('ubiq_remote_url', remoteUrl);
+        setShowSettings(false);
+    };
+
+    // Auto-select defaults when switching modes
+    useEffect(() => {
+        if (aiMode === 'cloud') setSelectedModel('gpt-4o');
+        // For local/remote, ModelSelector usually handles default selection or we let user pick
+    }, [aiMode]);
+
+    // Robust Response Parser
     const parseResponse = (rawOutput: string) => {
+        // 1. Try parsing "---START_FILE---" block format (Preferred for Local Models)
         if (rawOutput.includes('---START_FILE:')) {
             const files = [];
             const parts = rawOutput.split('---START_FILE:');
@@ -45,19 +64,23 @@ export default function AiGeneratorModal({ isOpen, onClose }: AiGeneratorModalPr
             if (files.length > 0) return files;
         }
 
+        // 2. Fallback: Try parsing pure JSON or Markdown-wrapped JSON
         let jsonStr = rawOutput;
-        const start = rawOutput.indexOf('[');
+        const start = rawOutput.indexOf('['); // Look for array start
         const end = rawOutput.lastIndexOf(']');
+        
         if (start !== -1 && end !== -1) {
             jsonStr = rawOutput.substring(start, end + 1);
         }
         
+        // Clean markdown code blocks
         jsonStr = jsonStr.replace(/```json/g, '').replace(/```/g, '');
         
         try {
             return JSON.parse(jsonStr);
         } catch (e) {
             try {
+                // Last resort: unsafe eval if JSON is slightly malformed (keys without quotes etc)
                 // eslint-disable-next-line no-new-func
                 return new Function('return ' + jsonStr)(); 
             } catch (e2) {
@@ -72,6 +95,7 @@ export default function AiGeneratorModal({ isOpen, onClose }: AiGeneratorModalPr
         setStatus('Initializing Workspace...');
 
         try {
+            // 1. Create Project Container
             const projectRes = await projectAPI.create({
                 name: "AI App " + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
                 description: prompt.substring(0, 50) + "...",
@@ -82,64 +106,51 @@ export default function AiGeneratorModal({ isOpen, onClose }: AiGeneratorModalPr
 
             setStatus(`Architecting with ${selectedModel}...`);
             
-            // --- EXPANDED POLYGLOT SYSTEM PROMPT ---
+            // 2. Construct System Prompt
             const systemPrompt = `You are an Expert Full Stack Architect.
             TASK: Generate a complete, production-ready web application workspace.
             
-            TECHNOLOGY STACK SELECTION:
-            - If the user specifies a framework (React, Angular, Laravel, Django, Next.js, etc.), you MUST strictly use that technology stack.
-            - If the user does not specify a stack, you MUST analyze their requirements and independently choose the OPTIMUM modern stack for their specific use case.
-            
-            STRICT OUTPUT FORMAT (NO JSON):
-            You must output files using exactly this block format. Do NOT use markdown blocks outside of this format:
-
+            OUTPUT FORMAT (STRICT):
             ---START_FILE: filename.ext---
-            // content here
+            // content
             ---END_FILE---
 
             CRITICAL RULES:
-            1. You MUST include a 'ubiq.json' file to configure the server.
-            2. 'ubiq.json' MUST contain:
-               - "title": A short, catchy name for this project based on the prompt.
-               - "runtime": Map to EXACTLY ONE of these: "static", "node", "php", "python".
-               - "entry": The primary file to execute/serve (e.g., package.json, composer.json, index.html).
-            
-            DECISION TREE FOR RUNTIME:
-            - Vanilla HTML/JS -> "runtime": "static"
-            - React/Vue/Node/Next/Angular -> "runtime": "node" 
-            - PHP/Laravel/Symfony -> "runtime": "php" 
-            - Python/Django/Flask -> "runtime": "python" 
+            1. Include 'ubiq.json' (runtime: static/node/php/python).
+            2. If 'node', include 'package.json' with "dev": "vite --port 5173 --host 0.0.0.0".
+            3. React/Vue 'index.html' must be in ROOT.
+            4. If 'php', standard structure + 'composer.json'.
+            5. Provide FULL code. No placeholders.`;
 
-            3. DEPENDENCY ENFORCEMENT & PORT STANDARDIZATION:
-               - If runtime is "node", generate 'package.json'. CRITICAL: Configure the "dev" script to run on port 5173 and bind to 0.0.0.0 (e.g., "vite --port 5173 --host 0.0.0.0", "next dev -p 5173 -H 0.0.0.0", "ng serve --port 5173 --host 0.0.0.0").
-               - If runtime is "php", generate 'composer.json' (if applicable) and standard PHP directory structure.
-               - If runtime is "python", generate 'requirements.txt'.
-              
-            4. Provide ALL necessary code. Do not leave placeholders.`;
+            const fullMessage = `${systemPrompt}\n\nUser Request: ${prompt}`;
 
-            // --- DYNAMIC PROMPT REINFORCEMENT ---
-            let enhancedPrompt = prompt;
-            const promptLower = prompt.toLowerCase();
+            // 3. Prepare Config based on Mode
+            const apiConfig: any = {
+                project_id: projectId
+            };
             
-            if (/(react|vue|angular|svelte|next|nuxt|node|express)/.test(promptLower)) {
-                enhancedPrompt += "\n\nCRITICAL ENFORCEMENT: You MUST use '\"runtime\": \"node\"' and generate a 'package.json'. Configure the dev server to run on port 5173. Do NOT output a static HTML fallback.";
-            } else if (/(php|laravel|symfony|codeigniter)/.test(promptLower)) {
-                enhancedPrompt += "\n\nCRITICAL ENFORCEMENT: You MUST use '\"runtime\": \"php\"' and generate a 'composer.json' if applicable. Do NOT output a static HTML fallback.";
-            } else if (/(python|django|flask|fastapi)/.test(promptLower)) {
-                enhancedPrompt += "\n\nCRITICAL ENFORCEMENT: You MUST use '\"runtime\": \"python\"' and generate a 'requirements.txt'. Do NOT output a static HTML fallback.";
-            } else {
-                enhancedPrompt += "\n\nCRITICAL ENFORCEMENT: Choose the best tech stack. If it requires a build step or server (Node/PHP/Python), you MUST set the correct 'runtime' in ubiq.json and generate the dependency files.";
+            if (aiMode === 'remote') {
+                const currentRemoteUrl = localStorage.getItem('ubiq_remote_url');
+                if (!currentRemoteUrl) throw new Error("Please configure your Remote URL in settings.");
+                apiConfig.api_keys = { ollama_url: currentRemoteUrl };
             }
+            // Note: If 'local', we send no api_keys. Backend defaults to host.docker.internal.
 
-            const fullMessage = `${systemPrompt}\n\nUser Request: ${enhancedPrompt}`;
-
-            const response = await aiService.chat(fullMessage, [], aiMode, selectedModel, projectId);
+            // 4. Call AI Service
+            const response = await aiService.chat(
+                fullMessage, 
+                [], 
+                aiMode === 'cloud' ? 'cloud' : 'local', // Service layer treats Remote as 'local' (Ollama provider)
+                selectedModel, 
+                apiConfig
+            );
 
             setStatus('Extracting Files...');
             let files = [];
             
             try {
                 files = parseResponse(response.content);
+                // Ensure content is stringified if it came back as JSON object/array
                 files = files.map((f: any) => {
                     let content = f.content;
                     if (Array.isArray(content)) content = content.join('\n');
@@ -154,7 +165,7 @@ export default function AiGeneratorModal({ isOpen, onClose }: AiGeneratorModalPr
             setStatus(`Saving ${files.length} files...`);
             await projectAPI.scaffold(projectId, files);
 
-            // --- NEW: DYNAMIC TITLE EXTRACTION ---
+            // 5. Dynamic Title Update
             try {
                 const ubiqFile = files.find((f: any) => f.path === 'ubiq.json');
                 if (ubiqFile) {
@@ -164,9 +175,7 @@ export default function AiGeneratorModal({ isOpen, onClose }: AiGeneratorModalPr
                         await projectAPI.update(projectId, { name: parsedUbiq.title });
                     }
                 }
-            } catch (titleError) {
-                console.warn("Failed to extract dynamic title from ubiq.json");
-            }
+            } catch (e) {}
 
             setStatus('Saving conversation...');
             const fileList = files.map((f: any) => `- \`${f.path}\``).join('\n');
@@ -205,26 +214,88 @@ export default function AiGeneratorModal({ isOpen, onClose }: AiGeneratorModalPr
                     {/* Model Selection UI */}
                     <div className="space-y-2">
                         <div className="flex items-center justify-between mb-2">
-                            <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">AI Architect Model</label>
+                            <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">AI Provider</label>
                             
-                            {/* Toggle Cloud / Local */}
+                            {/* 3-WAY TOGGLE */}
                             <div className="flex bg-black/30 rounded-lg p-0.5 border border-white/5">
-                                <button onClick={() => setAiMode('cloud')} className={`px-3 py-1 rounded-md text-[10px] font-medium flex items-center gap-1.5 transition-all ${aiMode === 'cloud' ? 'bg-indigo-600 text-white shadow' : 'text-slate-500 hover:text-slate-300'}`}>
+                                <button 
+                                    onClick={() => setAiMode('cloud')} 
+                                    className={`px-3 py-1 rounded-md text-[10px] font-medium flex items-center gap-1.5 transition-all ${aiMode === 'cloud' ? 'bg-indigo-600 text-white shadow' : 'text-slate-500 hover:text-slate-300'}`}
+                                >
                                     <Cloud className="w-3 h-3" /> Cloud
                                 </button>
-                                <button onClick={() => setAiMode('local')} className={`px-3 py-1 rounded-md text-[10px] font-medium flex items-center gap-1.5 transition-all ${aiMode === 'local' ? 'bg-emerald-600 text-white shadow' : 'text-slate-500 hover:text-slate-300'}`}>
+                                <button 
+                                    onClick={() => setAiMode('local')} 
+                                    className={`px-3 py-1 rounded-md text-[10px] font-medium flex items-center gap-1.5 transition-all ${aiMode === 'local' ? 'bg-emerald-600 text-white shadow' : 'text-slate-500 hover:text-slate-300'}`}
+                                >
                                     <Cpu className="w-3 h-3" /> Local
+                                </button>
+                                <button 
+                                    onClick={() => setAiMode('remote')} 
+                                    className={`px-3 py-1 rounded-md text-[10px] font-medium flex items-center gap-1.5 transition-all ${aiMode === 'remote' ? 'bg-amber-600 text-white shadow' : 'text-slate-500 hover:text-slate-300'}`}
+                                >
+                                    <Globe className="w-3 h-3" /> Remote
                                 </button>
                             </div>
                         </div>
 
-                        {/* USE YOUR EXISTING CUSTOM COMPONENT HERE */}
-                        <ModelSelector 
-                            aiMode={aiMode}
-                            selectedModel={selectedModel}
-                            onSelectModel={setSelectedModel}
-                            menuPosition="bottom"
-                        />
+                        {/* Model Selector Row */}
+                        <div className="flex items-center gap-2">
+                            <div className="flex-1">
+                                <ModelSelector 
+                                    // Pass 'local' to filter for Ollama models if in Local OR Remote mode
+                                    aiMode={aiMode === 'cloud' ? 'cloud' : 'local'} 
+                                    selectedModel={selectedModel} 
+                                    onSelectModel={setSelectedModel} 
+                                    menuPosition="bottom" 
+                                />
+                            </div>
+                            
+                            {/* Settings Toggle (Only for Remote) */}
+                            {aiMode === 'remote' && (
+                                <button 
+                                    onClick={() => setShowSettings(!showSettings)}
+                                    className={`p-2.5 rounded-lg border transition-all ${showSettings ? 'bg-amber-500/20 border-amber-500/50 text-amber-400' : 'bg-black/30 border-white/10 text-slate-400 hover:bg-white/5 hover:text-white'}`}
+                                    title="Configure Remote URL"
+                                >
+                                    <Settings className="w-4 h-4" />
+                                </button>
+                            )}
+                        </div>
+
+                        {/* Inline Settings Panel (Only for Remote) */}
+                        {showSettings && aiMode === 'remote' && (
+                            <div className="mt-2 p-3 bg-black/40 border border-white/10 rounded-lg animate-fade-in">
+                                <label className="block text-[10px] font-bold text-slate-500 mb-1.5 uppercase">Remote Server URL (EC2)</label>
+                                <div className="flex gap-2">
+                                    <input 
+                                        type="text" 
+                                        value={remoteUrl} 
+                                        onChange={(e) => setRemoteUrl(e.target.value)}
+                                        placeholder="http://54.123.x.x:11434"
+                                        className="flex-1 bg-ubiq-950 border border-white/10 rounded px-2 py-1.5 text-xs text-white focus:border-amber-500 outline-none placeholder:text-slate-600 font-mono"
+                                    />
+                                    <button 
+                                        onClick={handleSaveSettings} 
+                                        className="bg-amber-600 px-3 py-1 text-xs text-white rounded font-medium hover:bg-amber-500 flex items-center gap-1"
+                                    >
+                                        <Save className="w-3 h-3" /> Save
+                                    </button>
+                                </div>
+                                <p className="text-[9px] text-slate-500 mt-1.5 flex items-center gap-1">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse"/>
+                                    Connects your backend to an external Ollama instance.
+                                </p>
+                            </div>
+                        )}
+                        
+                        {/* Info Banner for Local Mode */}
+                        {aiMode === 'local' && (
+                            <div className="text-[10px] text-emerald-400 bg-emerald-900/20 border border-emerald-900/50 p-2 rounded flex items-center gap-2">
+                                <Cpu className="w-3 h-3" />
+                                <span>Using Docker Host (host.docker.internal:11434)</span>
+                            </div>
+                        )}
                     </div>
 
                     {/* Prompt Input */}
