@@ -125,25 +125,47 @@ export default function Layout({ children }: LayoutProps) {
              <div className="w-9 h-9 rounded-full bg-gradient-to-br from-slate-700 to-slate-800 flex items-center justify-center text-xs font-bold text-white ring-1 ring-white/10 shadow-inner cursor-default">
                 {user?.username?.[0]?.toUpperCase() || 'U'}
              </div>
-             {/* Hover Popup */}
-             <div className="absolute left-full ml-4 bottom-0 w-max bg-ubiq-900 border border-white/10 p-3 rounded-xl shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 z-50">
+             {/* Hover Popup inside Layout.tsx */}
+              <div className="absolute left-full ml-4 bottom-0 w-max bg-ubiq-900 border border-white/10 p-3 rounded-xl shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 z-50">
                 <p className="text-sm font-medium text-white">{user?.username}</p>
-                <div className="flex items-center gap-1.5 mt-1 text-xs text-ubiq-accent font-medium uppercase tracking-wide">
-                   <SparklesIcon className="w-3 h-3" />
-                   {user?.subscription_tier || 'Free'} Plan
+                
+                <div className="flex flex-col gap-1.5 mt-2">
+                  <div className="flex items-center gap-1.5 text-[10px] text-slate-300 font-bold uppercase tracking-wide">
+                    <SparklesIcon className="w-3 h-3 text-indigo-400" />
+                    {user?.subscription_tier || 'Free'} Plan
+                  </div>
+                  
+                  {/* Status Badge */}
+                  <span className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded border self-start ${
+                    user?.subscription_status === 'active' 
+                      ? 'bg-green-500/10 text-green-400 border-green-500/20' 
+                      : user?.subscription_status === 'trialing'
+                      ? 'bg-blue-500/10 text-blue-400 border-blue-500/20'
+                      : 'bg-red-500/10 text-red-400 border-red-500/20'
+                  }`}>
+                    {user?.subscription_status}
+                  </span>
                 </div>
-             </div>
+              </div>
           </div>
 
-          {/* Mobile User Info */}
+          {/* Mobile User Info inside Layout.tsx */}
           <div className="md:hidden flex items-center gap-3 w-full p-2 rounded-xl bg-white/5 border border-white/5">
-             <div className="w-8 h-8 rounded-full bg-ubiq-800 flex items-center justify-center text-white font-bold text-xs">
+              <div className="w-8 h-8 rounded-full bg-ubiq-800 flex items-center justify-center text-white font-bold text-xs">
                 {user?.username?.[0]?.toUpperCase() || 'U'}
-             </div>
-             <div className="flex flex-col">
+              </div>
+              <div className="flex flex-col">
                 <span className="text-sm text-white font-medium">{user?.username}</span>
-                <span className="text-xs text-ubiq-accent">{user?.subscription_tier || 'Free'} Plan</span>
-             </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-ubiq-accent font-bold uppercase">{user?.subscription_tier || 'Free'}</span>
+                  <span className="text-slate-600 text-xs">•</span>
+                  <span className={`text-[10px] font-bold uppercase ${
+                    user?.subscription_status === 'active' ? 'text-green-400' : 'text-blue-400'
+                  }`}>
+                    {user?.subscription_status}
+                  </span>
+                </div>
+              </div>
           </div>
 
           <button

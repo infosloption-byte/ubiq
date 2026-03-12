@@ -36,9 +36,15 @@ return [
     ],
 
     'google' => [
-        'client_id' => env('GOOGLE_CLIENT_ID'),
-        'client_secret' => env('GOOGLE_CLIENT_SECRET'),
-        'redirect' => env('GOOGLE_REDIRECT_URI'), // e.g., http://localhost:8000/api/v1/auth/google/callback
+        'client_id' => '1058375657595-3qeslkpjie925539l5k3jaa75vdhneoa.apps.googleusercontent.com',
+        'client_secret' => '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',
+        'redirect' => 'https://api.ubiq-editor.space/api/v1/auth/google/callback',
+    ],
+
+    'paddle' => [
+        'vendor_id' => env('PADDLE_VENDOR_ID'),
+        'vendor_auth_code' => env('PADDLE_VENDOR_AUTH_CODE'),
+        'mode' => env('PADDLE_ENV', 'sandbox'),
     ],
 
 ];

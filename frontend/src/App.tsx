@@ -1,8 +1,11 @@
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { useAuthStore } from './stores/authStore';
 
+// --- COMPONENTS ---
+import { SubscriptionGuard } from './components/SubscriptionGuard';
+
 // --- PAGES ---
-import LandingPage from './pages/LandingPage'; // <--- Import Landing Page
+import LandingPage from './pages/LandingPage';
 import LoginPage from './pages/LoginPage';
 import RegisterPage from './pages/RegisterPage';
 import DashboardPage from './pages/DashboardPage';
@@ -15,6 +18,9 @@ import ProjectInfoPage from './pages/ProjectInfoPage';
 import AuthCallbackPage from './pages/AuthCallbackPage';
 import GuidePage from './pages/GuidePage';
 import AdminPage from './pages/AdminPage';
+import TermsOfService from './pages/TermsOfService';
+import PrivacyPolicy from './pages/PrivacyPolicy';
+import RefundPolicy from './pages/RefundPolicy';
 
 function App() {
   const { token } = useAuthStore();
@@ -22,19 +28,14 @@ function App() {
   return (
     <Router>
       <Routes>
-        
-        <Route path="/admin" element={
-            // Simple check: if not logged in, it will fail API calls anyway. 
-            // Ideally wrap in a <AdminRoute> component, but standard <Route> works if backend returns 403.
-            <AdminPage />
-        } />
-
-        {/* --- ROOT ROUTE (LANDING PAGE) --- */}
+        <Route path="/admin" element={<AdminPage />} />
         <Route path="/" element={<LandingPage />} />
-
         <Route path="/guide" element={<GuidePage />} />
-
         <Route path="/auth/callback" element={<AuthCallbackPage />} />
+
+        <Route path="/terms" element={<TermsOfService />} />
+        <Route path="/privacy" element={<PrivacyPolicy />} />
+        <Route path="/refund" element={<RefundPolicy />} />
 
         {/* Public routes */}
         <Route 
@@ -46,54 +47,46 @@ function App() {
           element={!token ? <RegisterPage /> : <Navigate to="/dashboard" />} 
         />
 
-        {/* Protected routes */}
+        {/* Protected routes - NO GUARD */}
         <Route 
           path="/dashboard" 
           element={token ? <DashboardPage /> : <Navigate to="/login" />} 
         />
-        
-        {/* Legacy Editor */}
-        <Route 
-          path="/legacy-editor" 
-          element={token ? <EditorPage /> : <Navigate to="/login" />} 
-        />
-        <Route 
-          path="/legacy-editor/:projectId" 
-          element={token ? <EditorPage /> : <Navigate to="/login" />} 
-        />
-
-        {/* --- CHAT ROUTES --- */}
-        <Route 
-          path="/chat" 
-          element={token ? <ChatPage /> : <Navigate to="/login" />} 
-        />
-        <Route 
-          path="/chat/:sessionId" 
-          element={token ? <ChatPage /> : <Navigate to="/login" />} 
-        />
-
         <Route 
           path="/settings" 
           element={token ? <SettingsPage /> : <Navigate to="/login" />} 
         />
 
-        {/* --- NEW PROJECT ROUTES --- */}
+        {/* Protected routes - WITH SUBSCRIPTION GUARD */}
+        <Route 
+          path="/chat" 
+          element={token ? <SubscriptionGuard><ChatPage /></SubscriptionGuard> : <Navigate to="/login" />} 
+        />
+        <Route 
+          path="/chat/:sessionId" 
+          element={token ? <SubscriptionGuard><ChatPage /></SubscriptionGuard> : <Navigate to="/login" />} 
+        />
+
         <Route 
             path="/projects" 
-            element={token ? <ProjectsPage /> : <Navigate to="/login" />} 
+            element={token ? <SubscriptionGuard><ProjectsPage /></SubscriptionGuard> : <Navigate to="/login" />} 
         />
         
         <Route 
             path="/projects/:id" 
-            element={token ? <ProjectInfoPage /> : <Navigate to="/login" />} 
+            element={token ? <SubscriptionGuard><ProjectInfoPage /></SubscriptionGuard> : <Navigate to="/login" />} 
         />
         
         <Route 
             path="/editor/:id" 
-            element={token ? <ProjectEditorPage /> : <Navigate to="/login" />} 
+            element={token ? <SubscriptionGuard><ProjectEditorPage /></SubscriptionGuard> : <Navigate to="/login" />} 
+        />
+
+        <Route 
+          path="/legacy-editor" 
+          element={token ? <SubscriptionGuard><EditorPage /></SubscriptionGuard> : <Navigate to="/login" />} 
         />
         
-        {/* 404 - Redirect to Landing Page */}
         <Route 
           path="*" 
           element={<Navigate to="/" />} 

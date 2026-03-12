@@ -22,6 +22,7 @@ class UserController extends Controller
                 'username' => $user->username,
                 'email' => $user->email,
                 'subscription_tier' => $user->subscription_tier,
+                'subscription_status' => $user->subscription_status, // Add this
                 'api_key' => $user->api_key,
                 'created_at' => $user->created_at,
             ]
@@ -174,6 +175,7 @@ class UserController extends Controller
                 'total_files' => $user->projects()->withCount('files')->get()->sum('files_count'),
                 'total_chats' => $user->chatSessions()->count(),
                 'subscription_tier' => $user->subscription_tier,
+                'subscription_status' => $user->subscription_status,
                 'member_since' => $user->created_at->diffForHumans(),
             ]
         ]);

@@ -191,6 +191,10 @@ class ProjectController extends Controller
 
     private function importFromGithub(Project $project, ?string $token, string $destinationPath)
     {
+        if ($request->user()->isOverStorageLimit()) {
+            return response()->json(['error' => 'Storage limit reached'], 403);
+        }
+
         $repoUrl = $project->repository_url;
 
         if ($token) {
@@ -261,6 +265,10 @@ class ProjectController extends Controller
 
     public function import(Request $request)
     {
+        if ($request->user()->isOverStorageLimit()) {
+            return response()->json(['error' => 'Storage limit reached'], 403);
+        }
+
         $validator = Validator::make($request->all(), [
             'name' => 'required|string|max:191',
             'description' => 'nullable|string',
@@ -473,7 +481,7 @@ class ProjectController extends Controller
             return response()->json(['error' => 'Docker failed', 'details' => $result->errorOutput()], 500);
         }
 
-        $serverIp = '3.88.204.62'; 
+        $serverIp = env('SERVER_PUBLIC_IP', $request->getHost());
         
         return response()->json([
             'message' => 'Project booting...',

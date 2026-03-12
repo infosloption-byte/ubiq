@@ -10,6 +10,22 @@ const api = axios.create({
   timeout: 30000,
 });
 
+api.interceptors.request.use((config) => {
+    console.log(`🚀 [API Request] ${config.method?.toUpperCase()} ${config.url}`, config.data || '');
+    return config;
+});
+
+api.interceptors.response.use(
+    (response) => {
+        console.log(`✅ [API Response] ${response.status} ${response.config.url}`, response.data);
+        return response;
+    },
+    (error) => {
+        console.error(`❌ [API Error] ${error.response?.status} ${error.config?.url}`, error.response?.data);
+        return Promise.reject(error);
+    }
+);
+
 api.interceptors.request.use(
   (config) => {
     let token = localStorage.getItem('auth_token') || localStorage.getItem('token');
@@ -62,6 +78,27 @@ export const userAPI = {
   updatePreferences: (data: any) => api.put('/user/preferences', data),
   getUsage: (days?: number) => api.get('/user/usage', { params: { days } }),
   getStats: () => api.get('/user/stats'),
+};
+
+// subscription
+export const subscriptionApi = {
+  // Used by SubscriptionGuard (if you still use the redirect flow)
+  createSubscription: async () => {
+    const response = await api.post('/paypal/subscribe'); // Simplified path
+    return response.data; 
+  },
+
+  // Used by SettingsPage.tsx (The Smart Button flow)
+  verifyOnServer: (subscriptionId: string) => 
+    api.post('/paypal/subscribe', { paypal_subscription_id: subscriptionId }),
+
+  // Used by PaymentSuccessPage.tsx (The Redirect flow)
+  verifySubscription: (subscriptionId: string) => 
+    api.get(`/paypal/verify`, { params: { subscription_id: subscriptionId } }),
+
+  // Used by SettingsPage.tsx to stop billing
+  cancelSubscription: () => 
+    api.post('/paypal/cancel')
 };
 
 export const projectAPI = {

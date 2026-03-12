@@ -146,6 +146,14 @@ class FileController extends Controller
 
     public function upload(Request $request, Project $project)
     {
+        // Check if user is over storage limit
+        if ($request->user()->isOverStorageLimit()) {
+            return response()->json([
+                'error' => 'Storage limit reached',
+                'message' => 'You have used all your available storage. Please upgrade your plan.'
+            ], 403);
+        }
+
         $request->validate(['file' => 'required|file|max:10240']);
 
         if ($project->user_id !== $request->user()->id) return response()->json(['error' => 'Unauthorized'], 403);

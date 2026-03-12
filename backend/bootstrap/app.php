@@ -22,11 +22,13 @@ return Application::configure(basePath: dirname(__DIR__))
             'verified' => \App\Http\Middleware\EnsureEmailIsVerified::class,
             'rate.limit' => \App\Http\Middleware\RateLimitMiddleware::class,
             'admin' => \App\Http\Middleware\AdminMiddleware::class,
+            'subscribed' => \App\Http\Middleware\CheckSubscription::class,
         ]);
 
         // CORS configuration for API
         $middleware->validateCsrfTokens(except: [
             'api/*',
+            'api/v1/paddle/webhook', // Explicitly excluded for clarity
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions) {

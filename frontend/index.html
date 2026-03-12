@@ -4,8 +4,21 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>AI Coding Platform - Free AI-Powered Code Assistant</title>
-    <meta name="description" content="Free AI-powered coding platform with code completion, chat assistance, and code review using open-source models." />
+    <title>Ubiq - AI Coding Platform</title>
+    
+    <script src="https://cdn.paddle.com/paddle/v2/paddle.js"></script>
+    <script type="text/javascript">
+      // 1. Set Environment immediately
+      const paddleEnv = "%VITE_PADDLE_ENV%"; 
+      if (paddleEnv === "sandbox") {
+        Paddle.Environment.set("sandbox");
+      }
+
+      // 2. Initialize with Client Token
+      Paddle.Initialize({ 
+        token: "%VITE_PADDLE_CLIENT_TOKEN%" 
+      });
+    </script>
   </head>
   <body>
     <div id="root"></div>

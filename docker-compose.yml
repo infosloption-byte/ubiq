@@ -1,0 +1,59 @@
+version: '3.8'
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: ubiq_mysql
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: ubiq
+      MYSQL_USER: ubiq_user
+      MYSQL_PASSWORD: 123456
+    volumes:
+      - db_data:/var/lib/mysql
+    networks:
+      - ubiq-net
+    command: --default-authentication-plugin=mysql_native_password
+
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ubiq_api
+    restart: always
+    volumes:
+      - ./backend:/var/www/html
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      APP_ENV: production
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - mysql
+    networks:
+      - ubiq-net
+
+  nginx:
+    image: nginx:alpine
+    container_name: ubiq_nginx
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./backend:/var/www/html
+      - ./frontend/dist:/var/www/frontend
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf
+      - /etc/letsencrypt:/etc/letsencrypt
+    depends_on:
+      - api
+    networks:
+      - ubiq-net
+
+volumes:
+  db_data:
+
+networks:
+  ubiq-net:
+    driver: bridge

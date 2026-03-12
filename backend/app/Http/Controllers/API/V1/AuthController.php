@@ -18,6 +18,29 @@ use App\Http\Controllers\Controller;
 class AuthController extends Controller
 {
     /**
+     * Get the Paddle Checkout Pay Link
+     */
+    public function getPayLink(Request $request)
+    {
+        // Replace 'pri_0123456' with your actual Paddle Price ID from the dashboard
+        return $request->user()
+            ->checkout('') 
+            ->returnTo(env('VITE_API_URL') . '/dashboard')
+            ->create();
+    }
+
+    /**
+     * Get the Paddle Customer Management Portal
+     */
+    public function getManagementPortal(Request $request)
+    {
+        // Generates a link for users to update cards or cancel subscriptions
+        return response()->json([
+            'url' => $request->user()->customerPortalUrl()
+        ]);
+    }
+
+    /**
      * Register a new user
      */
     public function register(Request $request)
@@ -29,10 +52,7 @@ class AuthController extends Controller
         ]);
 
         if ($validator->fails()) {
-            return response()->json([
-                'error' => 'Validation failed',
-                'messages' => $validator->errors()
-            ], 422);
+            return response()->json(['error' => 'Validation failed', 'messages' => $validator->errors()], 422);
         }
 
         try {
@@ -40,12 +60,11 @@ class AuthController extends Controller
                 'username' => $request->username,
                 'email' => $request->email,
                 'password' => Hash::make($request->password),
-                'subscription_tier' => 'free',
                 'api_key' => 'ak_' . Str::random(32),
             ]);
 
-            // Create default preferences
-            UserPreference::create([
+            // Default preferences setup...
+            $prefs = UserPreference::create([
                 'user_id' => $user->id,
                 'preferred_model' => 'codellama:7b',
                 'theme' => 'dark',
@@ -65,20 +84,12 @@ class AuthController extends Controller
 
             return response()->json([
                 'message' => 'User registered successfully',
-                'user' => [
-                    'id' => $user->id,
-                    'username' => $user->username,
-                    'email' => $user->email,
-                    'subscription_tier' => $user->subscription_tier,
-                ],
+                'user' => $this->formatUserResponse($user, $prefs),
                 'token' => $token,
             ], 201);
 
         } catch (\Exception $e) {
-            return response()->json([
-                'error' => 'Registration failed',
-                'message' => $e->getMessage()
-            ], 500);
+            return response()->json(['error' => 'Registration failed', 'message' => $e->getMessage()], 500);
         }
     }
 
@@ -99,24 +110,55 @@ class AuthController extends Controller
         $user = User::where('email', $request->email)->first();
 
         if (!$user || !Hash::check($request->password, $user->password)) {
-            return response()->json([
-                'error' => 'Invalid credentials',
-                'message' => 'The provided credentials are incorrect.'
-            ], 401);
+            return response()->json(['error' => 'Invalid credentials'], 401);
         }
 
         $token = $user->createToken('auth_token')->plainTextToken;
 
         return response()->json([
             'message' => 'Login successful',
-            'user' => [
-                'id' => $user->id,
-                'username' => $user->username,
-                'email' => $user->email,
-                'subscription_tier' => $user->subscription_tier,
-            ],
+            'user' => $this->formatUserResponse($user),
             'token' => $token,
         ], 200);
+    }
+
+    /**
+     * Helper to standardize user response across login/register/me
+     */
+    private function formatUserResponse(User $user, $prefs = null)
+    {
+        // If prefs aren't passed, load them
+        if (!$prefs && $user->relationLoaded('preferences')) {
+            $prefs = $user->preferences;
+        }
+
+        return [
+            'id' => $user->id,
+            'username' => $user->username,
+            'email' => $user->email,
+            'subscription_tier' => $user->subscription_tier, // Dynamic attribute
+            'subscription_status' => $user->subscription_status, // Dynamic attribute
+            'trial_days_left' => $user->trial_days_left,
+            'api_key' => $user->api_key,
+            'avatar' => $user->avatar,
+            'created_at' => $user->created_at,
+            'preferences' => $prefs
+        ];
+    }
+
+    /**
+     * Get current user (me)
+     */
+    public function me(Request $request)
+    {
+        try {
+            $user = $request->user()->load('preferences');
+            return response()->json([
+                'user' => $this->formatUserResponse($user)
+            ], 200);
+        } catch (\Exception $e) {
+            return response()->json(['error' => 'Failed to fetch user'], 500);
+        }
     }
 
     /**
@@ -158,49 +200,6 @@ class AuthController extends Controller
     public function user(Request $request)
     {
         return $this->me($request);
-    }
-
-    /**
-     * Get current user
-     */
-    public function me(Request $request)
-    {
-        try {
-            $user = $request->user()->load('preferences');
-
-            $prefs = null;
-            if ($user->preferences) {
-                // Safely decode editor_settings if it's a string
-                $settings = $user->preferences->editor_settings;
-                if (is_string($settings)) {
-                    $settings = json_decode($settings);
-                }
-
-                $prefs = [
-                    'preferred_model' => $user->preferences->preferred_model,
-                    'theme' => $user->preferences->theme,
-                    'editor_settings' => $settings,
-                    'auto_complete' => (bool) $user->preferences->auto_complete,
-                    'code_suggestions' => (bool) $user->preferences->code_suggestions,
-                ];
-            }
-
-            return response()->json([
-                'user' => [
-                    'id' => $user->id,
-                    'username' => $user->username,
-                    'email' => $user->email,
-                    'subscription_tier' => $user->subscription_tier,
-                    'api_key' => $user->api_key,
-                    'email_verified_at' => $user->email_verified_at,
-                    'created_at' => $user->created_at,
-                    'preferences' => $prefs,
-                ],
-            ], 200);
-
-        } catch (\Exception $e) {
-            return response()->json(['error' => 'Failed to fetch user', 'message' => $e->getMessage()], 500);
-        }
     }
 
     /**
@@ -268,29 +267,68 @@ class AuthController extends Controller
     {
         try {
             $googleUser = Socialite::driver('google')->stateless()->user();
+            $email = $googleUser->getEmail();
 
-            // Find or Create User
-            $user = User::firstOrCreate(
-                ['email' => $googleUser->getEmail()],
-                [
-                    'username' => $googleUser->getName(),
-                    'password' => bcrypt(Str::random(24)), // Random password
+            // 1. Check if user already exists by email
+            $user = User::where('email', $email)->first();
+
+            if (!$user) {
+                // 2. Generate a unique username if it's a NEW user
+                // Convert "John Doe" to "johndoe"
+                $baseUsername = Str::slug($googleUser->getName(), ''); 
+                $username = $baseUsername;
+                
+                // Check if username exists, if so, append random numbers until unique
+                $count = 1;
+                while (User::where('username', $username)->exists()) {
+                    $username = $baseUsername . $count;
+                    $count++;
+                }
+
+                $user = User::create([
+                    'username' => $username,
+                    'email' => $email,
+                    'password' => Hash::make(Str::random(24)),
                     'google_id' => $googleUser->getId(),
                     'avatar' => $googleUser->getAvatar(),
-                    'subscription_tier' => 'free'
-                ]
-            );
+                    'subscription_tier' => 'free',
+                    'api_key' => 'ak_' . Str::random(32)
+                ]);
+            } else {
+                // 3. Just update the Google-specific info for existing users
+                $user->update([
+                    'google_id' => $googleUser->getId(),
+                    'avatar' => $googleUser->getAvatar(),
+                ]);
+            }
 
-            // Create Token
+            // 4. Create Token
             $token = $user->createToken('auth_token')->plainTextToken;
 
-            $frontendUrl = env('FRONTEND_URL', 'https://ubiq-editor.space');
+            // 5. Create Default Preferences if missing
+            if (!$user->preferences) {
+                UserPreference::create([
+                    'user_id' => $user->id,
+                    'preferred_model' => 'codellama:7b',
+                    'theme' => 'dark',
+                    'editor_settings' => json_encode([
+                        'fontSize' => 14,
+                        'tabSize' => 4,
+                        'wordWrap' => 'on',
+                        'minimap' => ['enabled' => false],
+                        'lineNumbers' => 'on',
+                        'formatOnSave' => true
+                    ]),
+                    'auto_complete' => true,
+                    'code_suggestions' => true,
+                ]);
+            }
 
-            // Redirect to Frontend with Token
-            // CHANGE THIS URL to your actual frontend URL
+            $frontendUrl = env('FRONTEND_URL', 'https://ubiq-editor.space');
             return redirect("{$frontendUrl}/auth/callback?token={$token}");
 
         } catch (\Exception $e) {
+            \Illuminate\Support\Facades\Log::error('Google Login Error: ' . $e->getMessage());
             $frontendUrl = env('FRONTEND_URL', 'https://ubiq-editor.space');
             return redirect("{$frontendUrl}/login?error=Google login failed");
         }
