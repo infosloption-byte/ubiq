@@ -14,6 +14,7 @@ import {
   ClockIcon,
   PencilSquareIcon,
   ServerStackIcon,
+  ServerIcon,
   CpuChipIcon
 } from '@heroicons/react/24/outline';
 
@@ -281,19 +282,29 @@ export default function ChatPage() {
                      </div>
                  </div>
 
-                 {/* --- AI MODE TOGGLE (NEW) --- */}
-                 <div className="relative">
-                    <select 
-                        value={aiMode} 
-                        onChange={handleAiModeChange}
-                        className="bg-ubiq-950 border border-white/10 text-xs text-slate-400 rounded px-2 py-1 pr-6 focus:outline-none focus:border-ubiq-accent appearance-none cursor-pointer hover:text-white"
+                 {/* --- AI MODE PILL TOGGLE --- */}
+                 <div className="flex bg-black/40 rounded-lg p-0.5 border border-white/5">
+                    <button
+                        onClick={() => { setAiMode('cloud'); localStorage.setItem('ai_mode', 'cloud'); }}
+                        className={`px-2.5 py-1 rounded-md text-[10px] font-medium flex items-center gap-1 transition-all ${aiMode === 'cloud' ? 'bg-indigo-600 text-white shadow' : 'text-slate-500 hover:text-slate-300'}`}
+                        title="Cloud providers (BYOK)"
                     >
-                        <option value="cloud">Cloud (GPT-4)</option>
-                        <option value="local">Local (Ollama)</option>
-                    </select>
-                    <div className="absolute right-2 top-1.5 pointer-events-none">
-                        {aiMode === 'cloud' ? <ServerStackIcon className="w-3 h-3 text-indigo-400" /> : <CpuChipIcon className="w-3 h-3 text-green-400" />}
-                    </div>
+                        <ServerStackIcon className="w-3 h-3" /> Cloud
+                    </button>
+                    <button
+                        onClick={() => { setAiMode('local'); localStorage.setItem('ai_mode', 'local'); }}
+                        className={`px-2.5 py-1 rounded-md text-[10px] font-medium flex items-center gap-1 transition-all ${aiMode === 'local' ? 'bg-emerald-600 text-white shadow' : 'text-slate-500 hover:text-slate-300'}`}
+                        title="Local Ollama on this machine"
+                    >
+                        <CpuChipIcon className="w-3 h-3" /> Local
+                    </button>
+                    <button
+                        onClick={() => { setAiMode('remote'); localStorage.setItem('ai_mode', 'remote'); }}
+                        className={`px-2.5 py-1 rounded-md text-[10px] font-medium flex items-center gap-1 transition-all ${aiMode === 'remote' ? 'bg-amber-600 text-white shadow' : 'text-slate-500 hover:text-slate-300'}`}
+                        title="Remote Ollama server"
+                    >
+                        <ServerIcon className="w-3 h-3" /> Remote
+                    </button>
                  </div>
                </div>
             </div>

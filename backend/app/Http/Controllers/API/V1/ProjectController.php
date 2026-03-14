@@ -5,6 +5,7 @@ namespace App\Http\Controllers\API\V1;
 use App\Http\Controllers\Controller;
 use App\Models\Project;
 use App\Models\File;
+use App\Models\SandboxRun;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\Storage;
@@ -27,6 +28,46 @@ class ProjectController extends Controller
         }
         return $path;
     }
+
+    // ── Storage constants — must stay in sync with User::STORAGE_LIMIT_* ─
+    const STORAGE_LIMIT_FREE = 536870912;   // 512 MB
+    const STORAGE_LIMIT_PRO  = 5368709120;  // 5 GB
+
+    private function getStorageLimitBytes($user): int
+    {
+        return ($user->subscription_tier === 'pro')
+            ? self::STORAGE_LIMIT_PRO
+            : self::STORAGE_LIMIT_FREE;
+    }
+
+    /** Live DB sum — never reads the stale storage_used column */
+    private function getUserUsedBytes($user): int
+    {
+        return (int) \Illuminate\Support\Facades\DB::table('files')
+            ->join('projects', 'files.project_id', '=', 'projects.id')
+            ->where('projects.user_id', $user->id)
+            ->where('files.is_deleted', false)
+            ->sum('files.size_bytes');
+    }
+
+    /**
+     * GET /user/storage
+     * Returns storage usage stats for the frontend storage bar.
+     */
+    public function storageStats(Request $request)
+    {
+        $user       = $request->user();
+        $usedBytes  = $this->getUserUsedBytes($user);
+        $limitBytes = $this->getStorageLimitBytes($user);
+
+        return response()->json([
+            'used_bytes'  => $usedBytes,
+            'used_mb'     => round($usedBytes / 1048576, 2),
+            'limit_bytes' => $limitBytes,
+            'limit_mb'    => round($limitBytes / 1048576, 2),
+            'percent'     => $limitBytes > 0 ? round(($usedBytes / $limitBytes) * 100, 1) : 0,
+        ]);
+    }
     
     public function index(Request $request)
     {
@@ -35,6 +76,7 @@ class ProjectController extends Controller
             ->when($request->input('archived') !== 'true', fn($q) => $q->where('is_archived', false))
             ->with('files:id,project_id,name,language')
             ->withCount('files')
+            ->withSum(['files as storage_bytes' => fn($q) => $q->where('is_deleted', false)], 'size_bytes')
             ->orderBy('updated_at', 'desc')
             ->get();
         
@@ -143,6 +185,16 @@ class ProjectController extends Controller
         if ($validator->fails()) {
             return response()->json(['error' => 'Validation failed', 'messages' => $validator->errors()], 422);
         }
+
+        // ── Storage quota check (byte-based) ──────────────────────────────
+        $usedBytes  = $this->getUserUsedBytes($request->user());
+        $limitBytes = $this->getStorageLimitBytes($request->user());
+        if ($usedBytes >= $limitBytes) {
+            $limitMb = round($limitBytes / 1048576);
+            return response()->json([
+                'error' => "Storage limit reached ({$limitMb} MB). Delete unused projects or upgrade your plan."
+            ], 403);
+        }
         
         $project = Project::create([
             'user_id' => $request->user()->id,
@@ -158,18 +210,13 @@ class ProjectController extends Controller
             $projectPath = $this->getProjectPath($project);
             
             if ($project->source === 'manual') {
-                // 1. Init Git
                 $init = Process::path($projectPath)->run('git init');
                 if ($init->failed()) {
                     throw new \Exception("Git init failed: " . $init->errorOutput());
                 }
 
                 $this->setupGitConfig($projectPath);
-                
-                // 2. Create README
                 $this->createReadme($project, $projectPath);
-                
-                // 3. Initial Commit
                 Process::path($projectPath)->run('git add .');
                 Process::path($projectPath)->run('git commit -m "Initial commit"');
                 
@@ -177,7 +224,13 @@ class ProjectController extends Controller
                 $this->importFromGithub($project, $request->github_token, $projectPath);
             }
         } catch (\Exception $e) {
-            Log::error("Project Creation Failed: " . $e->getMessage());
+            // Never log the github_token — mask it before writing to log
+            Log::error('Project Creation Failed', [
+                'user_id' => $request->user()->id,
+                'name'    => $request->name,
+                'source'  => $request->source,
+                'error'   => $e->getMessage(),
+            ]);
             
             $project->delete();
             if (FileSystem::exists($projectPath)) {
@@ -191,29 +244,82 @@ class ProjectController extends Controller
 
     private function importFromGithub(Project $project, ?string $token, string $destinationPath)
     {
-        if ($request->user()->isOverStorageLimit()) {
-            return response()->json(['error' => 'Storage limit reached'], 403);
-        }
+        // Storage limit is checked by the caller (store()) before invoking this method.
 
         $repoUrl = $project->repository_url;
 
+        // Build authenticated URL using the PAT as the password (x-access-token is the username).
+        // Format: https://x-access-token:TOKEN@github.com/owner/repo
+        // This is GitHub's recommended way — avoids interactive password prompts.
         if ($token) {
             $urlParts = parse_url($repoUrl);
-            $repoUrl = $urlParts['scheme'] . '://' . $token . '@' . $urlParts['host'] . $urlParts['path'];
+            $repoUrl = $urlParts['scheme'] . '://x-access-token:' . $token . '@' . $urlParts['host'] . $urlParts['path'];
         }
 
         if (FileSystem::exists($destinationPath)) {
             FileSystem::deleteDirectory($destinationPath);
         }
 
-        $result = Process::run("git clone {$repoUrl} {$destinationPath}");
+        // GIT_TERMINAL_PROMPT=0 — prevents git from hanging waiting for stdin input
+        // GIT_ASKPASS=echo     — returns empty string for any credential prompt (fails fast)
+        // -c credential.helper='' — disables any system credential store
+        $result = Process::env([
+                'GIT_TERMINAL_PROMPT' => '0',
+                'GIT_ASKPASS'         => 'echo',
+            ])
+            ->timeout(120)
+            ->run("git -c credential.helper='' clone " . escapeshellarg($repoUrl) . " " . escapeshellarg($destinationPath));
 
         if ($result->failed()) {
-            throw new \Exception("Git clone failed: " . $result->errorOutput());
+            // Strip the token from the error message before surfacing it to the user
+            $errorOutput = $token
+                ? str_replace($token, '***', $result->errorOutput())
+                : $result->errorOutput();
+            throw new \Exception("Git clone failed: " . $errorOutput);
         }
 
         $this->setupGitConfig($destinationPath);
         $this->scanAndSaveFiles($project, $destinationPath);
+    }
+
+    /**
+     * Scans a port range and returns the first port not in use.
+     * Prevents container launch failures from port collisions.
+     */
+    private function findFreePort(int $start = 8100, int $end = 8899): int
+    {
+        for ($port = $start; $port <= $end; $port++) {
+            $sock = @fsockopen('127.0.0.1', $port, $errno, $errstr, 0.1);
+            if ($sock === false) {
+                return $port; // Port is free
+            }
+            fclose($sock);
+        }
+        throw new \RuntimeException("No free port found in range {$start}-{$end}");
+    }
+
+    /**
+     * POST /projects/{project}/stop
+     * Kills the running sandbox container without deleting project data.
+     */
+    public function stopProject(Request $request, Project $project)
+    {
+        if ($project->user_id !== $request->user()->id) {
+            return response()->json(['error' => 'Unauthorized'], 403);
+        }
+
+        $containerName = "ubiq_project_{$project->id}";
+        Process::run("docker stop {$containerName}");
+        Process::run("docker rm {$containerName}");
+
+        // Stamp the most recent open audit run for this project
+        SandboxRun::where('project_id', $project->id)
+            ->whereNull('stopped_at')
+            ->latest('started_at')
+            ->first()
+            ?->update(['stopped_at' => now()]);
+
+        return response()->json(['message' => 'Container stopped.']);
     }
 
     private function setupGitConfig($path)
@@ -265,8 +371,14 @@ class ProjectController extends Controller
 
     public function import(Request $request)
     {
-        if ($request->user()->isOverStorageLimit()) {
-            return response()->json(['error' => 'Storage limit reached'], 403);
+        // ── Byte-based storage quota check ────────────────────────────────
+        $usedBytes  = $this->getUserUsedBytes($request->user());
+        $limitBytes = $this->getStorageLimitBytes($request->user());
+        if ($usedBytes >= $limitBytes) {
+            $limitMb = round($limitBytes / 1048576);
+            return response()->json([
+                'error' => "Storage limit reached ({$limitMb} MB). Delete unused projects or upgrade your plan."
+            ], 403);
         }
 
         $validator = Validator::make($request->all(), [
@@ -286,9 +398,32 @@ class ProjectController extends Controller
         ]);
 
         $zip = new \ZipArchive;
-        $projectPath = $this->getProjectPath($project); // Fixed: Use consistent path helper
+        $projectPath = $this->getProjectPath($project);
 
         if ($zip->open($request->file('file')->path()) === TRUE) {
+
+            // ── ZIP SLIP PROTECTION ────────────────────────────────────────
+            // Reject any entry that contains path traversal sequences or
+            // absolute paths — these can escape the project directory on extract.
+            for ($i = 0; $i < $zip->numFiles; $i++) {
+                $entry = $zip->getNameIndex($i);
+                if ($entry === false) continue;
+
+                // Absolute path or traversal attempt
+                if (str_starts_with($entry, '/') ||
+                    str_starts_with($entry, '\\') ||
+                    str_contains($entry, '../') ||
+                    str_contains($entry, '..\\') ||
+                    str_contains($entry, "\0")) {
+                    $zip->close();
+                    $project->delete();
+                    return response()->json([
+                        'error' => 'Invalid ZIP file: contains unsafe paths. Please re-zip without path traversal entries.'
+                    ], 422);
+                }
+            }
+            // ── END ZIP SLIP PROTECTION ───────────────────────────────────
+
             $zip->extractTo($projectPath);
             $zip->close();
             
@@ -333,9 +468,20 @@ class ProjectController extends Controller
     public function destroy(Request $request, Project $project) 
     { 
         if ($project->user_id !== $request->user()->id) abort(403);
-        $project->delete(); 
+
+        // Kill sandbox container first — prevents orphaned containers
+        $containerName = "ubiq_project_{$project->id}";
+        Process::run("docker stop {$containerName}");
+        Process::run("docker rm {$containerName}");
+
+        // Stamp any open audit run as stopped
+        \App\Models\SandboxRun::where('project_id', $project->id)
+            ->whereNull('stopped_at')
+            ->update(['stopped_at' => now()]);
+
+        $project->delete();
         FileSystem::deleteDirectory($this->getProjectPath($project));
-        return response()->json(['message'=>'Deleted']); 
+        return response()->json(['message' => 'Deleted']); 
     }
 
     public function archive(Request $request, Project $project) 
@@ -456,7 +602,7 @@ class ProjectController extends Controller
 
         // 3. Container Config
         $containerName = "ubiq_project_{$project->id}";
-        $port = 8000 + ($project->id % 1000); 
+        $port = $this->findFreePort(8100, 8899);
 
         Process::run("docker stop {$containerName}");
         Process::run("docker rm {$containerName}");
@@ -472,8 +618,39 @@ class ProjectController extends Controller
             case 'java': $image = "amazoncorretto:17-alpine-jdk"; $internalPort = 8080; break;
         }
 
-        // 5. Run Docker
-        $cmd = "docker run -d --name {$containerName} -p {$port}:{$internalPort} -e PORT={$internalPort} -v " . escapeshellarg($hostMountPath) . ":/app -w /app {$image} sh -c 'sh startup.sh > startup.log 2>&1 || tail -f /dev/null'";
+        // 5. Run Docker — with strict resource limits to prevent abuse
+        $cmd = implode(' ', [
+            'docker run -d',
+            '--name',          escapeshellarg($containerName),
+            '-p',              "{$port}:{$internalPort}",
+            '-e',              "PORT={$internalPort}",
+            '-v',              escapeshellarg($hostMountPath) . ':/app',
+            '-w',              '/app',
+            // ── Resource caps ──────────────────────────────────────────
+            '--memory=512m',          // Hard RAM limit
+            '--memory-swap=512m',     // Disable swap (= no extra swap on top)
+            '--cpus=0.75',            // Max 75% of one CPU core
+            '--pids-limit=100',       // Prevent fork bombs
+            '--ulimit', 'nofile=512:512',   // File descriptor cap
+            '--ulimit', 'nproc=50:50',      // Process count cap (belt + suspenders)
+            // ── Network isolation ──────────────────────────────────────
+            // Use a restricted bridge network instead of host network.
+            // Containers can reach the internet for npm install etc,
+            // but cannot reach other containers or the EC2 metadata endpoint.
+            '--network=ubiq_sandbox',
+            // ── Filesystem hardening ───────────────────────────────────
+            '--cap-drop=ALL',         // Drop ALL Linux capabilities
+            '--cap-add=NET_BIND_SERVICE', // Re-add only what's needed for port binding
+            '--security-opt', 'no-new-privileges:true', // Prevent privilege escalation
+            // ── Logging ────────────────────────────────────────────────
+            '--log-driver=json-file',
+            '--log-opt', 'max-size=10m',
+            '--log-opt', 'max-file=1',
+            // ── Auto-cleanup ───────────────────────────────────────────
+            '--restart=no',
+            $image,
+            "sh -c 'sh startup.sh > /app/startup.log 2>&1 || tail -f /dev/null'",
+        ]);
 
         $result = Process::timeout(120)->run($cmd);
 
@@ -482,14 +659,25 @@ class ProjectController extends Controller
         }
 
         $serverIp = env('SERVER_PUBLIC_IP', $request->getHost());
-        
+
+        // ── Audit log ──────────────────────────────────────────────────────
+        SandboxRun::create([
+            'user_id'    => $request->user()->id,
+            'project_id' => $project->id,
+            'ip_address' => $request->ip(),
+            'user_agent' => substr($request->userAgent() ?? '', 0, 500),
+            'started_at' => now(),
+            'port'       => $port,
+            'runtime'    => $runtime,
+            'framework'  => $framework,
+        ]);
+
         return response()->json([
-            'message' => 'Project booting...',
-            'url' => "http://{$serverIp}:{$port}",
-            'port' => $port,
-            'runtime' => $runtime,
+            'message'   => 'Project booting...',
+            'url'       => "http://{$serverIp}:{$port}",
+            'port'      => $port,
+            'runtime'   => $runtime,
             'framework' => $framework,
-            'command' => $cmd
         ]);
     }
 

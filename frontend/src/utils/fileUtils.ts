@@ -19,7 +19,8 @@ export const buildFileTree = (files: any[]): FileNode[] => {
   }
 
   // Safety: Filter out files with missing paths/names to prevent 'localeCompare' crash
-  const validFiles = files.filter(f => f && f.path && typeof f.path === 'string');
+  // Also filter .gitkeep — these are folder placeholder files, not real user content
+  const validFiles = files.filter(f => f && f.path && typeof f.path === 'string' && !f.path.endsWith('.gitkeep'));
 
   // Sort: Alphabetical
   const sortedFiles = [...validFiles].sort((a, b) => a.path.localeCompare(b.path));

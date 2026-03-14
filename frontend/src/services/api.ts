@@ -26,18 +26,24 @@ api.interceptors.response.use(
     }
 );
 
+/**
+ * Retrieves the auth token from localStorage, checking all possible storage keys.
+ * Use this anywhere you need the raw token — avoids duplicating this logic.
+ */
+export const getAuthToken = (): string | null => {
+  let token = localStorage.getItem('auth_token') || localStorage.getItem('token');
+  if (!token) {
+    try {
+      const authStorage = localStorage.getItem('auth-storage');
+      if (authStorage) token = JSON.parse(authStorage).state?.token ?? null;
+    } catch (e) { /* ignore */ }
+  }
+  return token || null;
+};
+
 api.interceptors.request.use(
   (config) => {
-    let token = localStorage.getItem('auth_token') || localStorage.getItem('token');
-    if (!token) {
-        const authStorage = localStorage.getItem('auth-storage');
-        if (authStorage) {
-            try {
-                const parsed = JSON.parse(authStorage);
-                token = parsed.state?.token;
-            } catch (e) { /* ignore */ }
-        }
-    }
+    const token = getAuthToken();
     if (token) {
       config.headers.Authorization = `Bearer ${token}`;
     }
@@ -78,27 +84,22 @@ export const userAPI = {
   updatePreferences: (data: any) => api.put('/user/preferences', data),
   getUsage: (days?: number) => api.get('/user/usage', { params: { days } }),
   getStats: () => api.get('/user/stats'),
+  getStorageStats: () => api.get('/user/storage'),
 };
 
-// subscription
+// subscription (Paddle)
 export const subscriptionApi = {
-  // Used by SubscriptionGuard (if you still use the redirect flow)
-  createSubscription: async () => {
-    const response = await api.post('/paypal/subscribe'); // Simplified path
-    return response.data; 
-  },
+  // Verify a Paddle subscription after checkout completes
+  verifySubscription: (subscriptionId: string) =>
+    api.post('/paddle/verify', { subscription_id: subscriptionId }),
 
-  // Used by SettingsPage.tsx (The Smart Button flow)
-  verifyOnServer: (subscriptionId: string) => 
-    api.post('/paypal/subscribe', { paypal_subscription_id: subscriptionId }),
+  // Cancel the current user's active subscription
+  cancelSubscription: () =>
+    api.post('/paddle/cancel'),
 
-  // Used by PaymentSuccessPage.tsx (The Redirect flow)
-  verifySubscription: (subscriptionId: string) => 
-    api.get(`/paypal/verify`, { params: { subscription_id: subscriptionId } }),
-
-  // Used by SettingsPage.tsx to stop billing
-  cancelSubscription: () => 
-    api.post('/paypal/cancel')
+  // Fetch current subscription status + tier
+  getSubscription: () =>
+    api.get('/paddle/subscription'),
 };
 
 export const projectAPI = {
@@ -118,6 +119,7 @@ export const projectAPI = {
             model 
         }),
   runProject: (projectId: number) => api.post(`/projects/${projectId}/run`),
+  stopProject: (projectId: number) => api.post(`/projects/${projectId}/stop`),
   getBuildLog: (projectId: number) => api.get(`/projects/${projectId}/build-log`),
 };
 
@@ -196,20 +198,7 @@ export const streamChat = async (
   apiKeys?: any 
 ) => {
   try {
-    // FIX: Check 'auth_token' first (standard), then 'token'
-    let token = localStorage.getItem('auth_token') || localStorage.getItem('token');
-    
-    // Fallback: Check auth-storage if direct keys are missing
-    if (!token) {
-        const authStorage = localStorage.getItem('auth-storage');
-        if (authStorage) {
-            try {
-                const parsed = JSON.parse(authStorage);
-                token = parsed.state?.token;
-            } catch (e) {}
-        }
-    }
-
+    const token = getAuthToken();
     if (!token) throw new Error("Authentication token missing.");
 
     const response = await fetch(`${API_URL}/ai/chat?stream=true`, {

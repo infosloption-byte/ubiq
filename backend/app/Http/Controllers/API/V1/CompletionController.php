@@ -201,7 +201,6 @@ class CompletionController extends Controller
 
             // --- PAYLOAD CONSTRUCTION ---
             if ($config['provider'] === 'gemini') {
-                // FIX: Use the official systemInstruction field for Gemini so it Obeys!
                 $payload = [
                     'systemInstruction' => [
                         'parts' => [['text' => $systemPrompt]]
@@ -212,7 +211,6 @@ class CompletionController extends Controller
                 ];
             } 
             elseif ($config['provider'] === 'ollama') {
-                // ADDED: Options array to force longer outputs and stricter rules
                 $payload = [
                     'model' => $config['model_name'],
                     'messages' => [
@@ -221,8 +219,8 @@ class CompletionController extends Controller
                     ],
                     'stream' => false,
                     'options' => [
-                        'num_predict' => 8000, // Force Ollama to allow long multi-file outputs
-                        'temperature' => 0.1   // Lower temp makes it obey strict rules better
+                        'num_predict' => 8000,
+                        'temperature' => 0.1
                     ]
                 ];
             } 
@@ -234,17 +232,19 @@ class CompletionController extends Controller
                         ['role' => 'user', 'content' => $userPrompt]
                     ],
                     'temperature' => 0.2,
-                    'max_tokens' => 8000, // Boosted for larger React projects
+                    'max_tokens' => 8000,
                     'stream' => false
                 ];
             }
 
             // --- EXECUTE REQUEST ---
+            $response = Http::withHeaders($config['headers'])
+                ->timeout(180)
+                ->post($config['url'], $payload);
+
             if (!$response->successful()) {
                 throw new \Exception("Provider Error ({$response->status()}): " . substr($response->body(), 0, 200));
             }
-
-            if (!$response->successful()) throw new \Exception($response->body());
 
             // --- PARSE RESPONSE ---
             $data = $response->json();

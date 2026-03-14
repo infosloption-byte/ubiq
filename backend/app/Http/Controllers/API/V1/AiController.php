@@ -75,21 +75,17 @@ class AiController extends Controller
 
     public function chat(Request $request)
     {
-        // ... (Keep your existing chat logic here) ...
-        // Ensure you paste the BYOK/validation logic we wrote previously
-        // for the chat() method.
-        
         $request->validate([
-            'message' => 'required|string',
-            'model'   => 'required|string',
-            'api_keys' => 'nullable|array' 
+            'messages' => 'required|array',
+            'model'    => 'required|string',
+            'api_keys' => 'nullable|array'
         ]);
 
         $modelId = $request->model;
-        $apiKeys = $request->input('api_keys', []); 
-        
+        $apiKeys = $request->input('api_keys', []);
+
         $config = $this->getProviderConfig($modelId, $apiKeys);
-        
+
         if (!$config) {
             return response()->json([
                 'error' => "Missing API Key for this model. Please add it in Settings."
@@ -97,32 +93,57 @@ class AiController extends Controller
         }
 
         try {
+            $payload = [];
+
+            if ($config['provider'] === 'gemini') {
+                $geminiMessages = [];
+                $systemInstruction = null;
+                foreach ($request->messages as $msg) {
+                    if ($msg['role'] === 'system') {
+                        $systemInstruction = ['parts' => [['text' => $msg['content']]]];
+                    } else {
+                        $role = ($msg['role'] === 'assistant') ? 'model' : 'user';
+                        $geminiMessages[] = ['role' => $role, 'parts' => [['text' => $msg['content']]]];
+                    }
+                }
+                $payload = ['contents' => $geminiMessages];
+                if ($systemInstruction) $payload['systemInstruction'] = $systemInstruction;
+            } elseif ($config['provider'] === 'ollama') {
+                $payload = [
+                    'model'    => $config['model_name'],
+                    'messages' => $request->messages,
+                    'stream'   => false,
+                ];
+            } else {
+                $payload = [
+                    'model'      => $config['model_name'],
+                    'messages'   => $request->messages,
+                    'stream'     => false,
+                    'max_tokens' => 2048
+                ];
+            }
+
             $response = Http::withHeaders($config['headers'])
                 ->timeout(60)
-                ->post($config['url'], [
-                    'model' => $config['model_name'],
-                    'messages' => [
-                        ['role' => 'user', 'content' => $request->message]
-                    ],
-                    'stream' => false,
-                    'max_tokens' => 2048
-                ]);
+                ->post($config['url'], $payload);
 
-            if ($response->successful()) {
-                $data = $response->json();
-                $content = $data['choices'][0]['message']['content'] ?? "";
-                
+            if (!$response->successful()) {
                 return response()->json([
-                    'message' => [
-                        'role' => 'assistant',
-                        'content' => $content
-                    ]
-                ]);
+                    'error' => 'Provider Error: ' . ($response->json()['error']['message'] ?? $response->body())
+                ], $response->status());
+            }
+
+            $data = $response->json();
+
+            if ($config['provider'] === 'gemini') {
+                $content = $data['candidates'][0]['content']['parts'][0]['text'] ?? '';
+            } else {
+                $content = $data['choices'][0]['message']['content'] ?? $data['message']['content'] ?? '';
             }
 
             return response()->json([
-                'error' => 'Provider Error: ' . ($response->json()['error']['message'] ?? $response->body())
-            ], $response->status());
+                'message' => ['role' => 'assistant', 'content' => $content]
+            ]);
 
         } catch (\Exception $e) {
             return response()->json(['error' => $e->getMessage()], 500);
@@ -174,18 +195,29 @@ class AiController extends Controller
             ];
         }
 
-        // 4. GOOGLE GEMINI
+        // 4. GOOGLE GEMINI (native API)
         if (str_contains($modelId, 'gemini')) {
             $key = $apiKeys['google'] ?? null;
             if (!$key) return null;
-
+            $cleanModel = str_replace('models/', '', $modelId);
             return [
-                'url' => 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
-                'headers' => ['Authorization' => "Bearer $key"],
-                'model_name' => $modelId
+                'provider' => 'gemini',
+                'url' => "https://generativelanguage.googleapis.com/v1beta/models/{$cleanModel}:generateContent?key={$key}",
+                'headers' => ['Content-Type' => 'application/json'],
+                'model_name' => $cleanModel
             ];
         }
 
-        return null;
+        // 5. OLLAMA (local or remote)
+        $baseUrl = 'http://host.docker.internal:11434';
+        if (!empty($apiKeys['ollama_url']) && filter_var($apiKeys['ollama_url'], FILTER_VALIDATE_URL)) {
+            $baseUrl = rtrim($apiKeys['ollama_url'], '/');
+        }
+        return [
+            'provider' => 'ollama',
+            'url' => "{$baseUrl}/api/chat",
+            'headers' => [],
+            'model_name' => $modelId
+        ];
     }
 }

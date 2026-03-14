@@ -8,9 +8,10 @@ interface InputDialogProps {
   title: string;
   message: string;
   placeholder?: string;
+  isPassword?: boolean;
 }
 
-export default function InputDialog({ isOpen, onClose, onSubmit, title, message, placeholder }: InputDialogProps) {
+export default function InputDialog({ isOpen, onClose, onSubmit, title, message, placeholder, isPassword = false }: InputDialogProps) {
   const [value, setValue] = useState('');
 
   useEffect(() => {
@@ -29,7 +30,7 @@ export default function InputDialog({ isOpen, onClose, onSubmit, title, message,
         <div className="p-6">
           <p className="text-slate-400 text-sm mb-4">{message}</p>
           <input
-            type="text"
+            type={isPassword ? "password" : "text"}
             value={value}
             onChange={(e) => setValue(e.target.value)}
             placeholder={placeholder}
@@ -48,7 +49,7 @@ export default function InputDialog({ isOpen, onClose, onSubmit, title, message,
             disabled={!value.trim()}
             className="px-4 py-2 text-sm font-bold text-white bg-ubiq-accent rounded-lg hover:bg-ubiq-accent-hover disabled:opacity-50"
           >
-            Create
+            {isPassword ? "Submit" : "Create"}
           </button>
         </div>
       </div>

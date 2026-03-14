@@ -8,17 +8,57 @@ use App\Models\Project;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\File as FileSystem; 
+use Illuminate\Support\Facades\URL;
 
 class FileController extends Controller
 {
     /**
-     * Syncs file content to the physical workspace folder (Critical for Git & Runners)
+     * SECURITY: Resolve a user-supplied relative path to an absolute path
+     * and verify it stays within the project's workspace directory.
+     * Prevents path traversal attacks (e.g. ../../etc/passwd).
+     */
+    private function safePath(Project $project, string $relativePath): string
+    {
+        // Strip leading slashes / dots before joining
+        $relativePath = ltrim($relativePath, '/');
+
+        $base = storage_path("app/workspaces/{$project->user_id}/{$project->id}");
+
+        // Ensure the base directory exists so realpath() works
+        if (!is_dir($base)) {
+            FileSystem::makeDirectory($base, 0755, true);
+        }
+
+        // Build the candidate path WITHOUT resolving symlinks yet
+        $candidate = $base . DIRECTORY_SEPARATOR . $relativePath;
+
+        // Resolve to a real absolute path (resolves ../ segments and symlinks)
+        $resolved = realpath($candidate);
+
+        // If realpath() fails (file doesn't exist yet), resolve the parent dir instead
+        if ($resolved === false) {
+            $resolvedDir = realpath(dirname($candidate));
+            $resolved    = $resolvedDir . DIRECTORY_SEPARATOR . basename($candidate);
+        }
+
+        // Guarantee the resolved path is still inside the base directory
+        $realBase = realpath($base);
+        if (!str_starts_with($resolved, $realBase . DIRECTORY_SEPARATOR) && $resolved !== $realBase) {
+            abort(403, 'Invalid file path.');
+        }
+
+        return $resolved;
+    }
+
+    /**
+     * Syncs file content to the physical workspace folder.
+     * All writes go through safePath() to prevent traversal.
      */
     private function syncToDisk(Project $project, $relativePath, $content)
     {
-        $fullPath = storage_path("app/workspaces/{$project->user_id}/{$project->id}/{$relativePath}");
-        
+        $fullPath  = $this->safePath($project, $relativePath);
         $directory = dirname($fullPath);
+
         if (!FileSystem::exists($directory)) {
             FileSystem::makeDirectory($directory, 0755, true);
         }
@@ -58,7 +98,7 @@ class FileController extends Controller
 
         $validator = Validator::make($request->all(), [
             'name' => 'required|string|max:191',
-            'path' => 'required|string|max:400',
+            'path' => ['required', 'string', 'max:400', 'not_regex:/(\.\.[\/\\\\])|^[\/\\\\]/'],
             'content' => 'nullable|string',
             'language' => 'nullable|string|max:50',
         ]);
@@ -101,7 +141,8 @@ class FileController extends Controller
         if ($project->user_id !== $request->user()->id) return response()->json(['error' => 'Unauthorized'], 403);
 
         $path = $request->input('path');
-        
+        if (!$path) return response()->json(['error' => 'Path is required'], 422);
+
         // Delete from DB
         $deleted = $project->files()
             ->where(function($query) use ($path) {
@@ -109,8 +150,13 @@ class FileController extends Controller
             })
             ->delete();
 
-        // Delete from Disk
-        $fullPath = storage_path("app/workspaces/{$project->user_id}/{$project->id}/{$path}");
+        // Delete from Disk — safePath() prevents traversal
+        try {
+            $fullPath = $this->safePath($project, $path);
+        } catch (\Symfony\Component\HttpKernel\Exception\HttpException $e) {
+            return response()->json(['error' => 'Invalid path'], 422);
+        }
+
         if (FileSystem::isDirectory($fullPath)) {
             FileSystem::deleteDirectory($fullPath);
         } elseif (FileSystem::exists($fullPath)) {
@@ -130,11 +176,15 @@ class FileController extends Controller
             return response()->json(['error' => 'Unauthorized'], 403);
         }
 
-        // 2. Delete from Disk
-        // Reconstruct the full path using the project ID structure
-        $fullPath = storage_path("app/workspaces/{$file->project->user_id}/{$file->project->id}/{$file->path}");
-        
-        if (FileSystem::exists($fullPath)) {
+        // 2. Delete from Disk via safePath (prevents traversal)
+        try {
+            $fullPath = $this->safePath($file->project, $file->path);
+        } catch (\Symfony\Component\HttpKernel\Exception\HttpException $e) {
+            // Path is invalid — skip disk delete but still remove DB record
+            $fullPath = null;
+        }
+
+        if ($fullPath && FileSystem::exists($fullPath)) {
             FileSystem::delete($fullPath);
         }
 
@@ -146,30 +196,69 @@ class FileController extends Controller
 
     public function upload(Request $request, Project $project)
     {
-        // Check if user is over storage limit
+        // Auth check FIRST — before touching any file data
+        if ($project->user_id !== $request->user()->id) {
+            return response()->json(['error' => 'Unauthorized'], 403);
+        }
+
+        // Storage quota check
         if ($request->user()->isOverStorageLimit()) {
             return response()->json([
-                'error' => 'Storage limit reached',
-                'message' => 'You have used all your available storage. Please upgrade your plan.'
+                'error' => 'Storage limit reached. Delete unused projects or upgrade your plan to continue.'
             ], 403);
         }
 
-        $request->validate(['file' => 'required|file|max:10240']);
+        $request->validate(['file' => 'required|file|max:10240']); // 10 MB per file
 
-        if ($project->user_id !== $request->user()->id) return response()->json(['error' => 'Unauthorized'], 403);
+        $file       = $request->file('file');
+        $parentPath = trim($request->input('parent_path', ''), '/');
+        $filename   = $file->getClientOriginalName();
+        $fullPath   = $parentPath ? $parentPath . '/' . $filename : $filename;
 
-        $file = $request->file('file');
-        $parentPath = $request->input('parent_path', '');
-        $filename = $file->getClientOriginalName();
-        $fullPath = $parentPath ? $parentPath . '/' . $filename : $filename;
+        // Reject path traversal in the assembled path
+        if (str_contains($fullPath, '../') || str_contains($fullPath, '..\\') || str_starts_with($fullPath, '/')) {
+            return response()->json(['error' => 'Invalid file path.'], 422);
+        }
 
-        $content = file_get_contents($file->getRealPath());
-        $ext = strtolower($file->getClientOriginalExtension());
-        $language = ['js'=>'javascript','html'=>'html','css'=>'css'][$ext] ?? 'plaintext';
+        $sizeBytes = $file->getSize();
+        $ext       = strtolower($file->getClientOriginalExtension());
+
+        $textExts = ['js','jsx','ts','tsx','html','htm','css','scss','sass','less',
+                     'php','py','java','go','rs','c','cpp','h','cs','rb','swift',
+                     'json','yaml','yml','toml','xml','md','txt','sh','env',
+                     'sql','graphql','vue','svelte','astro','prisma'];
+
+        $langMap = [
+            'js'=>'javascript','jsx'=>'javascript','ts'=>'typescript','tsx'=>'typescript',
+            'py'=>'python','php'=>'php','html'=>'html','htm'=>'html','css'=>'css',
+            'scss'=>'scss','sass'=>'scss','json'=>'json','md'=>'markdown','sql'=>'sql',
+            'java'=>'java','go'=>'go','rs'=>'rust','c'=>'c','cpp'=>'cpp','cs'=>'csharp',
+            'rb'=>'ruby','swift'=>'swift','yaml'=>'yaml','yml'=>'yaml','xml'=>'xml',
+            'sh'=>'shell','vue'=>'vue','svelte'=>'svelte','graphql'=>'graphql',
+        ];
+
+        $language = $langMap[$ext] ?? 'plaintext';
+        $isBinary = !in_array($ext, $textExts);
+
+        $content = '';
+        if (!$isBinary) {
+            $content = file_get_contents($file->getRealPath());
+            // Guard against binary files misidentified by extension (null bytes = binary)
+            if (strpos($content, "\0") !== false) {
+                $content  = '';
+                $isBinary = true;
+            }
+        }
 
         $fileRecord = $project->files()->updateOrCreate(
             ['path' => $fullPath],
-            ['name' => $filename, 'content' => $content, 'language' => $language, 'is_deleted' => false]
+            [
+                'name'       => $filename,
+                'content'    => $content,
+                'language'   => $language,
+                'size_bytes' => $sizeBytes,
+                'is_deleted' => false,
+            ]
         );
 
         $this->syncToDisk($project, $fullPath, $content);
@@ -189,20 +278,72 @@ class FileController extends Controller
         return response($file->content)->header('Content-Type', $mime);
     }
 
-    public function preview(Request $request, Project $project, $token, $path)
+    /**
+     * Step 1 — Authenticated endpoint that issues a short-lived signed preview URL.
+     * Called by the frontend with a normal Bearer token (in the header, not the URL).
+     * Returns a signed URL valid for 5 minutes — no token ever appears in any URL.
+     */
+    public function getPreviewUrl(Request $request, Project $project, $path)
     {
-        $accessToken = \Laravel\Sanctum\PersonalAccessToken::findToken($token);
-        if (!$accessToken || !$accessToken->tokenable) abort(403);
+        if ($project->user_id !== $request->user()->id) {
+            return response()->json(['error' => 'Unauthorized'], 403);
+        }
+
+        // Verify the file actually exists in this project before issuing a URL
+        $file = $project->files()->where('path', $path)->first();
+        if (!$file) {
+            $file = $project->files()->where('path', 'LIKE', '%/' . $path)->first();
+        }
+        if (!$file) {
+            return response()->json(['error' => 'File not found'], 404);
+        }
+
+        // Generate a signed URL valid for 5 minutes
+        $signedUrl = URL::temporarySignedRoute(
+            'projects.preview.signed',
+            now()->addMinutes(5),
+            ['project' => $project->id, 'path' => $path]
+        );
+
+        return response()->json(['url' => $signedUrl]);
+    }
+
+    /**
+     * Step 2 — Public endpoint that serves the file, gated by signed URL signature.
+     * No auth token in the URL — Laravel verifies the HMAC signature + expiry.
+     * If the signature is missing, wrong, or expired → 403.
+     */
+    public function previewSigned(Request $request, Project $project, $path)
+    {
+        if (!$request->hasValidSignature()) {
+            abort(403, 'Preview link has expired or is invalid. Please reload the file.');
+        }
 
         $file = $project->files()->where('path', $path)->first();
-        if (!$file) $file = $project->files()->where('path', 'LIKE', "%/" . $path)->first();
-        
-        if (!$file) return response("File not found: $path", 404);
+        if (!$file) {
+            $file = $project->files()->where('path', 'LIKE', '%/' . $path)->first();
+        }
+        if (!$file) {
+            return response('File not found: ' . $path, 404);
+        }
 
         $ext = strtolower(pathinfo($file->name, PATHINFO_EXTENSION));
-        $mimeTypes = ['html'=>'text/html', 'css'=>'text/css', 'js'=>'application/javascript'];
-        
-        return response($file->content)->header('Content-Type', $mimeTypes[$ext] ?? 'text/plain');
+        $mimeTypes = [
+            'html' => 'text/html',
+            'css'  => 'text/css',
+            'js'   => 'application/javascript',
+            'png'  => 'image/png',
+            'jpg'  => 'image/jpeg',
+            'jpeg' => 'image/jpeg',
+            'gif'  => 'image/gif',
+            'svg'  => 'image/svg+xml',
+            'webp' => 'image/webp',
+            'ico'  => 'image/x-icon',
+        ];
+
+        return response($file->content)
+            ->header('Content-Type', $mimeTypes[$ext] ?? 'text/plain')
+            ->header('X-Frame-Options', 'SAMEORIGIN');
     }
 
     /**

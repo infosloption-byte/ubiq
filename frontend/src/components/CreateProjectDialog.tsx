@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { projectAPI } from '../services/api';
+import { projectAPI, getAuthToken } from '../services/api';
 import axios from 'axios';
 import { 
   FolderPlusIcon, 
@@ -8,8 +8,46 @@ import {
   XMarkIcon,
   CloudArrowUpIcon,
   LockClosedIcon,
-  GlobeAltIcon
+  GlobeAltIcon,
+  ExclamationTriangleIcon
 } from '@heroicons/react/24/outline';
+
+const MAX_ZIP_MB = 20;
+const MAX_ZIP_BYTES = MAX_ZIP_MB * 1024 * 1024;
+
+// Parse the most useful message out of a backend error response
+function parseError(err: any): string {
+  const data = err.response?.data;
+  if (!data) return err.message || 'Request failed. Please try again.';
+
+  // Direct error string
+  if (typeof data.error === 'string') return data.error;
+
+  // Laravel validation messages object
+  if (data.messages && typeof data.messages === 'object') {
+    const first = Object.values(data.messages)[0];
+    return Array.isArray(first) ? first[0] as string : String(first);
+  }
+
+  if (typeof data.message === 'string') return data.message;
+  return 'Something went wrong. Please try again.';
+}
+
+// Parse GitHub-specific clone error into a human readable message
+function parseGithubError(raw: string): string {
+  const lower = raw.toLowerCase();
+  if (lower.includes('repository not found') || lower.includes('not found'))
+    return 'Repository not found. Check the URL or make sure it\'s public (or provide a token for private repos).';
+  if (lower.includes('authentication failed') || lower.includes('could not read username'))
+    return 'Authentication failed. The repository is private — please provide a Personal Access Token.';
+  if (lower.includes('already exists'))
+    return 'A project folder already exists for this. Please try again.';
+  if (lower.includes('empty repository'))
+    return 'Repository cloned but appears to be empty.';
+  if (lower.includes('timed out') || lower.includes('timeout'))
+    return 'Clone timed out. The repository may be too large or the server is unreachable.';
+  return raw; // fallback to raw if unrecognised
+}
 
 interface CreateProjectDialogProps {
   isOpen: boolean;
@@ -43,32 +81,34 @@ export default function CreateProjectDialog({ isOpen, onClose, onSuccess }: Crea
 
     try {
       if (activeTab === 'import') {
-          // --- ZIP IMPORT FLOW ---
-          if (!importFile) { 
-            setError("Please select a ZIP file."); 
-            setLoading(false); 
-            return; 
+          if (!importFile) {
+            setError('Please select a ZIP file.');
+            setLoading(false);
+            return;
           }
-          
+
+          if (importFile.size > MAX_ZIP_BYTES) {
+            setError(`File too large (${(importFile.size / 1048576).toFixed(1)} MB). Maximum is ${MAX_ZIP_MB} MB.`);
+            setLoading(false);
+            return;
+          }
+
           const formData = new FormData();
           formData.append('name', name);
           formData.append('description', description);
           formData.append('visibility', visibility);
           formData.append('file', importFile);
 
-          // Get token for direct Axios call (bypassing JSON wrapper)
-          const token = localStorage.getItem('token') || 
-                        JSON.parse(localStorage.getItem('auth-storage') || '{}').state?.token;
+          const token = getAuthToken();
 
           await axios.post(`${import.meta.env.VITE_API_URL}/projects/import`, formData, {
-              headers: { 
+              headers: {
                   'Authorization': `Bearer ${token}`,
                   'Content-Type': 'multipart/form-data'
               }
           });
 
       } else {
-          // --- MANUAL & GITHUB FLOW ---
           const payload: any = {
             name,
             description,
@@ -79,12 +119,11 @@ export default function CreateProjectDialog({ isOpen, onClose, onSuccess }: Crea
 
           if (activeTab === 'github') {
             if (!repoUrl) {
-                setError("Repository URL is required");
+                setError('Repository URL is required');
                 setLoading(false);
                 return;
             }
             payload.repository_url = repoUrl;
-            // Send token if provided (Backend will use it for cloning but won't store it)
             if (githubToken) payload.github_token = githubToken;
           }
 
@@ -93,11 +132,15 @@ export default function CreateProjectDialog({ isOpen, onClose, onSuccess }: Crea
 
       onSuccess();
       onClose();
-      // Reset form
-      setName(''); setDescription(''); setRepoUrl(''); setGithubToken('');
+      setName(''); setDescription(''); setRepoUrl(''); setGithubToken(''); setImportFile(null);
+
     } catch (err: any) {
-      console.error("Failed to create project:", err);
-      setError(err.response?.data?.error || "Failed to create project. Check your inputs.");
+      console.error('Failed to create project:', err);
+      let msg = parseError(err);
+      if (activeTab === 'github' && msg.toLowerCase().includes('git clone failed')) {
+        msg = parseGithubError(msg.replace(/^.*git clone failed:\s*/i, ''));
+      }
+      setError(msg);
     } finally {
       setLoading(false);
     }
@@ -141,8 +184,13 @@ export default function CreateProjectDialog({ isOpen, onClose, onSuccess }: Crea
         <form onSubmit={handleSubmit} className="p-6 space-y-5 overflow-y-auto custom-scrollbar bg-ubiq-900">
           
           {error && (
-            <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-lg text-xs text-red-400">
-                {error}
+            <div className={`flex items-start gap-2 p-3 rounded-lg border text-xs ${
+              error.toLowerCase().includes('storage') || error.toLowerCase().includes('limit')
+                ? 'bg-amber-500/10 border-amber-500/20 text-amber-300'
+                : 'bg-red-500/10 border-red-500/20 text-red-400'
+            }`}>
+              <ExclamationTriangleIcon className="w-4 h-4 shrink-0 mt-0.5" />
+              <span>{error}</span>
             </div>
           )}
 
@@ -178,7 +226,13 @@ export default function CreateProjectDialog({ isOpen, onClose, onSuccess }: Crea
                 />
                 <CloudArrowUpIcon className="w-10 h-10 text-slate-500 mx-auto mb-3 group-hover:text-ubiq-accent transition-colors" />
                 <p className="text-sm text-slate-300 font-medium">{importFile ? importFile.name : "Click to upload .ZIP file"}</p>
-                <p className="text-xs text-slate-500 mt-1">Max 20MB</p>
+                {importFile ? (
+                  <p className={`text-xs mt-1 ${importFile.size > MAX_ZIP_BYTES ? 'text-red-400 font-medium' : 'text-slate-500'}`}>
+                    {(importFile.size / 1048576).toFixed(1)} MB {importFile.size > MAX_ZIP_BYTES ? `— exceeds ${MAX_ZIP_MB} MB limit` : ''}
+                  </p>
+                ) : (
+                  <p className="text-xs text-slate-500 mt-1">Max {MAX_ZIP_MB} MB</p>
+                )}
              </div>
           )}
 

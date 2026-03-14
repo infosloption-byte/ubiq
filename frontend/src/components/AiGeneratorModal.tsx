@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { aiService } from '../services/aiService';
+import { aiService, AiApiConfig } from '../services/aiService';
 import { projectAPI } from '../services/api';
 import { Sparkles, X, Loader2, Cloud, Cpu, Globe, Settings, Save } from 'lucide-react';
 import ModelSelector from './ModelSelector'; 
@@ -9,6 +9,13 @@ interface AiGeneratorModalProps {
     isOpen: boolean;
     onClose: () => void;
 }
+
+// Shared localStorage key for Ollama URL across all components
+const OLLAMA_URL_KEY = 'ubiq_ollama_url';
+
+// Docker-hosted Ollama: use host.docker.internal so the container can reach
+// the host machine's Ollama process. Falls back to localhost for non-Docker envs.
+const LOCAL_OLLAMA_URL = 'http://host.docker.internal:11434';
 
 export default function AiGeneratorModal({ isOpen, onClose }: AiGeneratorModalProps) {
     const navigate = useNavigate();
@@ -22,77 +29,174 @@ export default function AiGeneratorModal({ isOpen, onClose }: AiGeneratorModalPr
     const [aiMode, setAiMode] = useState<'cloud' | 'local' | 'remote'>('cloud');
     const [selectedModel, setSelectedModel] = useState('gpt-4o'); 
     
-    // Remote Connection Settings
+    // Remote Connection Settings — shared key with ChatInterface
     const [showSettings, setShowSettings] = useState(false);
-    const [remoteUrl, setRemoteUrl] = useState(localStorage.getItem('ubiq_remote_url') || 'http://localhost:11434');
+    const [remoteUrl, setRemoteUrl] = useState(localStorage.getItem(OLLAMA_URL_KEY) || 'http://localhost:11434');
+    const [rawModelOutput, setRawModelOutput] = useState<string | null>(null); // shown on parse failure
 
-    // Save remote URL to local storage
+    // Save remote URL to local storage (shared key)
     const handleSaveSettings = () => {
-        localStorage.setItem('ubiq_remote_url', remoteUrl);
+        localStorage.setItem(OLLAMA_URL_KEY, remoteUrl);
         setShowSettings(false);
     };
 
     // Auto-select defaults when switching modes
     useEffect(() => {
         if (aiMode === 'cloud') setSelectedModel('gpt-4o');
-        // For local/remote, ModelSelector usually handles default selection or we let user pick
     }, [aiMode]);
 
-    // Robust Response Parser
+    // ── Universal Response Parser ──────────────────────────────────────────────
+    // 8 strategies covering every known model output style.
+    // Tries each in order; first one that yields ≥1 file wins.
     const parseResponse = (rawOutput: string) => {
-        // 1. Try parsing "---START_FILE---" block format (Preferred for Local Models)
-        if (rawOutput.includes('---START_FILE:')) {
-            const files = [];
-            const parts = rawOutput.split('---START_FILE:');
-            
-            for (const part of parts) {
-                if (!part.trim()) continue; 
-                
-                const endNameIndex = part.indexOf('---');
-                if (endNameIndex === -1) continue;
-                const fileName = part.substring(0, endNameIndex).trim();
-                
-                const contentEndIndex = part.lastIndexOf('---END_FILE---');
-                if (contentEndIndex === -1) continue;
-                
-                let content = part.substring(endNameIndex + 3, contentEndIndex).trim();
-                
-                if (fileName && content) {
-                    files.push({ path: fileName, content: content });
-                }
+        const raw = rawOutput.trim();
+        type FileEntry = { path: string; content: string };
+
+        /** Helpers **/
+        const isValidFilename = (s: string) =>
+            /^[\w\-./]+\.[a-zA-Z0-9]{1,10}$/.test(s) && !s.includes(' ');
+
+        const guessFilename = (code: string): string => {
+            if (/<\s*!DOCTYPE|<\s*html/i.test(code))  return 'index.html';
+            if (/^\s*\{[\s\S]*"runtime"/m.test(code)) return 'ubiq.json';
+            if (/"name"\s*:\s*"/.test(code))           return 'package.json';
+            if (/^import |^from |^export /m.test(code)) return 'main.js';
+            if (/^<\?php/m.test(code))                  return 'index.php';
+            if (/^def |^class |^import /m.test(code))   return 'main.py';
+            if (/^body\s*\{|^\*/m.test(code))           return 'style.css';
+            return 'output.txt';
+        };
+
+        // ── S1: ---START_FILE: filename--- ... ---END_FILE--- ─────────────────────
+        if (raw.includes('---START_FILE:')) {
+            const files: FileEntry[] = [];
+            for (const part of raw.split('---START_FILE:')) {
+                if (!part.trim()) continue;
+                const dash = part.indexOf('---');
+                if (dash === -1) continue;
+                const fileName = part.substring(0, dash).trim();
+                const endIdx = part.lastIndexOf('---END_FILE---');
+                const content = (endIdx !== -1
+                    ? part.substring(dash + 3, endIdx)
+                    : part.substring(dash + 3)).trim();
+                if (isValidFilename(fileName) && content) files.push({ path: fileName, content });
             }
             if (files.length > 0) return files;
         }
 
-        // 2. Fallback: Try parsing pure JSON or Markdown-wrapped JSON
-        let jsonStr = rawOutput;
-        const start = rawOutput.indexOf('['); // Look for array start
-        const end = rawOutput.lastIndexOf(']');
-        
-        if (start !== -1 && end !== -1) {
-            jsonStr = rawOutput.substring(start, end + 1);
-        }
-        
-        // Clean markdown code blocks
-        jsonStr = jsonStr.replace(/```json/g, '').replace(/```/g, '');
-        
-        try {
-            return JSON.parse(jsonStr);
-        } catch (e) {
-            try {
-                // Last resort: unsafe eval if JSON is slightly malformed (keys without quotes etc)
-                // eslint-disable-next-line no-new-func
-                return new Function('return ' + jsonStr)(); 
-            } catch (e2) {
-                throw new Error("Could not parse AI response. The model output was invalid.");
+        // ── S2: === filename === or ==== filename ==== separators ─────────────────
+        if (raw.includes('===')) {
+            const sepRegex = /={2,}\s*([\w\-./ ]+\.[a-zA-Z0-9]{1,10})\s*={2,}/g;
+            const matches = [...raw.matchAll(sepRegex)];
+            if (matches.length > 0) {
+                const files: FileEntry[] = [];
+                matches.forEach((match, i) => {
+                    const start = match.index! + match[0].length;
+                    const end = matches[i + 1]?.index ?? raw.length;
+                    const content = raw.substring(start, end).replace(/```[a-z]*/g, '').replace(/```/g, '').trim();
+                    const path = match[1].trim();
+                    if (content) files.push({ path, content });
+                });
+                if (files.length > 0) return files;
             }
         }
+
+        // ── S3: Markdown header (##/###) or bold (**name**) before a fence ────────
+        // e.g.  ### src/App.jsx
+```jsx
+...
+```
+        const headerFenceRegex = /(?:#{1,4}\s+|\*{1,2})([\w\-./]+\.[a-zA-Z0-9]{1,10})(?:\*{1,2})?\s*\n```[a-z]*\n([\s\S]*?)```/gi;
+        {
+            const files: FileEntry[] = [];
+            let m: RegExpExecArray | null;
+            while ((m = headerFenceRegex.exec(raw)) !== null) {
+                const path = m[1].trim();
+                const content = m[2].trim();
+                if (isValidFilename(path) && content) files.push({ path, content });
+            }
+            if (files.length > 0) return files;
+        }
+
+        // ── S4: "File: filename" or "// filename" or "/* filename */" label before fence ─
+        const labelFenceRegex = /(?:(?:File|filename|path):\s*|(?:\/\/|#)\s*)([\w\-./]+\.[a-zA-Z0-9]{1,10})\s*\n```[a-z]*\n([\s\S]*?)```/gi;
+        {
+            const files: FileEntry[] = [];
+            let m: RegExpExecArray | null;
+            while ((m = labelFenceRegex.exec(raw)) !== null) {
+                const path = m[1].trim();
+                const content = m[2].trim();
+                if (isValidFilename(path) && content) files.push({ path, content });
+            }
+            if (files.length > 0) return files;
+        }
+
+        // ── S5: Fenced block with filename ON the opening fence line ─────────────
+        // e.g. ```jsx src/App.jsx  OR  ```src/App.jsx
+        const fenceWithNameRegex = /```(?:[a-z]+\s+)?([\w\-./]+\.[a-zA-Z0-9]{1,10})\n([\s\S]*?)```/gi;
+        {
+            const files: FileEntry[] = [];
+            let m: RegExpExecArray | null;
+            while ((m = fenceWithNameRegex.exec(raw)) !== null) {
+                const path = m[1].trim();
+                const content = m[2].trim();
+                if (isValidFilename(path) && content) files.push({ path, content });
+            }
+            if (files.length > 0) return files;
+        }
+
+        // ── S6: JSON array [{path, content}] or [{filename, code}] ───────────────
+        const jsonStart = raw.indexOf('[');
+        const jsonEnd   = raw.lastIndexOf(']');
+        if (jsonStart !== -1 && jsonEnd !== -1) {
+            const jsonStr = raw.substring(jsonStart, jsonEnd + 1)
+                .replace(/```json/g, '').replace(/```/g, '');
+            try {
+                const parsed = JSON.parse(jsonStr);
+                if (Array.isArray(parsed) && parsed.length > 0) {
+                    const normalised = parsed.map((f: any) => ({
+                        path:    f.path || f.filename || f.name || f.file,
+                        content: f.content || f.code || f.body || ''
+                    })).filter((f: any) => f.path && f.content);
+                    if (normalised.length > 0) return normalised;
+                }
+            } catch (_) { /* fall through */ }
+        }
+
+        // ── S7: Multiple unnamed fenced blocks — pair with implied filenames ───────
+        const unnamedFences = [...raw.matchAll(/```[a-z]*\n([\s\S]*?)```/gi)];
+        if (unnamedFences.length > 1) {
+            const files: FileEntry[] = [];
+            unnamedFences.forEach(m => {
+                const content = m[1].trim();
+                if (content.length > 10) files.push({ path: guessFilename(content), content });
+            });
+            // Deduplicate paths by appending index
+            const seen: Record<string, number> = {};
+            files.forEach(f => {
+                if (seen[f.path] !== undefined) {
+                    const ext = f.path.split('.').pop()!;
+                    const base = f.path.slice(0, -ext.length - 1);
+                    f.path = `${base}_${++seen[f.path]}.${ext}`;
+                } else { seen[f.path] = 0; }
+            });
+            if (files.length > 0) return files;
+        }
+
+        // ── S8: Whole output is a single file (last resort) ───────────────────────
+        const stripped = raw.replace(/^```[a-z]*\n?/, '').replace(/\n?```$/, '').trim();
+        if (stripped.length > 30) {
+            return [{ path: guessFilename(stripped), content: stripped }];
+        }
+
+        throw new Error("The model returned an empty or unrecognisable response. Try a different model or rephrase your prompt.");
     };
 
     const handleGenerate = async () => {
         if (!prompt.trim()) return;
         setLoading(true);
         setStatus('Initializing Workspace...');
+        setRawModelOutput(null);
 
         try {
             // 1. Create Project Container
@@ -106,60 +210,105 @@ export default function AiGeneratorModal({ isOpen, onClose }: AiGeneratorModalPr
 
             setStatus(`Architecting with ${selectedModel}...`);
             
-            // 2. Construct System Prompt
-            const systemPrompt = `You are an Expert Full Stack Architect.
-            TASK: Generate a complete, production-ready web application workspace.
-            
-            OUTPUT FORMAT (STRICT):
-            ---START_FILE: filename.ext---
-            // content
-            ---END_FILE---
+            // 2. Universal system prompt — same format for ALL models (cloud + local + remote).
+            //    The parser handles whatever format the model actually returns.
+            const systemPrompt = `You are a code generator. Your only job is to output file blocks.
 
-            CRITICAL RULES:
-            1. Include 'ubiq.json' (runtime: static/node/php/python).
-            2. If 'node', include 'package.json' with "dev": "vite --port 5173 --host 0.0.0.0".
-            3. React/Vue 'index.html' must be in ROOT.
-            4. If 'php', standard structure + 'composer.json'.
-            5. Provide FULL code. No placeholders.`;
+OUTPUT FORMAT (use this exactly):
+---START_FILE: filename.ext---
+file contents here
+---END_FILE---
 
-            const fullMessage = `${systemPrompt}\n\nUser Request: ${prompt}`;
+EXAMPLE:
+---START_FILE: index.html---
+<!DOCTYPE html>
+<html><body><h1>Hello World</h1></body></html>
+---END_FILE---
+---START_FILE: ubiq.json---
+{"runtime":"static"}
+---END_FILE---
+
+STRICT RULES:
+1. Output ONLY file blocks — no explanations, no greetings, no comments outside blocks
+2. ALWAYS include ubiq.json: {"runtime":"static"} for HTML, {"runtime":"node"} for React/Node, {"runtime":"php"} for PHP, {"runtime":"python"} for Python
+3. For React/Node apps: include package.json with "dev": "vite --port 5173 --host 0.0.0.0"
+4. Write COMPLETE code — never use TODO, placeholder, ellipsis (...)
+5. Every ---START_FILE: must have a matching ---END_FILE---`;
+
+            const fullMessage = `${systemPrompt}\n\nBuild this: ${prompt}`;
 
             // 3. Prepare Config based on Mode
-            const apiConfig: any = {
+            //    - cloud:  no ollama_url needed, BYOK keys come from chatCloud() via localStorage
+            //    - local:  explicitly pass Docker host URL so container can reach host Ollama
+            //    - remote: pass user-configured EC2/Azure URL (shared key with ChatInterface)
+            const apiConfig: AiApiConfig = {
                 project_id: projectId
             };
-            
-            if (aiMode === 'remote') {
-                const currentRemoteUrl = localStorage.getItem('ubiq_remote_url');
+
+            if (aiMode === 'local') {
+                const localUrl = localStorage.getItem('ubiq_local_url') || 'http://localhost:11434';
+                apiConfig.api_keys = { ollama_url: localUrl };
+            } else if (aiMode === 'remote') {
+                const currentRemoteUrl = localStorage.getItem(OLLAMA_URL_KEY);
                 if (!currentRemoteUrl) throw new Error("Please configure your Remote URL in settings.");
                 apiConfig.api_keys = { ollama_url: currentRemoteUrl };
             }
-            // Note: If 'local', we send no api_keys. Backend defaults to host.docker.internal.
 
-            // 4. Call AI Service
-            const response = await aiService.chat(
-                fullMessage, 
-                [], 
-                aiMode === 'cloud' ? 'cloud' : 'local', // Service layer treats Remote as 'local' (Ollama provider)
-                selectedModel, 
-                apiConfig
-            );
+            // 4. Call AI — with one automatic retry using a simpler prompt
+            setRawModelOutput(null);
+
+            const callAI = async (message: string) => {
+                const res = await aiService.chat(message, [], aiMode, selectedModel, apiConfig);
+                return res.content?.trim() ?? '';
+            };
+
+            const FALLBACK_PROMPT = `You are a code generator. Create the requested app.
+Use EXACTLY this format for every file:
+---START_FILE: filename.ext---
+code here
+---END_FILE---
+Always include ubiq.json as: ---START_FILE: ubiq.json---\n{"runtime":"static"}\n---END_FILE---
+Request: ${prompt}`;
+
+            let rawContent = await callAI(fullMessage);
+
+            // Detect empty / refusal / too-short response
+            const looksEmpty = (s: string) => {
+                const cleaned = s.replace(/[\s\n]+/g, ' ').trim();
+                return cleaned.length < 30 ||
+                    /^(sorry|i (can't|cannot|don't|am unable)|i'm sorry|as an ai)/i.test(cleaned);
+            };
+
+            if (looksEmpty(rawContent)) {
+                setStatus(`Model returned nothing — retrying with simpler prompt...`);
+                rawContent = await callAI(FALLBACK_PROMPT);
+            }
+
+            // Store raw output so user can inspect it if parsing still fails
+            setRawModelOutput(rawContent);
+
+            if (looksEmpty(rawContent)) {
+                throw new Error(
+                    `${selectedModel} returned an empty or refused response. ` +
+                    `Try a different model, or check that it's fully loaded on the server.`
+                );
+            }
 
             setStatus('Extracting Files...');
-            let files = [];
-            
+            let files: { path: string; content: string }[] = [];
+
             try {
-                files = parseResponse(response.content);
-                // Ensure content is stringified if it came back as JSON object/array
+                files = parseResponse(rawContent);
                 files = files.map((f: any) => {
-                    let content = f.content;
-                    if (Array.isArray(content)) content = content.join('\n');
-                    else if (typeof content === 'object') content = JSON.stringify(content, null, 2);
-                    return { path: f.path, content: String(content) };
+                    let fileContent = f.content;
+                    if (Array.isArray(fileContent)) fileContent = fileContent.join('\n');
+                    else if (typeof fileContent === 'object') fileContent = JSON.stringify(fileContent, null, 2);
+                    return { path: f.path, content: String(fileContent) };
                 });
             } catch (e: any) {
                 console.error("Parsing Error:", e);
-                throw new Error("Failed to parse AI output. Try a simpler prompt or a smarter model.");
+                // rawModelOutput is already set — UI will show it
+                throw new Error(e.message || "Failed to parse AI output.");
             }
 
             setStatus(`Saving ${files.length} files...`);
@@ -243,8 +392,7 @@ export default function AiGeneratorModal({ isOpen, onClose }: AiGeneratorModalPr
                         <div className="flex items-center gap-2">
                             <div className="flex-1">
                                 <ModelSelector 
-                                    // Pass 'local' to filter for Ollama models if in Local OR Remote mode
-                                    aiMode={aiMode === 'cloud' ? 'cloud' : 'local'} 
+                                    aiMode={aiMode} 
                                     selectedModel={selectedModel} 
                                     onSelectModel={setSelectedModel} 
                                     menuPosition="bottom" 
@@ -266,7 +414,7 @@ export default function AiGeneratorModal({ isOpen, onClose }: AiGeneratorModalPr
                         {/* Inline Settings Panel (Only for Remote) */}
                         {showSettings && aiMode === 'remote' && (
                             <div className="mt-2 p-3 bg-black/40 border border-white/10 rounded-lg animate-fade-in">
-                                <label className="block text-[10px] font-bold text-slate-500 mb-1.5 uppercase">Remote Server URL (EC2)</label>
+                                <label className="block text-[10px] font-bold text-slate-500 mb-1.5 uppercase">Remote Server URL (EC2 / Azure)</label>
                                 <div className="flex gap-2">
                                     <input 
                                         type="text" 
@@ -284,7 +432,7 @@ export default function AiGeneratorModal({ isOpen, onClose }: AiGeneratorModalPr
                                 </div>
                                 <p className="text-[9px] text-slate-500 mt-1.5 flex items-center gap-1">
                                     <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse"/>
-                                    Connects your backend to an external Ollama instance.
+                                    URL is shared with Chat settings — configure once, works everywhere.
                                 </p>
                             </div>
                         )}
@@ -293,7 +441,7 @@ export default function AiGeneratorModal({ isOpen, onClose }: AiGeneratorModalPr
                         {aiMode === 'local' && (
                             <div className="text-[10px] text-emerald-400 bg-emerald-900/20 border border-emerald-900/50 p-2 rounded flex items-center gap-2">
                                 <Cpu className="w-3 h-3" />
-                                <span>Using Docker Host (host.docker.internal:11434)</span>
+                                <span>Connecting via <span className="font-mono">host.docker.internal:11434</span> (Ollama on host machine)</span>
                             </div>
                         )}
                     </div>
@@ -315,6 +463,24 @@ export default function AiGeneratorModal({ isOpen, onClose }: AiGeneratorModalPr
                     {status && (
                         <div className={`text-xs text-center font-medium ${status.includes('Error') ? 'text-red-400' : 'text-purple-300 animate-pulse'}`}>
                             {status}
+                        </div>
+                    )}
+
+                    {/* Raw model output — shown only when parsing fails, so user knows what the model said */}
+                    {!loading && status.includes('Error') && rawModelOutput && (
+                        <div className="mt-2 rounded-lg border border-red-500/20 bg-black/40 overflow-hidden">
+                            <div className="flex items-center justify-between px-3 py-1.5 border-b border-white/5">
+                                <span className="text-[10px] uppercase font-bold text-red-400 tracking-wider">Model Raw Output</span>
+                                <button
+                                    onClick={() => navigator.clipboard.writeText(rawModelOutput)}
+                                    className="text-[10px] text-slate-500 hover:text-white transition-colors"
+                                >Copy</button>
+                            </div>
+                            <pre className="text-[10px] text-slate-400 p-3 max-h-36 overflow-y-auto whitespace-pre-wrap font-mono leading-relaxed custom-scrollbar">
+                                {rawModelOutput.length > 800
+                                    ? rawModelOutput.substring(0, 800) + '\n… (truncated)'
+                                    : rawModelOutput}
+                            </pre>
                         </div>
                     )}
 

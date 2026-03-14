@@ -4,14 +4,15 @@ import { useAuthStore } from '../stores/authStore';
 import { authAPI, projectAPI, userAPI } from '../services/api';
 import Layout from '../components/Layout';
 import CreateProjectDialog from '../components/CreateProjectDialog'; 
-import AiGeneratorModal from '../components/AiGeneratorModal'; // <--- IMPORT THIS
+import AiGeneratorModal from '../components/AiGeneratorModal';
 import { 
   FolderIcon, 
   DocumentTextIcon, 
   ChatBubbleLeftRightIcon, 
   PlusIcon,
   ClockIcon,
-  SparklesIcon // <--- IMPORT THIS
+  SparklesIcon,
+  CircleStackIcon
 } from '@heroicons/react/24/outline';
 
 interface Project {
@@ -20,7 +21,9 @@ interface Project {
   description: string;
   language: string;
   files_count: number;
+  storage_bytes: number;
   updated_at: string;
+  created_at: string;
 }
 
 interface Stats {
@@ -30,27 +33,37 @@ interface Stats {
   subscription_tier: string;
 }
 
+interface StorageStats {
+  used_bytes: number;
+  used_mb: number;
+  limit_bytes: number;
+  limit_mb: number;
+  percent: number;
+}
+
 export default function DashboardPage() {
   const { user, setUser } = useAuthStore();
   const navigate = useNavigate();
   const [projects, setProjects] = useState<Project[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
+  const [storageStats, setStorageStats] = useState<StorageStats | null>(null);
   const [loading, setLoading] = useState(true);
   
-  // State for Dialogs
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
-  const [isAiModalOpen, setIsAiModalOpen] = useState(false); // <--- NEW STATE
+  const [isAiModalOpen, setIsAiModalOpen] = useState(false);
 
   const loadData = async () => {
     try {
-      const [userData, projectData, statsData] = await Promise.all([
+      const [userData, projectData, statsData, storageData] = await Promise.all([
         authAPI.me(),
         projectAPI.getAll(),
-        userAPI.getStats()
+        userAPI.getStats(),
+        userAPI.getStorageStats(),
       ]);
       setUser(userData.data.user);
       setProjects(projectData.data.projects);
       setStats(statsData.data.stats);
+      setStorageStats(storageData.data);
     } catch (e) {
       console.error("Dashboard error", e);
     } finally {
@@ -116,9 +129,63 @@ export default function DashboardPage() {
                <p className="text-slate-500 text-xs font-medium uppercase tracking-wider mb-1">Current Plan</p>
                <div className="flex items-center gap-2">
                  <span className="text-xl font-bold text-white capitalize">{stats.subscription_tier}</span>
-                 <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-ubiq-accent/20 text-ubiq-accent border border-ubiq-accent/20">PRO</span>
+                 {stats.subscription_tier === 'pro' && (
+                   <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-ubiq-accent/20 text-ubiq-accent border border-ubiq-accent/20">PRO</span>
+                 )}
                </div>
             </div>
+          </div>
+        )}
+
+        {/* Storage Usage Widget */}
+        {storageStats && (
+          <div className="glass-panel p-5 rounded-xl">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <CircleStackIcon className="w-4 h-4 text-slate-400" />
+                <span className="text-sm font-medium text-slate-300">Storage Usage</span>
+              </div>
+              <span className="text-xs text-slate-500">
+                {storageStats.used_mb < 1024
+                  ? `${storageStats.used_mb.toFixed(1)} MB`
+                  : `${(storageStats.used_mb / 1024).toFixed(2)} GB`
+                }
+                {' '}of{' '}
+                {storageStats.limit_mb >= 1024
+                  ? `${(storageStats.limit_mb / 1024).toFixed(0)} GB`
+                  : `${storageStats.limit_mb} MB`
+                }
+                {' '}used
+              </span>
+            </div>
+            <div className="w-full h-2 bg-ubiq-950 rounded-full overflow-hidden">
+              <div
+                className={`h-full rounded-full transition-all duration-700 ${
+                  storageStats.percent > 90 ? 'bg-red-500' :
+                  storageStats.percent > 70 ? 'bg-amber-500' : 'bg-emerald-500'
+                }`}
+                style={{ width: `${storageStats.percent}%` }}
+              />
+            </div>
+            <div className="flex items-center justify-between mt-2">
+              <span className={`text-xs font-medium ${
+                storageStats.percent > 90 ? 'text-red-400' :
+                storageStats.percent > 70 ? 'text-amber-400' : 'text-emerald-400'
+              }`}>
+                {storageStats.percent}% used
+              </span>
+              <span className="text-xs text-slate-600">
+                {storageStats.limit_mb >= 1024
+                  ? `${((storageStats.limit_mb - storageStats.used_mb) / 1024).toFixed(2)} GB`
+                  : `${(storageStats.limit_mb - storageStats.used_mb).toFixed(0)} MB`
+                } remaining
+              </span>
+            </div>
+            {storageStats.percent > 80 && (
+              <p className="text-xs text-amber-400 mt-2 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2">
+                ⚠ You're running low on storage. Consider deleting unused projects or upgrading your plan.
+              </p>
+            )}
           </div>
         )}
 
@@ -173,9 +240,18 @@ export default function DashboardPage() {
                       })}
                   </span>
                   
-                  <div className="flex items-center text-xs text-slate-600 pt-4 border-t border-white/5">
-                    <ClockIcon className="w-3.5 h-3.5 mr-1.5" />
-                    <span>Last Updated {new Date(project.updated_at).toLocaleDateString()}</span>
+                  <div className="flex items-center text-xs text-slate-600 pt-4 border-t border-white/5 justify-between">
+                    <div className="flex items-center gap-1">
+                      <ClockIcon className="w-3.5 h-3.5 mr-1.5" />
+                      <span>Updated {new Date(project.updated_at).toLocaleDateString()}</span>
+                    </div>
+                    {project.storage_bytes > 0 && (
+                      <span className="text-slate-600">
+                        {project.storage_bytes < 1048576
+                          ? `${(project.storage_bytes / 1024).toFixed(0)} KB`
+                          : `${(project.storage_bytes / 1048576).toFixed(1)} MB`}
+                      </span>
+                    )}
                   </div>
                 </Link>
               ))}

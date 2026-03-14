@@ -1,86 +1,154 @@
-import { useState, useEffect, useRef } from 'react';
-import { projectAPI } from '../../services/api';
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { projectAPI, userAPI } from '../../services/api';
 import { 
     PlayIcon, ArrowPathIcon, ArrowTopRightOnSquareIcon, 
     ExclamationTriangleIcon, CommandLineIcon, ServerIcon,
-    ShieldExclamationIcon, XMarkIcon 
+    ShieldExclamationIcon, XMarkIcon, StopIcon
 } from '@heroicons/react/24/outline';
 
 interface ProjectRunnerProps {
     projectId: number;
     onClose?: () => void;
+    onContainerStateChange?: (running: boolean) => void;
 }
 
-export default function ProjectRunner({ projectId, onClose }: ProjectRunnerProps) {
+// Keywords that indicate the server is stable and we can stop polling
+const STABLE_PATTERNS = [
+    'static site ready',
+    'ready in ',
+    'listening on',
+    'compiled successfully',
+    'server started',
+    'application started',
+    'running on port',
+    'local:',       // Vite output
+    'network:',     // Vite output
+];
+
+function isLogStable(log: string): boolean {
+    const lower = log.toLowerCase();
+    return STABLE_PATTERNS.some(p => lower.includes(p));
+}
+
+export default function ProjectRunner({ projectId, onClose, onContainerStateChange }: ProjectRunnerProps) {
     const [previewUrl, setPreviewUrl] = useState<string | null>(null);
     const [isRunning, setIsRunning] = useState(false);
-    
-    // State for Real Logs & Errors
+    const [isStopping, setIsStopping] = useState(false);
     const [error, setError] = useState('');
-    const [realLogs, setRealLogs] = useState<string>(''); 
+    const [realLogs, setRealLogs] = useState<string>('');
+    const [isPollingActive, setIsPollingActive] = useState(false);
+    const [storageInfo, setStorageInfo] = useState<{ used_mb: number; limit_mb: number } | null>(null);
+    
     const bottomRef = useRef<HTMLDivElement>(null);
+    const stableCountRef = useRef(0);   // consecutive unchanged polls
+    const lastLogRef = useRef('');
 
-    // 1. Auto-scroll to bottom of logs
+    // Auto-scroll
     useEffect(() => {
         if (bottomRef.current) {
             bottomRef.current.scrollIntoView({ behavior: 'smooth' });
         }
     }, [realLogs]);
 
-    // 2. POLL FOR LOGS (Every 2 seconds)
+    // Fetch storage info once on mount
     useEffect(() => {
-        let interval: NodeJS.Timeout;
+        userAPI.getStats().then(res => {
+            const d = res.data;
+            if (d?.storage_used_mb !== undefined) {
+                setStorageInfo({ used_mb: d.storage_used_mb, limit_mb: d.storage_limit_mb ?? 500 });
+            }
+        }).catch(() => {});
+    }, []);
 
-        // Poll if running OR if we have a URL (to catch post-boot logs)
-        if (isRunning || previewUrl) {
-            const fetchLogs = async () => {
-                try {
-                    // Ensure you added getBuildLog to api.ts as instructed
-                    // @ts-ignore 
-                    const res = await projectAPI.getBuildLog(projectId);
-                    setRealLogs(res.data.log || '');
-                } catch (e) {
-                    console.warn("Log polling waiting...", e);
+    // Smart log polling — stops when logs stabilize
+    useEffect(() => {
+        if (!isPollingActive) return;
+
+        let cancelled = false;
+        stableCountRef.current = 0;
+
+        const fetchLogs = async () => {
+            if (cancelled) return;
+            try {
+                // @ts-ignore
+                const res = await projectAPI.getBuildLog(projectId);
+                const log: string = res.data.log || '';
+                setRealLogs(log);
+
+                // Check stability: same content + ready keyword
+                if (log === lastLogRef.current) {
+                    stableCountRef.current += 1;
+                } else {
+                    stableCountRef.current = 0;
+                    lastLogRef.current = log;
                 }
-            };
 
-            fetchLogs(); // Initial fetch
-            interval = setInterval(fetchLogs, 2000);
-        }
+                // Stop polling after 3 stable polls if logs show a ready state
+                // OR after 5 stable polls regardless (server might not print expected keywords)
+                if (isLogStable(log) && stableCountRef.current >= 3) {
+                    setIsPollingActive(false);
+                } else if (stableCountRef.current >= 5) {
+                    setIsPollingActive(false);
+                }
+            } catch (e) {
+                console.warn('Log polling error', e);
+            }
+        };
 
-        return () => clearInterval(interval);
-    }, [isRunning, previewUrl, projectId]);
+        fetchLogs();
+        const interval = setInterval(fetchLogs, 2000);
+        return () => { cancelled = true; clearInterval(interval); };
+    }, [isPollingActive, projectId]);
 
     const handleRun = async () => {
         setIsRunning(true);
         setError('');
         setRealLogs('Initializing build request...');
         setPreviewUrl(null);
+        setIsPollingActive(false);
+        lastLogRef.current = '';
         
         try {
-            // Trigger the backend to start Docker & create startup.sh
             const res = await projectAPI.runProject(projectId);
-            
-            setRealLogs((prev) => prev + "\n[System] Container allocated. Executing startup script...\n");
-            
-            // Give the container ~5 seconds to run the script before enabling the "Open" button.
-            // This prevents opening the tab before the server port is actually listening.
+            setRealLogs(prev => prev + '\n[System] Container allocated. Executing startup script...\n');
+            setIsPollingActive(true);
+
             setTimeout(() => {
                 setPreviewUrl(res.data.url);
                 setIsRunning(false);
+                onContainerStateChange?.(true);
             }, 5000);
-            
         } catch (err: any) {
             const errorMsg = err.response?.data?.error || 'Failed to start sandbox.';
             const details = err.response?.data?.details || err.message;
-            
             setError(errorMsg);
-            setRealLogs((prev) => prev + `\n❌ Error: ${errorMsg}\nDetails: ${details}\n`);
+            setRealLogs(prev => prev + `\n❌ Error: ${errorMsg}\nDetails: ${details}\n`);
             setIsRunning(false);
+            setIsPollingActive(false);
         }
     };
 
+    const handleStop = async () => {
+        setIsStopping(true);
+        setIsPollingActive(false);
+        try {
+            await projectAPI.stopProject(projectId);
+        } catch (e) {
+            // Container may already be gone — that's fine
+        }
+        setPreviewUrl(null);
+        setIsRunning(false);
+        setIsStopping(false);
+        setRealLogs(prev => prev + '\n[Ubiq] Container stopped.\n');
+        onContainerStateChange?.(false);
+    };
+
     const isMixedContent = window.location.protocol === 'https:' && previewUrl?.startsWith('http:');
+
+    const storagePercent = storageInfo ? Math.min(100, (storageInfo.used_mb / storageInfo.limit_mb) * 100) : null;
+    const storageBarColor = storagePercent !== null
+        ? storagePercent > 90 ? 'bg-red-500' : storagePercent > 70 ? 'bg-amber-500' : 'bg-emerald-500'
+        : 'bg-emerald-500';
 
     return (
         <div className="flex flex-col h-full bg-ubiq-950">
@@ -89,9 +157,26 @@ export default function ProjectRunner({ projectId, onClose }: ProjectRunnerProps
                  <div className="flex items-center gap-2">
                      <ServerIcon className="w-4 h-4 text-emerald-400" />
                      <span className="text-sm font-medium text-slate-200">Sandbox Server</span>
+                     {/* Storage pill */}
+                     {storageInfo && (
+                         <div className="hidden sm:flex items-center gap-1.5 ml-2 px-2 py-0.5 bg-white/5 rounded-full border border-white/5">
+                             <div className="w-16 h-1 bg-white/10 rounded-full overflow-hidden">
+                                 <div className={`h-full rounded-full ${storageBarColor}`} style={{ width: `${storagePercent}%` }} />
+                             </div>
+                             <span className="text-[10px] text-slate-500">
+                                 {storageInfo.used_mb < 1000
+                                     ? `${storageInfo.used_mb.toFixed(0)}MB`
+                                     : `${(storageInfo.used_mb / 1024).toFixed(1)}GB`
+                                 } / {storageInfo.limit_mb >= 1024
+                                     ? `${(storageInfo.limit_mb / 1024).toFixed(0)}GB`
+                                     : `${storageInfo.limit_mb}MB`
+                                 }
+                             </span>
+                         </div>
+                     )}
                  </div>
                  
-                 <div className="flex items-center gap-3">
+                 <div className="flex items-center gap-2">
                      {previewUrl && (
                         <a 
                             href={previewUrl} 
@@ -103,14 +188,29 @@ export default function ProjectRunner({ projectId, onClose }: ProjectRunnerProps
                             Open Tab <ArrowTopRightOnSquareIcon className="w-3.5 h-3.5" />
                         </a>
                      )}
+
+                     {/* STOP button — visible when container is running */}
+                     {(previewUrl || isRunning) && (
+                         <button 
+                            onClick={handleStop}
+                            disabled={isStopping}
+                            className="flex items-center gap-1.5 px-3 py-1 bg-red-600/20 hover:bg-red-600/30 text-red-400 border border-red-500/30 rounded-md text-xs font-bold transition-colors disabled:opacity-50"
+                         >
+                            {isStopping 
+                                ? <ArrowPathIcon className="w-3.5 h-3.5 animate-spin" />
+                                : <StopIcon className="w-3.5 h-3.5" />
+                            }
+                            {isStopping ? 'STOPPING...' : 'STOP'}
+                         </button>
+                     )}
                      
                      <button 
                         onClick={handleRun}
-                        disabled={isRunning}
+                        disabled={isRunning || isStopping}
                         className="flex items-center gap-1.5 px-3 py-1 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 border border-emerald-500/30 rounded-md text-xs font-bold transition-colors disabled:opacity-50"
                      >
                         {isRunning ? <ArrowPathIcon className="w-3.5 h-3.5 animate-spin" /> : <PlayIcon className="w-3.5 h-3.5" />}
-                        {isRunning ? 'BOOTING...' : 'RUN'}
+                        {isRunning ? 'BOOTING...' : (previewUrl ? 'RESTART' : 'RUN')}
                      </button>
                      
                      {onClose && (
@@ -126,28 +226,30 @@ export default function ProjectRunner({ projectId, onClose }: ProjectRunnerProps
             {/* --- VIEW AREA --- */}
             <div className="flex-1 relative overflow-hidden flex flex-col bg-[#0B0B10]">
                 
-                {/* 1. REAL LOG TERMINAL (Active during Boot & Success) */}
+                {/* 1. LOG TERMINAL */}
                 {(isRunning || previewUrl) && (
                     <div className="absolute inset-0 flex flex-col p-4 bg-ubiq-950 z-10">
-                         {/* Status Bar */}
                          <div className="flex items-center gap-2 mb-3 shrink-0">
                             {isRunning ? (
                                 <ArrowPathIcon className="w-4 h-4 animate-spin text-emerald-500" />
+                            ) : isPollingActive ? (
+                                <ArrowPathIcon className="w-4 h-4 animate-spin text-slate-400" />
                             ) : (
                                 <ShieldExclamationIcon className="w-4 h-4 text-amber-500" />
                             )}
                             <span className="text-xs font-bold uppercase tracking-wider text-slate-400">
-                                {isRunning ? "Compiling & Booting..." : "Live Server Logs"}
+                                {isRunning ? 'Compiling & Booting...' : 'Live Server Logs'}
                             </span>
+                            {!isRunning && !isPollingActive && (
+                                <span className="text-[10px] text-slate-600 ml-auto">● stable</span>
+                            )}
                          </div>
 
-                         {/* Log Output Window */}
                          <div className="flex-1 bg-black/60 border border-white/10 rounded-lg p-4 font-mono text-[10px] text-slate-300 overflow-y-auto custom-scrollbar whitespace-pre-wrap leading-relaxed shadow-inner">
-                             {realLogs || "Waiting for container output..."}
+                             {realLogs || 'Waiting for container output...'}
                              <div ref={bottomRef} className="animate-pulse text-emerald-400 mt-2">_</div>
                          </div>
 
-                         {/* Success Overlay for Mixed Content */}
                          {previewUrl && isMixedContent && !isRunning && (
                             <div className="mt-4 p-3 bg-amber-500/10 border border-amber-500/20 rounded-lg text-center shrink-0">
                                 <p className="text-amber-200 text-xs mb-2">Sandbox is running on HTTP. Browsers block unsafe embedding.</p>
@@ -177,7 +279,7 @@ export default function ProjectRunner({ projectId, onClose }: ProjectRunnerProps
                     </div>
                 )}
 
-                {/* 3. SUCCESS IFRAME (Only works if Sandbox is HTTPS or Host is Localhost) */}
+                {/* 3. SUCCESS IFRAME */}
                 {previewUrl && !isMixedContent && !isRunning && !error && (
                     <iframe 
                         src={previewUrl} 
@@ -192,6 +294,11 @@ export default function ProjectRunner({ projectId, onClose }: ProjectRunnerProps
                     <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-500 bg-ubiq-950">
                         <CommandLineIcon className="w-12 h-12 mb-4 opacity-20" />
                         <span className="text-sm font-medium">Ready to compile and boot sandbox.</span>
+                        {storageInfo && storagePercent !== null && storagePercent > 80 && (
+                            <p className="text-xs text-amber-400 mt-3 opacity-70">
+                                ⚠ Storage {storagePercent.toFixed(0)}% used — consider cleaning old projects.
+                            </p>
+                        )}
                     </div>
                 )}
             </div>

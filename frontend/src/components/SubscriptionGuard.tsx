@@ -9,6 +9,7 @@ export const SubscriptionGuard: React.FC<{ children: React.ReactNode }> = ({ chi
   const { user, setUser } = useAuthStore();
   const navigate = useNavigate();
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [refreshError, setRefreshError] = useState<string | null>(null);
 
   // ── Access logic ───────────────────────────────────────────────────────────
   // tier === 'pro' is the single source of truth — set by webhook listener.
@@ -28,14 +29,21 @@ export const SubscriptionGuard: React.FC<{ children: React.ReactNode }> = ({ chi
 
   const handleRefreshStatus = async () => {
     setIsRefreshing(true);
+    setRefreshError(null);
     try {
       const response = await api.get('/auth/me');
       setUser(response.data.user);
     } catch (error) {
       console.error("Failed to refresh status", error);
+      setRefreshError("Could not verify your subscription. Check your connection and try again.");
     } finally {
       setIsRefreshing(false);
     }
+  };
+
+  const handleLogout = () => {
+    localStorage.clear();
+    navigate('/login');
   };
 
   if (!canAccess) {
@@ -69,6 +77,10 @@ export const SubscriptionGuard: React.FC<{ children: React.ReactNode }> = ({ chi
               {isRefreshing ? 'Verifying status...' : 'Already subscribed? Refresh'}
             </button>
 
+            {refreshError && (
+              <p className="text-xs text-red-400 text-center max-w-[240px] leading-relaxed">{refreshError}</p>
+            )}
+
             <div className="flex flex-col gap-3 w-full">
               <button
                 onClick={() => navigate('/settings', { state: { activeTab: 'billing' } })}
@@ -81,6 +93,12 @@ export const SubscriptionGuard: React.FC<{ children: React.ReactNode }> = ({ chi
                 className="text-slate-500 hover:text-slate-300 text-xs font-medium transition"
               >
                 Back to Dashboard
+              </button>
+              <button
+                onClick={handleLogout}
+                className="text-slate-600 hover:text-red-400 text-xs font-medium transition"
+              >
+                Sign out
               </button>
             </div>
           </div>

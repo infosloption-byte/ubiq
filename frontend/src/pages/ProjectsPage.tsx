@@ -3,14 +3,16 @@ import { useNavigate } from 'react-router-dom';
 import Layout from '../components/Layout';
 import { projectAPI } from '../services/api';
 import CreateProjectDialog from '../components/CreateProjectDialog';
-import AiGeneratorModal from '../components/AiGeneratorModal'; // <--- IMPORT THIS
+import AiGeneratorModal from '../components/AiGeneratorModal';
+import ConfirmDialog from '../components/ConfirmDialog';
 import { 
   PlusIcon, 
   MagnifyingGlassIcon, 
   FolderIcon, 
   CodeBracketIcon, 
   ClockIcon,
-  SparklesIcon // <--- IMPORT THIS
+  SparklesIcon,
+  TrashIcon
 } from '@heroicons/react/24/outline';
 
 interface Project {
@@ -27,9 +29,10 @@ export default function ProjectsPage() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
   
-  // Modals
   const [showCreateModal, setShowCreateModal] = useState(false);
-  const [showAiModal, setShowAiModal] = useState(false); // <--- NEW STATE
+  const [showAiModal, setShowAiModal] = useState(false);
+  const [deleteModal, setDeleteModal] = useState<{ open: boolean; project: Project | null }>({ open: false, project: null });
+  const [isDeleting, setIsDeleting] = useState(false);
 
   const [search, setSearch] = useState('');
   const navigate = useNavigate();
@@ -47,6 +50,21 @@ export default function ProjectsPage() {
       console.error("Failed to load projects", error);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!deleteModal.project) return;
+    setIsDeleting(true);
+    try {
+      await projectAPI.delete(deleteModal.project.id);
+      setProjects(prev => prev.filter(p => p.id !== deleteModal.project!.id));
+    } catch (err) {
+      console.error('Failed to delete project:', err);
+      alert('Failed to delete project. Please try again.');
+    } finally {
+      setIsDeleting(false);
+      setDeleteModal({ open: false, project: null });
     }
   };
 
@@ -124,9 +142,18 @@ export default function ProjectsPage() {
                    }`}>
                       {project.source === 'github' ? <CodeBracketIcon className="w-6 h-6" /> : <FolderIcon className="w-6 h-6" />}
                    </div>
-                   <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 bg-white/5 px-2 py-1 rounded-md border border-white/5">
-                      {project.language || 'Text'}
-                   </span>
+                   <div className="flex items-center gap-2">
+                     <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 bg-white/5 px-2 py-1 rounded-md border border-white/5">
+                       {project.language || 'Text'}
+                     </span>
+                     <button
+                       onClick={e => { e.stopPropagation(); setDeleteModal({ open: true, project }); }}
+                       className="p-1.5 rounded-lg text-slate-600 hover:text-red-400 hover:bg-red-500/10 transition-all opacity-0 group-hover:opacity-100"
+                       title="Delete project"
+                     >
+                       <TrashIcon className="w-4 h-4" />
+                     </button>
+                   </div>
                 </div>
 
                 <h3 className="text-lg font-semibold text-white mb-2 group-hover:text-ubiq-accent transition-colors truncate">
@@ -169,6 +196,16 @@ export default function ProjectsPage() {
         <AiGeneratorModal 
           isOpen={showAiModal} 
           onClose={() => setShowAiModal(false)} 
+        />
+
+        <ConfirmDialog
+          isOpen={deleteModal.open}
+          onClose={() => setDeleteModal({ open: false, project: null })}
+          onConfirm={handleDelete}
+          title="Delete Project?"
+          message={`Are you sure you want to delete "${deleteModal.project?.name}"? This will permanently remove all files, chat history, and sandbox data. This cannot be undone.`}
+          confirmText={isDeleting ? 'Deleting...' : 'Delete Project'}
+          isDestructive
         />
         
       </div>

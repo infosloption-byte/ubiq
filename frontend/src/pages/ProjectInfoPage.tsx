@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
-import { projectAPI, fileAPI } from '../services/api';
+import { projectAPI, fileAPI, getAuthToken } from '../services/api';
 import axios from 'axios';
 import Layout from '../components/Layout';
 import ConfirmDialog from '../components/ConfirmDialog';
@@ -105,7 +105,7 @@ export default function ProjectInfoPage() {
   // --- ACTIONS ---
   const handleProjectDownload = async () => {
       try {
-          const token = localStorage.getItem('auth_token') || localStorage.getItem('token') || JSON.parse(localStorage.getItem('auth-storage') || '{}').state?.token;
+          const token = getAuthToken();
           
           if (!token) {
               alert("You must be logged in to download.");
@@ -175,7 +175,7 @@ export default function ProjectInfoPage() {
       setUploading(true);
       
       // FIX: Check 'auth_token' first
-      const token = localStorage.getItem('auth_token') || localStorage.getItem('token') || JSON.parse(localStorage.getItem('auth-storage') || '{}').state?.token;
+      const token = getAuthToken();
 
       for (let i = 0; i < uploadFiles.length; i++) {
           const file = uploadFiles[i];

@@ -6,11 +6,11 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
 use Laravel\Sanctum\HasApiTokens;
-use Laravel\Paddle\Billable; // 1. Import Paddle Billable Trait
+use Laravel\Paddle\Billable;
 
 class User extends Authenticatable
 {
-    use HasApiTokens, HasFactory, Notifiable, Billable; // 2. Add Billable here
+    use HasApiTokens, HasFactory, Notifiable, Billable;
 
     protected $fillable = [
         'username',
@@ -18,11 +18,10 @@ class User extends Authenticatable
         'password',
         'google_id',
         'avatar',
-        'storage_used',
         'api_key',
-        'paddle_id',            // ✅ ADDED — needed for listener Step 1
-        'subscription_status',  // ✅ ADDED — needed for listener Step 2
-        'subscription_tier',    // ✅ ADDED — needed for listener Step 2
+        'paddle_id',
+        'subscription_status',
+        'subscription_tier',
     ];
 
     protected $hidden = [
@@ -37,40 +36,74 @@ class User extends Authenticatable
 
     protected $casts = [
         'email_verified_at' => 'datetime',
-        'trial_ends_at' => 'datetime',
-        'created_at' => 'datetime',
-        'updated_at' => 'datetime',
-        'password' => 'hashed',
-        'is_admin' => 'boolean',
+        'trial_ends_at'     => 'datetime',
+        'created_at'        => 'datetime',
+        'updated_at'        => 'datetime',
+        'password'          => 'hashed',
+        'is_admin'          => 'boolean',
     ];
 
     // --- RELATIONSHIPS ---
 
     public function preferences() { return $this->hasOne(UserPreference::class); }
-    public function projects() { return $this->hasMany(Project::class); }
-    public function chatSessions() { return $this->hasMany(ChatSession::class); }
-    public function usageLogs() { return $this->hasMany(UsageLog::class); }
-    public function rateLimits() { return $this->hasMany(RateLimit::class); }
-    public function files() { return $this->hasMany(File::class); }
+    public function projects()    { return $this->hasMany(Project::class); }
+    public function chatSessions(){ return $this->hasMany(ChatSession::class); }
+    public function usageLogs()   { return $this->hasMany(UsageLog::class); }
+    public function rateLimits()  { return $this->hasMany(RateLimit::class); }
+
+    // Files belong to Projects, not directly to Users — use hasManyThrough
+    public function files()
+    {
+        return $this->hasManyThrough(File::class, Project::class);
+    }
 
     // --- STORAGE LOGIC ---
 
-    public function getTotalStorageLimitInBytes()
+    // Limits must match ProjectController constants:
+    // Free = 512 MB (536,870,912 bytes)
+    // Pro  = 5 GB  (5,368,709,120 bytes)
+    const STORAGE_LIMIT_FREE = 536870912;
+    const STORAGE_LIMIT_PRO  = 5368709120;
+
+    public function getTotalStorageLimitInBytes(): int
     {
-        $baseLimit = ($this->subscription_tier === 'pro') ? 20 : 5;
-        return $baseLimit * 1024 * 1024 * 1024;
+        return $this->subscription_tier === 'pro'
+            ? self::STORAGE_LIMIT_PRO
+            : self::STORAGE_LIMIT_FREE;
     }
 
     /**
-     * Accessor for Human Readable Storage
+     * Dynamically sum size_bytes from all non-deleted files across all projects.
+     * Never reads a stale `storage_used` column — always reflects reality.
      */
-    public function getStorageUsedHumanAttribute()
+    public function getUsedStorageBytes(): int
     {
-        return number_format($this->storage_used / (1024 * 1024 * 1024), 2) . ' GB';
+        return (int) \DB::table('files')
+            ->join('projects', 'files.project_id', '=', 'projects.id')
+            ->where('projects.user_id', $this->id)
+            ->where('files.is_deleted', false)
+            ->sum('files.size_bytes');
     }
 
-    // ✅ trial_days_left kept as an accessor — reads DB column, no Cashier dependency
-    public function getTrialDaysLeftAttribute()
+    /**
+     * Returns true when the user has used all of their allocated storage.
+     */
+    public function isOverStorageLimit(): bool
+    {
+        return $this->getUsedStorageBytes() >= $this->getTotalStorageLimitInBytes();
+    }
+
+    // --- ACCESSORS ---
+
+    public function getStorageUsedHumanAttribute(): string
+    {
+        $bytes = $this->getUsedStorageBytes();
+        if ($bytes < 1048576) return number_format($bytes / 1024, 1) . ' KB';
+        if ($bytes < 1073741824) return number_format($bytes / 1048576, 1) . ' MB';
+        return number_format($bytes / 1073741824, 2) . ' GB';
+    }
+
+    public function getTrialDaysLeftAttribute(): int
     {
         if ($this->subscription_status === 'trialing' && $this->trial_ends_at) {
             return max(0, now()->diffInDays($this->trial_ends_at, false));

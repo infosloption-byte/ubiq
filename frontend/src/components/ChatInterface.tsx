@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { useAuthStore } from '../stores/authStore';
 import { chatAPI, generateTitle } from '../services/api';
-import { aiService } from '../services/aiService';
+import { aiService, AiApiConfig } from '../services/aiService';
 import ModelSelector from './ModelSelector';
 import ReactMarkdown from 'react-markdown';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
@@ -60,9 +60,10 @@ export default function ChatInterface({
   
   const [selectedModel, setSelectedModel] = useState<string>('');
 
-  // [Modified] Settings State for Remote Ollama
+  // [Modified] Settings State for Remote Ollama — shared key with AiGeneratorModal
   const [showSettings, setShowSettings] = useState(false);
-  const [ollamaUrl, setOllamaUrl] = useState(localStorage.getItem('ubiq_ollama_url') || 'http://localhost:11434');
+  const [localUrl, setLocalUrl] = useState(localStorage.getItem('ubiq_local_url') || 'http://localhost:11434');
+  const [remoteUrl, setRemoteUrl] = useState(localStorage.getItem('ubiq_ollama_url') || '');
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -106,7 +107,8 @@ export default function ChatInterface({
 
   // [Modified] Save the custom URL
   const handleSaveSettings = () => {
-      localStorage.setItem('ubiq_ollama_url', ollamaUrl);
+      if (aiMode === 'remote') localStorage.setItem('ubiq_ollama_url', remoteUrl);
+      else localStorage.setItem('ubiq_local_url', localUrl);
       setShowSettings(false);
   };
 
@@ -199,12 +201,23 @@ export default function ChatInterface({
           contextMessages.unshift({ role: 'system', content: systemPrompt });
       }
 
-      // [Modified] Prepare Config for Remote Ollama
-      const apiConfig: any = {};
+      // [Modified] Prepare Config based on AI mode
+      const apiConfig: AiApiConfig = {};
       if (aiMode === 'local') {
-          // Retrieve latest URL from storage
-          const currentUrl = localStorage.getItem('ubiq_ollama_url') || 'http://localhost:11434';
-          apiConfig.api_keys = { ollama_url: currentUrl };
+          apiConfig.api_keys = { ollama_url: localStorage.getItem('ubiq_local_url') || 'http://localhost:11434' };
+      } else if (aiMode === 'remote') {
+          const remoteUrl = localStorage.getItem('ubiq_ollama_url') || '';
+          if (!remoteUrl.trim()) {
+              setMessages(prev => {
+                  const msgs = [...prev];
+                  const last = msgs[msgs.length - 1];
+                  if (last) last.content = "⚠️ Remote URL not configured. Open the settings panel (⚙) and enter your Ollama server URL.";
+                  return msgs;
+              });
+              setIsLoading(false);
+              return;
+          }
+          apiConfig.api_keys = { ollama_url: remoteUrl.trim() };
       }
 
       const response = await aiService.chat(
@@ -325,7 +338,7 @@ export default function ChatInterface({
                       </h1>
                       <p className="text-slate-500 text-sm md:text-base">
                           How can I help you build today?
-                          {aiMode === 'local' && <span className="block text-green-400 text-xs mt-2 font-mono">Running on Local/Remote Intelligence</span>}
+                          {(aiMode === 'local' || aiMode === 'remote') && <span className="block text-green-400 text-xs mt-2 font-mono">{aiMode === 'remote' ? 'Running on Remote Ollama' : 'Running on Local Ollama'}</span>}
                       </p>
                   </div>
 
@@ -402,16 +415,18 @@ export default function ChatInterface({
              </div>
           )}
 
-          {/* [Modified] Settings Popover for Remote Ollama */}
-          {showSettings && (
+          {/* Settings Popover — mode-aware label/value/placeholder */}
+          {showSettings && aiMode !== 'cloud' && (
               <div className="absolute -top-16 left-0 right-0 bg-ubiq-900/95 backdrop-blur-md border border-white/10 p-3 rounded-lg z-30 shadow-xl animate-fade-in-up flex items-center gap-2">
-                  <span className="text-[10px] uppercase font-bold text-slate-400 whitespace-nowrap">Ollama URL:</span>
+                  <span className="text-[10px] uppercase font-bold text-slate-400 whitespace-nowrap">
+                      {aiMode === 'remote' ? 'Remote URL:' : 'Local URL:'}
+                  </span>
                   <input 
                       type="text" 
-                      value={ollamaUrl} 
-                      onChange={(e) => setOllamaUrl(e.target.value)}
-                      placeholder="http://localhost:11434"
-                      className="flex-1 bg-black/50 border border-white/10 rounded px-2 py-1 text-xs text-white focus:border-ubiq-accent outline-none"
+                      value={aiMode === 'remote' ? remoteUrl : localUrl}
+                      onChange={(e) => aiMode === 'remote' ? setRemoteUrl(e.target.value) : setLocalUrl(e.target.value)}
+                      placeholder={aiMode === 'remote' ? 'http://54.123.x.x:11434' : 'http://localhost:11434'}
+                      className="flex-1 bg-black/50 border border-white/10 rounded px-2 py-1 text-xs text-white focus:border-ubiq-accent outline-none font-mono"
                   />
                   <button onClick={handleSaveSettings} className="bg-ubiq-accent px-3 py-1 text-xs text-white rounded hover:bg-indigo-500 font-bold">Save</button>
               </div>
@@ -464,8 +479,8 @@ export default function ChatInterface({
                             selectedModel={selectedModel} 
                             onSelectModel={setSelectedModel} 
                         />
-                        {/* Only show settings gear if in LOCAL mode */}
-                        {aiMode === 'local' && (
+                        {/* Show settings gear for local and remote modes */}
+                        {(aiMode === 'local' || aiMode === 'remote') && (
                             <button 
                                 onClick={() => setShowSettings(!showSettings)}
                                 className={`p-1.5 rounded-lg transition-colors ${showSettings ? 'text-white bg-white/10' : 'text-slate-500 hover:text-white hover:bg-white/5'}`}
@@ -496,9 +511,9 @@ export default function ChatInterface({
             </div>
           </div>
           <div className="text-center mt-2 text-[10px] text-slate-600 font-medium hidden md:block">
-            {aiMode === 'local' ? (
+            {(aiMode === 'local' || aiMode === 'remote') ? (
                 <span className="flex items-center justify-center gap-1">
-                    Running on <span className="text-emerald-400 font-mono">{ollamaUrl.includes('localhost') ? 'Localhost' : 'Remote EC2'}</span> (Ollama)
+                    Running on <span className="text-emerald-400 font-mono">{aiMode === 'remote' ? 'Remote Ollama' : 'Localhost'}</span>
                 </span>
             ) : 'AI can make mistakes. Check important info.'}
           </div>

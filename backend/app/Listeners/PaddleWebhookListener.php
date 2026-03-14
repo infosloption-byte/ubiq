@@ -42,6 +42,7 @@ class PaddleWebhookListener
             'subscription.updated',
             'subscription.activated',
             'subscription.canceled',
+            'subscription.expired',  // Fired when grace period ends after cancellation
             'subscription.past_due',
             'subscription.paused',
         ])) {
@@ -55,7 +56,7 @@ class PaddleWebhookListener
         // 'active'   = paying subscriber
         $newStatus = $rawStatus; // trialing, active, canceled, past_due, paused
 
-        // Tier: pro for any paying/trialing state, free only when fully canceled
+        // Tier: pro for any paying/trialing state, free when canceled or expired
         $newTier = in_array($newStatus, ['active', 'past_due', 'trialing'])
             ? 'pro'
             : 'free';

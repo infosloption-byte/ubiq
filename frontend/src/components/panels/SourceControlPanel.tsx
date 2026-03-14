@@ -3,7 +3,7 @@ import { gitAPI } from '../../services/api';
 import InputDialog from '../InputDialog';
 import { 
   GitPullRequest, RefreshCw, Loader2, CheckCircle, FileText, 
-  XMarkIcon, ExternalLinkIcon 
+  X, ExternalLink 
 } from 'lucide-react';
 
 interface SourceControlPanelProps {
@@ -215,7 +215,7 @@ export default function SourceControlPanel({ projectId }: SourceControlPanelProp
                             className="flex-1 px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold transition-colors flex items-center justify-center gap-2"
                             onClick={() => setPrSuccess(null)}
                         >
-                            View on GitHub <ExternalLinkIcon className="w-3 h-3" />
+                            View on GitHub <ExternalLink className="w-3 h-3" />
                         </a>
                     </div>
                 </div>

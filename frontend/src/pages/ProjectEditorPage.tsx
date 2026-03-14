@@ -16,7 +16,7 @@ import TerminalPanel from '../components/panels/TerminalPanel';
 import { 
   CodeBracketIcon, ChatBubbleLeftRightIcon, XMarkIcon, ArrowPathIcon, 
   CheckIcon, NoSymbolIcon, PlusIcon, FolderPlusIcon, MagnifyingGlassIcon,
-  CloudArrowUpIcon, EyeIcon, ServerStackIcon, CpuChipIcon,
+  CloudArrowUpIcon, EyeIcon, ServerStackIcon, CpuChipIcon, ServerIcon,
   FolderIcon, CommandLineIcon, PlayIcon, ArrowDownOnSquareIcon, Cog6ToothIcon
 } from '@heroicons/react/24/outline';
 
@@ -26,10 +26,12 @@ export default function ProjectEditorPage() {
 
   // --- STATE for Settings Modal ---
   const [showSettings, setShowSettings] = useState(false);
-  const [ollamaUrl, setOllamaUrl] = useState(localStorage.getItem('ubiq_ollama_url') || 'http://localhost:11434');
+  const [localUrl, setLocalUrl] = useState(localStorage.getItem('ubiq_local_url') || 'http://localhost:11434');
+  const [remoteUrl, setRemoteUrl] = useState(localStorage.getItem('ubiq_ollama_url') || '');
 
   const handleSaveSettings = () => {
-      localStorage.setItem('ubiq_ollama_url', ollamaUrl);
+      if (aiMode === 'remote') localStorage.setItem('ubiq_ollama_url', remoteUrl);
+      else localStorage.setItem('ubiq_local_url', localUrl);
       setShowSettings(false);
       alert("Connection URL updated!");
   };
@@ -43,6 +45,7 @@ export default function ProjectEditorPage() {
   // Control what shows in the right panel
   const [rightPanelContent, setRightPanelContent] = useState<'chat' | 'runner' | null>('chat');
   const [chatWidth, setChatWidth] = useState(400);
+  const [isSandboxRunning, setIsSandboxRunning] = useState(false);
 
   // --- Data State ---
   const [project, setProject] = useState<any>(null);
@@ -248,7 +251,8 @@ export default function ProjectEditorPage() {
   const handleAiModeChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const mode = e.target.value;
     setAiMode(mode);
-    localStorage.setItem('ai_mode', mode); 
+    localStorage.setItem('ai_mode', mode);
+    if (mode === 'cloud') setShowSettings(false);
   };
 
   const openCreateModal = (type: 'file' | 'folder', parentPath: string = '') => {
@@ -283,7 +287,7 @@ export default function ProjectEditorPage() {
                   const authStorage = localStorage.getItem('auth-storage');
                   if (authStorage) token = JSON.parse(authStorage).state?.token;
               }
-              // Fixed: Ensure axios is imported or use api helper
+
               await fileAPI.delete(node.fileId || 0); // Note: Folder delete logic might need adjustment if using ID
           } else if (node.fileId) {
               await fileAPI.delete(node.fileId);
@@ -306,25 +310,17 @@ export default function ProjectEditorPage() {
       setIsUploading(true);
       setUploadProgress(0);
 
-      const token = localStorage.getItem('token') || JSON.parse(localStorage.getItem('auth-storage') || '{}').state?.token;
-      
       for (let i = 0; i < files.length; i++) {
           const file = files[i];
           const formData = new FormData();
           formData.append('file', file);
 
           try {
-              await axios.post(`${import.meta.env.VITE_API_URL}/projects/${projectId}/files/upload`, formData, {
-                  headers: { 
-                      'Authorization': `Bearer ${token}`,
-                      'Content-Type': 'multipart/form-data'
-                  },
-                  onUploadProgress: (progressEvent) => {
-                      if (progressEvent.total) {
-                          const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
-                          const totalProgress = ((i * 100) + percentCompleted) / files.length;
-                          setUploadProgress(totalProgress);
-                      }
+              await fileAPI.upload(projectId, formData, (progressEvent) => {
+                  if (progressEvent.total) {
+                      const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+                      const totalProgress = ((i * 100) + percentCompleted) / files.length;
+                      setUploadProgress(totalProgress);
                   }
               });
           } catch (err) { console.error(`Failed to upload ${file.name}`, err); }
@@ -500,8 +496,12 @@ export default function ProjectEditorPage() {
                         
                         const storedKeys = localStorage.getItem('ubiq_api_keys');
                         const apiKeys = storedKeys ? JSON.parse(storedKeys) : {};
-                        const currentOllamaUrl = localStorage.getItem('ubiq_ollama_url');
-                        if (currentOllamaUrl) apiKeys['ollama_url'] = currentOllamaUrl;
+                        if (aiMode === 'local') {
+                            apiKeys['ollama_url'] = localStorage.getItem('ubiq_local_url') || 'http://localhost:11434';
+                        } else if (aiMode === 'remote') {
+                            const savedRemote = localStorage.getItem('ubiq_ollama_url') || '';
+                            if (savedRemote) apiKeys['ollama_url'] = savedRemote;
+                        }
 
                         try {
                             const res = await aiAPI.completion({ 
@@ -532,7 +532,39 @@ export default function ProjectEditorPage() {
   }, [isResizingSidebar, isResizingChat]);
   useEffect(() => { window.addEventListener("mousemove", resize); window.addEventListener("mouseup", stopResizing); return () => { window.removeEventListener("mousemove", resize); window.removeEventListener("mouseup", stopResizing); }; }, [resize, stopResizing]);
 
-  if (loading) return <Layout><div className="flex h-full items-center justify-center text-slate-500">Loading Workspace...</div></Layout>;
+  if (loading) return (
+    <Layout>
+      <div className="flex h-full bg-ubiq-950 overflow-hidden animate-pulse">
+        {/* Activity bar */}
+        <div className="w-12 bg-ubiq-950 border-r border-white/5 flex flex-col items-center py-4 gap-4 shrink-0">
+          {[...Array(3)].map((_, i) => <div key={i} className="w-6 h-6 rounded bg-ubiq-800" />)}
+        </div>
+        {/* File tree sidebar */}
+        <div className="w-56 bg-ubiq-900 border-r border-white/5 flex flex-col gap-2 p-3 shrink-0">
+          <div className="h-3 w-20 rounded bg-ubiq-800 mb-2" />
+          {[80, 65, 90, 55, 75].map((w, i) => (
+            <div key={i} className="flex items-center gap-2">
+              <div className="w-3 h-3 rounded bg-ubiq-800 shrink-0" />
+              <div className={`h-2.5 rounded bg-ubiq-800`} style={{ width: `${w}%` }} />
+            </div>
+          ))}
+        </div>
+        {/* Editor area */}
+        <div className="flex-1 flex flex-col overflow-hidden">
+          {/* Tab bar */}
+          <div className="h-9 border-b border-white/5 bg-ubiq-950 flex items-center gap-1 px-2">
+            {[100, 80].map((w, i) => <div key={i} className="h-5 rounded bg-ubiq-800" style={{ width: `${w}px` }} />)}
+          </div>
+          {/* Code lines */}
+          <div className="flex-1 p-6 flex flex-col gap-3">
+            {[60, 85, 40, 70, 90, 50, 75, 30, 65, 80, 45, 70].map((w, i) => (
+              <div key={i} className="h-2.5 rounded bg-ubiq-800/60" style={{ width: `${w}%`, marginLeft: i % 3 !== 0 ? '24px' : '0' }} />
+            ))}
+          </div>
+        </div>
+      </div>
+    </Layout>
+  );
 
   return (
     <Layout>
@@ -610,8 +642,6 @@ export default function ProjectEditorPage() {
                <div className="flex flex-col h-full w-full">
                    <SourceControlPanel 
                         projectId={projectId} 
-                        // Refresh File Tree after Pull
-                        onRefresh={() => loadProjectData(projectId)} 
                    />
                </div>
            )}
@@ -749,7 +779,7 @@ export default function ProjectEditorPage() {
             {/* BOTTOM HALF: Terminal Panel (Conditional) */}
             {showTerminal && (
                 <div className="h-[40%] shrink-0 border-t border-white/10 animate-slide-up bg-[#0c0c0c]">
-                    <TerminalPanel projectId={projectId} />
+                    <TerminalPanel projectId={projectId} isContainerRunning={isSandboxRunning} />
                 </div>
             )}
         </div>
@@ -765,45 +795,67 @@ export default function ProjectEditorPage() {
                       <div className="h-12 flex items-center justify-between px-4 border-b border-white/5 bg-ubiq-900/50 shrink-0">
                          <div className="flex items-center gap-2"><span className="text-sm font-medium text-slate-200">AI Assistant</span></div>
                          <div className="flex items-center gap-2">
-                            <div className="relative flex items-center bg-black/30 rounded-lg p-0.5 border border-white/5">
-                                <select value={aiMode} onChange={handleAiModeChange} className="bg-transparent text-xs text-slate-400 rounded px-2 py-1 focus:outline-none appearance-none cursor-pointer hover:text-white">
-                                    <option value="cloud">Cloud (GPT-4)</option>
-                                    <option value="local">Remote / Local (Ollama)</option>
-                                </select>
-                                
-                                {/* SETTINGS BUTTON */}
-                                {aiMode === 'local' && (
-                                    <button 
-                                        onClick={() => setShowSettings(!showSettings)}
-                                        className={`p-1 mx-1 rounded transition-colors ${showSettings ? 'text-white bg-white/10' : 'text-slate-500 hover:text-white hover:bg-white/5'}`}
-                                        title="Configure Connection"
-                                    >
-                                        <Cog6ToothIcon className="w-3.5 h-3.5" />
-                                    </button>
-                                )}
+                            {/* 3-WAY PILL TOGGLE */}
+                            <div className="flex bg-black/40 rounded-lg p-0.5 border border-white/5">
+                                <button
+                                    onClick={() => handleAiModeChange({ target: { value: 'cloud' } } as any)}
+                                    className={`px-2.5 py-1 rounded-md text-[10px] font-medium flex items-center gap-1 transition-all ${aiMode === 'cloud' ? 'bg-indigo-600 text-white shadow' : 'text-slate-500 hover:text-slate-300'}`}
+                                    title="Cloud providers (BYOK)"
+                                >
+                                    <ServerStackIcon className="w-3 h-3" /> Cloud
+                                </button>
+                                <button
+                                    onClick={() => handleAiModeChange({ target: { value: 'local' } } as any)}
+                                    className={`px-2.5 py-1 rounded-md text-[10px] font-medium flex items-center gap-1 transition-all ${aiMode === 'local' ? 'bg-emerald-600 text-white shadow' : 'text-slate-500 hover:text-slate-300'}`}
+                                    title="Local Ollama on this machine"
+                                >
+                                    <CpuChipIcon className="w-3 h-3" /> Local
+                                </button>
+                                <button
+                                    onClick={() => handleAiModeChange({ target: { value: 'remote' } } as any)}
+                                    className={`px-2.5 py-1 rounded-md text-[10px] font-medium flex items-center gap-1 transition-all ${aiMode === 'remote' ? 'bg-amber-600 text-white shadow' : 'text-slate-500 hover:text-slate-300'}`}
+                                    title="Remote Ollama server"
+                                >
+                                    <ServerIcon className="w-3 h-3" /> Remote
+                                </button>
                             </div>
-                            <div className="text-xs">
-                                {aiMode === 'cloud' ? <ServerStackIcon className="w-3 h-3 text-indigo-400" /> : <CpuChipIcon className="w-3 h-3 text-green-400" />}
-                            </div>
-                            <button onClick={() => setRightPanelContent(null)} className="text-slate-500 hover:text-white ml-2"><XMarkIcon className="w-4 h-4" /></button>
+
+                            {/* SETTINGS GEAR — only for local/remote */}
+                            {(aiMode === 'local' || aiMode === 'remote') && (
+                                <button 
+                                    onClick={() => setShowSettings(!showSettings)}
+                                    className={`p-1.5 rounded-lg transition-colors ${showSettings ? 'text-white bg-white/10' : 'text-slate-500 hover:text-white hover:bg-white/5'}`}
+                                    title="Configure Connection"
+                                >
+                                    <Cog6ToothIcon className="w-3.5 h-3.5" />
+                                </button>
+                            )}
+
+                            <button onClick={() => setRightPanelContent(null)} className="text-slate-500 hover:text-white"><XMarkIcon className="w-4 h-4" /></button>
                          </div>
                       </div>
 
-                      {/* SETTINGS MODAL */}
-                      {showSettings && (
+                      {/* SETTINGS PANEL — mode-aware label/value/placeholder */}
+                      {showSettings && aiMode !== 'cloud' && (
                           <div className="absolute top-12 left-0 right-0 bg-ubiq-900 border-b border-white/10 p-4 z-50 shadow-xl animate-slide-down">
-                              <label className="block text-[10px] uppercase font-bold text-slate-500 mb-2">Ollama API URL</label>
+                              <label className="block text-[10px] uppercase font-bold text-slate-500 mb-2">
+                                  {aiMode === 'remote' ? 'Remote Server URL' : 'Local Ollama URL'}
+                              </label>
                               <div className="flex gap-2">
                                   <input 
                                       type="text" 
-                                      value={ollamaUrl} 
-                                      onChange={(e) => setOllamaUrl(e.target.value)}
-                                      placeholder="http://34.221.x.x:11434"
-                                      className="flex-1 bg-black/50 border border-white/10 rounded px-2 py-1.5 text-xs text-white focus:border-ubiq-accent outline-none"
+                                      value={aiMode === 'remote' ? remoteUrl : localUrl}
+                                      onChange={(e) => aiMode === 'remote' ? setRemoteUrl(e.target.value) : setLocalUrl(e.target.value)}
+                                      placeholder={aiMode === 'remote' ? 'http://54.123.x.x:11434' : 'http://localhost:11434'}
+                                      className="flex-1 bg-black/50 border border-white/10 rounded px-2 py-1.5 text-xs text-white focus:border-ubiq-accent outline-none font-mono"
                                   />
                                   <button onClick={handleSaveSettings} className="bg-ubiq-accent px-3 py-1 text-xs text-white rounded hover:bg-indigo-500">Save</button>
                               </div>
-                              <p className="text-[10px] text-slate-500 mt-2">Use AWS EC2 Public IP or 'http://host.docker.internal:11434' for local.</p>
+                              <p className="text-[10px] text-slate-500 mt-2">
+                                  {aiMode === 'remote' 
+                                      ? 'Your EC2 / Azure Ollama server public URL.' 
+                                      : 'Local Ollama endpoint. Default: http://localhost:11434'}
+                              </p>
                           </div>
                       )}
 
@@ -825,7 +877,8 @@ export default function ProjectEditorPage() {
                       {/* New Runner Header (Optional: ProjectRunner already has a header, but we need a close button) */}
                       <ProjectRunner 
                            projectId={projectId} 
-                           onClose={() => setRightPanelContent(null)} 
+                           onClose={() => setRightPanelContent(null)}
+                           onContainerStateChange={setIsSandboxRunning}
                       />
                   </>
               )}

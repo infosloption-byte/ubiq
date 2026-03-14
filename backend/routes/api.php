@@ -13,114 +13,132 @@ use App\Http\Controllers\API\V1\AiController;
 use App\Http\Controllers\API\V1\AdminController;
 use App\Http\Controllers\API\V1\GitController;
 use App\Http\Controllers\API\V1\TerminalController;
+use App\Http\Controllers\OllamaProxyController;
 
-// Public JSON login route
+// ── Unauthenticated fallback ───────────────────────────────────────────────
 Route::get('/login', function () {
     return response()->json([
-        'error' => 'Unauthorized', 
-        'message' => 'Authentication required. Please log in.'
+        'error'   => 'Unauthorized',
+        'message' => 'Authentication required. Please log in.',
     ], 401);
 })->name('login');
 
 Route::prefix('v1')->group(function () {
-    // Public routes
+
+    // ── Fully public ──────────────────────────────────────────────────────
+
     Route::post('/visit', [UsageController::class, 'recordVisit']);
-    Route::post('/auth/register', [AuthController::class, 'register']);
-    Route::post('/auth/login', [AuthController::class, 'login']);
-    Route::get('/auth/google', [AuthController::class, 'redirectToGoogle']);
+
+    // Auth: strict rate limits — 10 attempts per minute per IP
+    Route::middleware('throttle:10,1')->group(function () {
+        Route::post('/auth/register', [AuthController::class, 'register']);
+        Route::post('/auth/login',    [AuthController::class, 'login']);
+    });
+
+    Route::get('/auth/google',          [AuthController::class, 'redirectToGoogle']);
     Route::get('/auth/google/callback', [AuthController::class, 'handleGoogleCallback']);
 
-    // Paddle Webhook (REQUIRED: Must be public for Paddle to communicate with your server)
-    // Laravel Cashier automatically handles most of this logic at this endpoint
+    // Paddle Webhook — must be public, Paddle signs the payload
     Route::post('/paddle/webhook', '\Laravel\Paddle\Http\Controllers\WebhookController');
 
-    // Project Preview
-    Route::get('projects/{project}/preview/{token}/{path}', [FileController::class, 'preview'])
-        ->where('path', '.*');
-    
-    // Protected Routes
-    Route::middleware('auth:sanctum')->group(function () {
-        
-        // Subscription Management
-        // These allow the user to manage their plan even if their current one is expired
-        Route::get('/user/subscription/pay-link', [AuthController::class, 'getPayLink']); // Get Paddle Checkout URL
-        Route::get('/user/subscription/portal', [AuthController::class, 'getManagementPortal']); // Cancel/Update via Paddle
+    // File Preview — authenticated issues a signed URL, public route validates the signature
+    Route::get('/projects/{project}/preview-url/{path}', [FileController::class, 'getPreviewUrl'])
+        ->where('path', '.*')
+        ->middleware('auth:sanctum');
 
-        // Admin Routes
+    Route::get('/projects/{project}/preview/{path}', [FileController::class, 'previewSigned'])
+        ->where('path', '.*')
+        ->name('projects.preview.signed');
+
+    // ── Authenticated ─────────────────────────────────────────────────────
+    Route::middleware(['auth:sanctum', 'throttle:120,1'])->group(function () {
+
+        // Ollama proxy — rate limited separately (can be slow / expensive)
+        Route::middleware('throttle:30,1')->group(function () {
+            Route::get('/ollama/tags',  [OllamaProxyController::class, 'tags']);
+            Route::post('/ollama/chat', [OllamaProxyController::class, 'chat']);
+        });
+
+        // Subscription management — allowed even with expired sub
+        Route::get('/user/subscription/pay-link', [AuthController::class, 'getPayLink']);
+        Route::get('/user/subscription/portal',   [AuthController::class, 'getManagementPortal']);
+
+        // Admin
         Route::middleware('admin')->prefix('admin')->group(function () {
-            Route::get('/stats', [AdminController::class, 'stats']);
-            Route::get('/users', [AdminController::class, 'getUsers']);
-            Route::delete('/users/{id}', [AdminController::class, 'deleteUser']);
+            Route::get('/stats',          [AdminController::class, 'stats']);
+            Route::get('/users',          [AdminController::class, 'getUsers']);
+            Route::delete('/users/{id}',  [AdminController::class, 'deleteUser']);
         });
 
         Route::post('/auth/logout', [AuthController::class, 'logout']);
-        Route::get('/auth/user', [AuthController::class, 'user']);
-        Route::get('/auth/me', [AuthController::class, 'me']);
-        
-        // Platform Access (Restricted by Subscription/Trial)
+        Route::get('/auth/user',    [AuthController::class, 'user']);
+        Route::get('/auth/me',      [AuthController::class, 'me']);
+
+        // ── Subscribed users only ─────────────────────────────────────────
         Route::middleware('subscribed')->group(function () {
-            
-            // Projects & Files
+
+            // Projects & Files — standard API rate (120/min from parent)
             Route::apiResource('projects', ProjectController::class);
             Route::post('/projects/{project}/archive', [ProjectController::class, 'archive']);
             Route::post('/projects/{project}/restore', [ProjectController::class, 'restore']);
             Route::apiResource('projects.files', FileController::class)->shallow();
-            Route::delete('projects/{project}/files/path', [FileController::class, 'destroyPath']);
-            Route::post('projects/import', [ProjectController::class, 'import']);
-            Route::post('projects/{project}/files/upload', [FileController::class, 'upload']);
-            Route::get('projects/{project}/download', [ProjectController::class, 'download']);
+            Route::delete('projects/{project}/files/path',   [FileController::class, 'destroyPath']);
+            Route::post('projects/import',                   [ProjectController::class, 'import']);
+            Route::post('projects/{project}/files/upload',   [FileController::class, 'upload']);
+            Route::get('projects/{project}/download',        [ProjectController::class, 'download']);
             Route::get('projects/{project}/files/{file}/serve', [FileController::class, 'serve']);
-            Route::post('projects/{project}/run', [ProjectController::class, 'runProject']);
-            Route::post('projects/{project}/terminal', [App\Http\Controllers\API\V1\TerminalController::class, 'execute']);
-            Route::get('projects/{project}/build-log', [ProjectController::class, 'getBuildLog']);
+            Route::get('projects/{project}/build-log',       [ProjectController::class, 'getBuildLog']);
 
-            // AI Features
-            Route::post('ai/generate', [CompletionController::class, 'generate']);
-            Route::post('projects/{project}/scaffold', [ProjectController::class, 'scaffold']);
-            Route::post('projects/{project}/seed-chat', [ProjectController::class, 'seedChat']);
-            Route::post('chat/message', [CompletionController::class, 'chat']);
-            Route::post('/ai/completion', [CompletionController::class, 'complete']);
-            Route::post('/ai/chat', [CompletionController::class, 'chat']);
-            Route::post('/ai/review', [CompletionController::class, 'review']);
-            Route::post('/ai/debug', [CompletionController::class, 'debug']);
-            Route::post('/ai/explain', [CompletionController::class, 'explain']);
-            Route::get('/ai/models', [AiController::class, 'getModels']);
+            // Storage stats
+            Route::get('/user/storage', [ProjectController::class, 'storageStats']);
 
-            // Git integration
+            // Sandbox — tighter limit: 20 run/stop per minute prevents abuse
+            Route::middleware('throttle:20,1')->group(function () {
+                Route::post('projects/{project}/run',  [ProjectController::class, 'runProject']);
+                Route::post('projects/{project}/stop', [ProjectController::class, 'stopProject']);
+            });
+
+            // Terminal — 60 commands per minute (allows rapid use without hammering)
+            Route::middleware('throttle:60,1')->group(function () {
+                Route::post('projects/{project}/terminal', [TerminalController::class, 'execute']);
+            });
+
+            // AI — 30 requests per minute (protects API cost)
+            Route::middleware('throttle:30,1')->group(function () {
+                Route::post('ai/generate',             [CompletionController::class, 'generate']);
+                Route::post('projects/{project}/scaffold', [ProjectController::class, 'scaffold']);
+                Route::post('projects/{project}/seed-chat', [ProjectController::class, 'seedChat']);
+                Route::post('chat/message',            [CompletionController::class, 'chat']);
+                Route::post('/ai/completion',          [CompletionController::class, 'complete']);
+                Route::post('/ai/chat',                [CompletionController::class, 'chat']);
+                Route::post('/ai/review',              [CompletionController::class, 'review']);
+                Route::post('/ai/debug',               [CompletionController::class, 'debug']);
+                Route::post('/ai/explain',             [CompletionController::class, 'explain']);
+                Route::get('/ai/models',               [AiController::class, 'getModels']);
+            });
+
+            // Git
             Route::prefix('projects/{project}/git')->group(function () {
-                Route::get('/status', [GitController::class, 'status']);
+                Route::get('/status',    [GitController::class, 'status']);
                 Route::post('/create-pr', [GitController::class, 'createPr']);
             });
 
-            // Project Git 
-            // Route::prefix('projects/{project}/git')->group(function () {
-            //     Route::get('/status', [GitController::class, 'status']);
-            //     // Route::post('/add', [GitController::class, 'add']);
-            //     // Route::post('/commit', [GitController::class, 'commit']);
-            //     // Route::post('/reset', [GitController::class, 'reset']);
-            //     // Route::post('/pull', [GitController::class, 'pull']);
-            //     // Route::post('/push', [GitController::class, 'push']);
-
-            //     Route::post('projects/{project}/git/create-pr', [GitController::class, 'createPr']);
-            //     Route::get('projects/{project}/git/status', [GitController::class, 'status']);
-            // });
-            
             // Chat Sessions & Messages
-            Route::get('/chat/sessions', [ChatController::class, 'index']);
-            Route::post('/chat/sessions', [ChatController::class, 'store']);
-            Route::get('/chat/sessions/{session}', [ChatController::class, 'show']);
-            Route::delete('/chat/sessions/{session}', [ChatController::class, 'destroy']);
-            Route::post('/chat/sessions/{session}/title', [ChatController::class, 'generateTitle']);
-            Route::patch('/chat/sessions/{session}', [ChatController::class, 'update']);
-            Route::post('/chat/sessions/{session}/upload', [ChatController::class, 'uploadAttachment']);
-            Route::get('/chat/sessions/{session}/messages', [ChatController::class, 'messages']);
-            Route::post('/chat/sessions/{session}/messages', [ChatController::class, 'sendMessage']);
-            
+            Route::get('/chat/sessions',                       [ChatController::class, 'index']);
+            Route::post('/chat/sessions',                      [ChatController::class, 'store']);
+            Route::get('/chat/sessions/{session}',             [ChatController::class, 'show']);
+            Route::delete('/chat/sessions/{session}',          [ChatController::class, 'destroy']);
+            Route::post('/chat/sessions/{session}/title',      [ChatController::class, 'generateTitle']);
+            Route::patch('/chat/sessions/{session}',           [ChatController::class, 'update']);
+            Route::post('/chat/sessions/{session}/upload',     [ChatController::class, 'uploadAttachment']);
+            Route::get('/chat/sessions/{session}/messages',    [ChatController::class, 'messages']);
+            Route::post('/chat/sessions/{session}/messages',   [ChatController::class, 'sendMessage']);
+
             // User Preferences & Stats
-            Route::get('/user/preferences', [AuthController::class, 'getPreferences']);
-            Route::put('/user/preferences', [AuthController::class, 'updatePreferences']);
-            Route::get('/user/stats', [UsageController::class, 'stats']);
-            Route::get('/user/usage', [UsageController::class, 'index']);
+            Route::get('/user/preferences',  [AuthController::class, 'getPreferences']);
+            Route::put('/user/preferences',  [AuthController::class, 'updatePreferences']);
+            Route::get('/user/stats',        [UsageController::class, 'stats']);
+            Route::get('/user/usage',        [UsageController::class, 'index']);
         });
     });
 });

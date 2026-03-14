@@ -29,6 +29,7 @@ export default function ModelSelector({ aiMode, selectedModel, onSelectModel, me
   const [models, setModels] = useState<Model[]>([]);
   const [isOpen, setIsOpen] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [ollamaError, setOllamaError] = useState<string | null>(null);
   const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
   const dropdownRef = useRef<HTMLDivElement>(null);
 
@@ -59,12 +60,32 @@ export default function ModelSelector({ aiMode, selectedModel, onSelectModel, me
   const loadModels = async () => {
     setLoading(true);
     setModels([]);
+    setOllamaError(null);
 
     try {
-        if (aiMode === 'local') {
-            // --- 1. LOCAL OLLAMA FETCH ---
+        if (aiMode === 'local' || aiMode === 'remote') {
+            // --- OLLAMA FETCH (local or remote) ---
+            // Always proxied through Laravel to avoid Mixed-Content HTTPS→HTTP block.
+            const ollamaBase = aiMode === 'remote'
+                ? (localStorage.getItem('ubiq_ollama_url') || '').trim()
+                : (localStorage.getItem('ubiq_local_url') || 'http://localhost:11434').trim();
+
+            if (aiMode === 'remote' && !ollamaBase) {
+                setOllamaError('Remote Ollama URL not configured. Click the ⚙ gear icon to set it.');
+                setLoading(false);
+                return;
+            }
+
             try {
-                const response = await axios.get('http://localhost:11434/api/tags');
+                const apiUrl = import.meta.env.VITE_API_URL;
+                const authRaw = localStorage.getItem('auth-storage');
+                const token = authRaw ? (JSON.parse(authRaw)?.state?.token || '') : 
+                              (localStorage.getItem('auth_token') || localStorage.getItem('token') || '');
+                const response = await axios.get(`${apiUrl}/ollama/tags`, {
+                    params: { url: ollamaBase },
+                    headers: token ? { Authorization: `Bearer ${token}` } : {}
+                });
+
                 if (response.data && Array.isArray(response.data.models)) {
                     const ollamaModels: Model[] = response.data.models.map((m: any) => ({
                         name: m.name,
@@ -73,17 +94,23 @@ export default function ModelSelector({ aiMode, selectedModel, onSelectModel, me
                         parameter_size: m.details?.parameter_size || 'Unknown'
                     }));
                     setModels(ollamaModels);
-                    
+
                     if (ollamaModels.length > 0 && (!selectedModel || !ollamaModels.find(m => m.name === selectedModel))) {
                         onSelectModel(ollamaModels[0].name);
                     }
                 }
-            } catch (err) {
-                console.error("Failed to connect to Local Ollama:", err);
-                setModels([]); 
+            } catch (err: any) {
+                const serverMsg = err?.response?.data?.error;
+                const msg = serverMsg || (err instanceof Error ? err.message : String(err));
+                console.error(`Failed to connect to ${aiMode} Ollama:`, msg);
+                const hint = aiMode === 'remote'
+                    ? `Cannot reach remote Ollama at ${ollamaBase}. Check the server is running and the port is open.`
+                    : 'Cannot reach Ollama at localhost:11434. Make sure Ollama is running.';
+                setOllamaError(hint);
+                setModels([]);
             }
         } else {
-            // --- 2. CLOUD BACKEND FETCH ---
+            // --- CLOUD BACKEND FETCH ---
             const response = await aiAPI.getModels();
             if (response.data && Array.isArray(response.data.models)) {
                 const cloudModels = response.data.models;
@@ -250,10 +277,24 @@ export default function ModelSelector({ aiMode, selectedModel, onSelectModel, me
             {models.length === 0 ? (
               <div className="px-4 py-8 text-sm text-slate-500 text-center flex flex-col items-center gap-2">
                   {aiMode === 'local' ? (
-                      <>
-                        <p className="text-red-400">Ollama not detected</p>
-                        <p className="text-[10px]">Run: <code className="bg-black/30 px-1 rounded">ollama serve</code></p>
-                      </>
+                      ollamaError ? (
+                          <>
+                              <div className="w-8 h-8 rounded-full bg-red-500/10 flex items-center justify-center mb-1">
+                                  <ServerIcon className="w-4 h-4 text-red-400" />
+                              </div>
+                              <p className="text-red-400 font-medium text-xs">Ollama Not Reachable</p>
+                              <p className="text-[10px] text-slate-500 max-w-[200px] leading-relaxed">{ollamaError}</p>
+                              <code className="mt-1 bg-black/40 border border-white/10 px-2 py-1 rounded text-[10px] text-emerald-400">ollama serve</code>
+                              <button onClick={loadModels} className="mt-2 flex items-center gap-1 text-[10px] text-indigo-400 hover:text-indigo-300 transition-colors">
+                                  <ArrowPathIcon className="w-3 h-3" /> Retry
+                              </button>
+                          </>
+                      ) : (
+                          <>
+                              <p className="text-slate-400">No local models found</p>
+                              <p className="text-[10px]">Pull a model first: <code className="bg-black/30 px-1 rounded">ollama pull llama3</code></p>
+                          </>
+                      )
                   ) : (
                       <><ArrowPathIcon className="w-5 h-5 animate-spin"/> Loading available models...</>
                   )}
