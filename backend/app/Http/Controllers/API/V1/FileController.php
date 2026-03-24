@@ -16,38 +16,64 @@ class FileController extends Controller
      * SECURITY: Resolve a user-supplied relative path to an absolute path
      * and verify it stays within the project's workspace directory.
      * Prevents path traversal attacks (e.g. ../../etc/passwd).
+     *
+     * FIX: The previous version used realpath() as the primary resolution strategy.
+     * realpath() only works on paths that already exist on disk — it returns false for
+     * non-existent files AND non-existent parent directories.
+     *
+     * The old fallback was:
+     *   $resolvedDir = realpath(dirname($candidate));   // returns false if dir missing
+     *   $resolved    = $resolvedDir . '/' . basename(); // false . '/' . 'file' = '/file'
+     *
+     * That made the path traversal check fail for any new folder whose parent didn't
+     * exist yet — i.e. every single folder creation and every subfolder file upload.
+     *
+     * The fix: manually normalize the relative path by processing each segment,
+     * collapsing any '..' and '.' entries, WITHOUT requiring anything to exist on disk.
+     * Then concatenate with the real base path (which always exists after mkdir).
+     * The final str_starts_with() guard still prevents any traversal attempt.
      */
     private function safePath(Project $project, string $relativePath): string
     {
-        // Strip leading slashes / dots before joining
         $relativePath = ltrim($relativePath, '/');
 
         $base = storage_path("app/workspaces/{$project->user_id}/{$project->id}");
 
-        // Ensure the base directory exists so realpath() works
         if (!is_dir($base)) {
             FileSystem::makeDirectory($base, 0755, true);
         }
 
-        // Build the candidate path WITHOUT resolving symlinks yet
-        $candidate = $base . DIRECTORY_SEPARATOR . $relativePath;
+        $realBase = realpath($base);
 
-        // Resolve to a real absolute path (resolves ../ segments and symlinks)
-        $resolved = realpath($candidate);
+        // Manually normalize the relative path — resolves '..' and '.' without
+        // requiring the path to exist on disk. This is the correct approach for a
+        // path safety function that must work with paths that don't exist yet.
+        $parts      = explode('/', str_replace('\\', '/', $relativePath));
+        $normalized = [];
 
-        // If realpath() fails (file doesn't exist yet), resolve the parent dir instead
-        if ($resolved === false) {
-            $resolvedDir = realpath(dirname($candidate));
-            $resolved    = $resolvedDir . DIRECTORY_SEPARATOR . basename($candidate);
+        foreach ($parts as $part) {
+            if ($part === '' || $part === '.') {
+                continue;
+            }
+            if ($part === '..') {
+                // Pop the last segment. If already empty, '..' would escape the base —
+                // we simply ignore it (can't go above root of the workspace).
+                if (!empty($normalized)) {
+                    array_pop($normalized);
+                }
+            } else {
+                $normalized[] = $part;
+            }
         }
 
-        // Guarantee the resolved path is still inside the base directory
-        $realBase = realpath($base);
-        if (!str_starts_with($resolved, $realBase . DIRECTORY_SEPARATOR) && $resolved !== $realBase) {
+        $fullPath = $realBase . DIRECTORY_SEPARATOR . implode(DIRECTORY_SEPARATOR, $normalized);
+
+        // Final guard: the assembled path must still be inside the workspace base.
+        if (!str_starts_with($fullPath, $realBase . DIRECTORY_SEPARATOR) && $fullPath !== $realBase) {
             abort(403, 'Invalid file path.');
         }
 
-        return $resolved;
+        return $fullPath;
     }
 
     /**
@@ -72,15 +98,12 @@ class FileController extends Controller
             return response()->json(['error' => 'Unauthorized'], 403);
         }
 
-        // 1. Define the physical path
         $projectPath = storage_path("app/workspaces/{$project->user_id}/{$project->id}");
         
-        // Ensure directory exists
         if (!FileSystem::exists($projectPath)) {
             FileSystem::makeDirectory($projectPath, 0755, true);
         }
 
-        // 2. Scan disk for real files (Flat List)
         $files = $this->scanDirectory($projectPath, $projectPath, $project);
 
         return response()->json(['files' => $files]);
@@ -97,19 +120,19 @@ class FileController extends Controller
         if ($project->user_id !== $request->user()->id) return response()->json(['error' => 'Unauthorized'], 403);
 
         $validator = Validator::make($request->all(), [
-            'name' => 'required|string|max:191',
-            'path' => ['required', 'string', 'max:400', 'not_regex:/(\.\.[\/\\\\])|^[\/\\\\]/'],
-            'content' => 'nullable|string',
+            'name'     => 'required|string|max:191',
+            'path'     => ['required', 'string', 'max:400', 'not_regex:/(\.\.[\/\\\\])|^[\/\\\\]/'],
+            'content'  => 'nullable|string',
             'language' => 'nullable|string|max:50',
         ]);
 
         if ($validator->fails()) return response()->json(['error' => $validator->errors()], 422);
 
         $file = $project->files()->create([
-            'name' => $request->name,
-            'path' => $request->path,
-            'content' => $request->content ?? '',
-            'language' => $request->language,
+            'name'       => $request->name,
+            'path'       => $request->path,
+            'content'    => $request->content ?? '',
+            'language'   => $request->language,
             'size_bytes' => strlen($request->content ?? ''),
         ]);
 
@@ -122,11 +145,11 @@ class FileController extends Controller
     {
         if ($file->project->user_id !== $request->user()->id) return response()->json(['error' => 'Unauthorized'], 403);
 
-        if ($request->has('name')) $file->name = $request->name;
+        if ($request->has('name'))     $file->name     = $request->name;
         if ($request->has('language')) $file->language = $request->language;
         
         if ($request->has('content')) {
-            $file->content = $request->content;
+            $file->content    = $request->content;
             $file->size_bytes = strlen($request->content);
             $this->syncToDisk($file->project, $file->path, $request->content);
         }
@@ -143,14 +166,12 @@ class FileController extends Controller
         $path = $request->input('path');
         if (!$path) return response()->json(['error' => 'Path is required'], 422);
 
-        // Delete from DB
         $deleted = $project->files()
-            ->where(function($query) use ($path) {
+            ->where(function ($query) use ($path) {
                 $query->where('path', $path)->orWhere('path', 'like', $path . '/%');
             })
             ->delete();
 
-        // Delete from Disk — safePath() prevents traversal
         try {
             $fullPath = $this->safePath($project, $path);
         } catch (\Symfony\Component\HttpKernel\Exception\HttpException $e) {
@@ -166,21 +187,15 @@ class FileController extends Controller
         return response()->json(['message' => "Deleted $deleted files"]);
     }
 
-    /**
-     * Delete a single file resource (Route: DELETE /api/v1/files/{file})
-     */
     public function destroy(Request $request, File $file)
     {
-        // 1. Authorization
         if ($file->project->user_id !== $request->user()->id) {
             return response()->json(['error' => 'Unauthorized'], 403);
         }
 
-        // 2. Delete from Disk via safePath (prevents traversal)
         try {
             $fullPath = $this->safePath($file->project, $file->path);
         } catch (\Symfony\Component\HttpKernel\Exception\HttpException $e) {
-            // Path is invalid — skip disk delete but still remove DB record
             $fullPath = null;
         }
 
@@ -188,7 +203,6 @@ class FileController extends Controller
             FileSystem::delete($fullPath);
         }
 
-        // 3. Delete from Database
         $file->delete();
 
         return response()->json(['message' => 'File deleted successfully']);
@@ -196,26 +210,23 @@ class FileController extends Controller
 
     public function upload(Request $request, Project $project)
     {
-        // Auth check FIRST — before touching any file data
         if ($project->user_id !== $request->user()->id) {
             return response()->json(['error' => 'Unauthorized'], 403);
         }
 
-        // Storage quota check
         if ($request->user()->isOverStorageLimit()) {
             return response()->json([
                 'error' => 'Storage limit reached. Delete unused projects or upgrade your plan to continue.'
             ], 403);
         }
 
-        $request->validate(['file' => 'required|file|max:10240']); // 10 MB per file
+        $request->validate(['file' => 'required|file|max:10240']);
 
         $file       = $request->file('file');
         $parentPath = trim($request->input('parent_path', ''), '/');
         $filename   = $file->getClientOriginalName();
         $fullPath   = $parentPath ? $parentPath . '/' . $filename : $filename;
 
-        // Reject path traversal in the assembled path
         if (str_contains($fullPath, '../') || str_contains($fullPath, '..\\') || str_starts_with($fullPath, '/')) {
             return response()->json(['error' => 'Invalid file path.'], 422);
         }
@@ -243,7 +254,6 @@ class FileController extends Controller
         $content = '';
         if (!$isBinary) {
             $content = file_get_contents($file->getRealPath());
-            // Guard against binary files misidentified by extension (null bytes = binary)
             if (strpos($content, "\0") !== false) {
                 $content  = '';
                 $isBinary = true;
@@ -271,25 +281,19 @@ class FileController extends Controller
         if ($project->user_id !== $request->user()->id) abort(403);
         $file = $project->files()->findOrFail($fileId);
         
-        $ext = strtolower(pathinfo($file->name, PATHINFO_EXTENSION));
-        $mimeTypes = ['png'=>'image/png', 'jpg'=>'image/jpeg', 'html'=>'text/html', 'css'=>'text/css', 'js'=>'text/javascript']; 
-        $mime = $mimeTypes[$ext] ?? 'text/plain';
+        $ext        = strtolower(pathinfo($file->name, PATHINFO_EXTENSION));
+        $mimeTypes  = ['png'=>'image/png', 'jpg'=>'image/jpeg', 'html'=>'text/html', 'css'=>'text/css', 'js'=>'text/javascript'];
+        $mime       = $mimeTypes[$ext] ?? 'text/plain';
 
         return response($file->content)->header('Content-Type', $mime);
     }
 
-    /**
-     * Step 1 — Authenticated endpoint that issues a short-lived signed preview URL.
-     * Called by the frontend with a normal Bearer token (in the header, not the URL).
-     * Returns a signed URL valid for 5 minutes — no token ever appears in any URL.
-     */
     public function getPreviewUrl(Request $request, Project $project, $path)
     {
         if ($project->user_id !== $request->user()->id) {
             return response()->json(['error' => 'Unauthorized'], 403);
         }
 
-        // Verify the file actually exists in this project before issuing a URL
         $file = $project->files()->where('path', $path)->first();
         if (!$file) {
             $file = $project->files()->where('path', 'LIKE', '%/' . $path)->first();
@@ -298,7 +302,6 @@ class FileController extends Controller
             return response()->json(['error' => 'File not found'], 404);
         }
 
-        // Generate a signed URL valid for 5 minutes
         $signedUrl = URL::temporarySignedRoute(
             'projects.preview.signed',
             now()->addMinutes(5),
@@ -308,11 +311,6 @@ class FileController extends Controller
         return response()->json(['url' => $signedUrl]);
     }
 
-    /**
-     * Step 2 — Public endpoint that serves the file, gated by signed URL signature.
-     * No auth token in the URL — Laravel verifies the HMAC signature + expiry.
-     * If the signature is missing, wrong, or expired → 403.
-     */
     public function previewSigned(Request $request, Project $project, $path)
     {
         if (!$request->hasValidSignature()) {
@@ -327,7 +325,7 @@ class FileController extends Controller
             return response('File not found: ' . $path, 404);
         }
 
-        $ext = strtolower(pathinfo($file->name, PATHINFO_EXTENSION));
+        $ext       = strtolower(pathinfo($file->name, PATHINFO_EXTENSION));
         $mimeTypes = [
             'html' => 'text/html',
             'css'  => 'text/css',
@@ -346,45 +344,39 @@ class FileController extends Controller
             ->header('X-Frame-Options', 'SAMEORIGIN');
     }
 
-    /**
-     * Recursively scans the disk and syncs new files to the DB
-     */
-    private function scanDirectory($dir, $basePath, $project, &$results = []) {
+    private function scanDirectory($dir, $basePath, $project, &$results = [])
+    {
         $items = scandir($dir);
 
         foreach ($items as $item) {
             if ($item === '.' || $item === '..') continue;
-            if ($item === '.git') continue; 
-            
-            // SKIP HEAVY FOLDERS to keep IDE fast
+            if ($item === '.git') continue;
+
             if ($item === 'node_modules' || $item === 'vendor' || $item === '__pycache__') {
-                // Add the folder itself so user sees it exists, but don't scan contents
                 $relativePath = ltrim(substr($dir . '/' . $item, strlen($basePath)), '/');
                 $results[] = [
-                    'id' => 0, // Folders don't need real IDs
+                    'id'         => 0,
                     'project_id' => $project->id,
-                    'name' => $item,
-                    'path' => $relativePath,
-                    'language' => 'folder', // Frontend treats this as a folder
+                    'name'       => $item,
+                    'path'       => $relativePath,
+                    'language'   => 'folder',
                     'updated_at' => now()
                 ];
                 continue;
             }
 
-            $fullPath = $dir . '/' . $item;
+            $fullPath     = $dir . '/' . $item;
             $relativePath = ltrim(substr($fullPath, strlen($basePath)), '/');
 
             if (is_dir($fullPath)) {
                 $this->scanDirectory($fullPath, $basePath, $project, $results);
             } else {
-                // It's a file. We need to make sure it has an ID in the DB.
-                // This "Sync on Read" strategy ensures files created by Docker can be opened.
                 $fileRecord = \App\Models\File::firstOrCreate(
                     ['project_id' => $project->id, 'path' => $relativePath],
                     [
-                        'name' => $item,
-                        'content' => '', // Lazy load content to speed up listing
-                        'language' => pathinfo($item, PATHINFO_EXTENSION),
+                        'name'       => $item,
+                        'content'    => '',
+                        'language'   => pathinfo($item, PATHINFO_EXTENSION),
                         'size_bytes' => filesize($fullPath),
                         'is_deleted' => false
                     ]
@@ -393,6 +385,7 @@ class FileController extends Controller
                 $results[] = $fileRecord;
             }
         }
+
         return $results;
     }
 }
