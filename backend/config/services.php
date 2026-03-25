@@ -36,8 +36,8 @@ return [
     ],
 
     'google' => [
-        'client_id' => '1058375657595-3qeslkpjie925539l5k3jaa75vdhneoa.apps.googleusercontent.com',
-        'client_secret' => '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',
+        'client_id' => env('GOOGLE_CLIENT_ID'),
+        'client_secret' => env('GOOGLE_CLIENT_SECRET'),
         'redirect' => 'https://api.ubiq-editor.space/api/v1/auth/google/callback',
     ],
 
