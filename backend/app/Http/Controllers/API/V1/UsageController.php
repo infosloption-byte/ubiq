@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\API\V1;
 
 use App\Http\Controllers\Controller;
+use App\Models\SiteVisit; 
 use App\Models\UsageLog;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -81,7 +82,7 @@ class UsageController extends Controller
      */
     public function recordVisit(Request $request)
     {
-        // Simple throttling: Don't count same IP multiple times per hour
+        // Simple throttling: don't count the same IP more than once per hour
         $exists = SiteVisit::where('ip_address', $request->ip())
             ->where('created_at', '>', now()->subHour())
             ->exists();
@@ -90,7 +91,7 @@ class UsageController extends Controller
             SiteVisit::create([
                 'ip_address' => $request->ip(),
                 'user_agent' => $request->userAgent(),
-                'referer' => $request->header('referer'),
+                'referer'    => $request->header('referer'),
             ]);
         }
 

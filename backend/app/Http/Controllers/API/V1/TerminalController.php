@@ -24,6 +24,35 @@ class TerminalController extends Controller
         $containerName = "ubiq_project_{$project->id}";
         $command = $request->command;
 
+        // ── Server-side blocklist ─────────────────────────────────────────────
+        // Mirrors the frontend list but enforced here so HTTP clients that
+        // bypass the UI cannot execute destructive commands.
+        $blocked = [
+            'rm -rf /',
+            'rm -rf /*',
+            'mkfs',
+            ':(){:|:&};:',
+            'dd if=/dev/zero',
+            'dd if=/dev/urandom',
+            '> /dev/sda',
+            'chmod -R 777 /',
+            'shutdown',
+            'reboot',
+            'halt',
+            'init 0',
+            'kill -9 -1',
+        ];
+
+        $normalised = strtolower(trim($command));
+        foreach ($blocked as $pattern) {
+            if (str_contains($normalised, strtolower($pattern))) {
+                return response()->json([
+                    'output' => "Command blocked for safety: {$command}"
+                ], 422);
+            }
+        }
+        // ── End blocklist ─────────────────────────────────────────────────────
+
         // 1. Check if container is running
         $check = Process::run("docker ps -q -f name={$containerName}");
         
