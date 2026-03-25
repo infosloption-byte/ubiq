@@ -13,6 +13,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Str;
+use Illuminate\Support\Facades\Cache;
 use App\Http\Controllers\Controller;
 
 class AuthController extends Controller
@@ -324,13 +325,46 @@ class AuthController extends Controller
                 ]);
             }
 
+            // 6. Store token behind a short-lived one-time code.
+            //    The code (not the token) goes in the redirect URL, so the
+            //    Sanctum token never appears in nginx logs, browser history,
+            //    or referrer headers. The frontend exchanges the code
+            //    immediately via POST /auth/exchange.
+            $code = Str::random(64);
+            Cache::put("oauth_code:{$code}", $token, now()->addMinutes(5));
+
             $frontendUrl = env('FRONTEND_URL', 'https://ubiq-editor.space');
-            return redirect("{$frontendUrl}/auth/callback?token={$token}");
+            return redirect("{$frontendUrl}/auth/callback?code={$code}");
 
         } catch (\Exception $e) {
             \Illuminate\Support\Facades\Log::error('Google Login Error: ' . $e->getMessage());
             $frontendUrl = env('FRONTEND_URL', 'https://ubiq-editor.space');
             return redirect("{$frontendUrl}/login?error=Google login failed");
         }
+    }
+
+    /**
+     * Exchange a one-time OAuth code for a Sanctum token.
+     *
+     * Called by the frontend immediately after the Google redirect lands.
+     * Cache::pull() atomically reads and deletes the entry so each code
+     * works exactly once. Codes expire after 5 minutes regardless.
+     */
+    public function exchangeOAuthCode(Request $request)
+    {
+        $code = $request->input('code');
+
+        if (!$code || !is_string($code) || strlen($code) !== 64) {
+            return response()->json(['error' => 'Invalid code format'], 422);
+        }
+
+        // pull() = get + delete in one atomic operation
+        $token = Cache::pull("oauth_code:{$code}");
+
+        if (!$token) {
+            return response()->json(['error' => 'Code is invalid or has already been used'], 401);
+        }
+
+        return response()->json(['token' => $token]);
     }
 }

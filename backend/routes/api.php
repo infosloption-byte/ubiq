@@ -33,6 +33,10 @@ Route::prefix('v1')->group(function () {
     Route::middleware('throttle:10,1')->group(function () {
         Route::post('/auth/register', [AuthController::class, 'register']);
         Route::post('/auth/login',    [AuthController::class, 'login']);
+        // One-time code → token exchange for Google OAuth callback.
+        // Must be public (user has no token yet) but rate-limited to
+        // prevent brute-forcing the 64-char random codes.
+        Route::post('/auth/exchange', [AuthController::class, 'exchangeOAuthCode']);
     });
 
     Route::get('/auth/google',          [AuthController::class, 'redirectToGoogle']);

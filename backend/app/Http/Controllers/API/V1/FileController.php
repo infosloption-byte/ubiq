@@ -161,17 +161,21 @@ class FileController extends Controller
 
     public function destroyPath(Request $request, Project $project)
     {
-        if ($project->user_id !== $request->user()->id) return response()->json(['error' => 'Unauthorized'], 403);
+        if ($project->user_id !== $request->user()->id)
+            return response()->json(['error' => 'Unauthorized'], 403);
 
         $path = $request->input('path');
         if (!$path) return response()->json(['error' => 'Path is required'], 422);
 
+        // Delete DB records
         $deleted = $project->files()
             ->where(function ($query) use ($path) {
-                $query->where('path', $path)->orWhere('path', 'like', $path . '/%');
+                $query->where('path', $path)
+                      ->orWhere('path', 'like', $path . '/%');
             })
             ->delete();
 
+        // Delete from disk
         try {
             $fullPath = $this->safePath($project, $path);
         } catch (\Symfony\Component\HttpKernel\Exception\HttpException $e) {
@@ -184,7 +188,7 @@ class FileController extends Controller
             FileSystem::delete($fullPath);
         }
 
-        return response()->json(['message' => "Deleted $deleted files"]);
+        return response()->json(['message' => "Deleted $deleted records"]);
     }
 
     public function destroy(Request $request, File $file)

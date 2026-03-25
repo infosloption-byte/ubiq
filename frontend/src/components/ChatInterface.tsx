@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { useAuthStore } from '../stores/authStore';
 import { chatAPI, generateTitle } from '../services/api';
 import { aiService, AiApiConfig } from '../services/aiService';
@@ -76,7 +76,7 @@ export default function ChatInterface({
         processMessage(autoPrompt, true);
         if (onAutoPromptClear) onAutoPromptClear();
     }
-  }, [autoPrompt]);
+}, [autoPrompt, processMessage, onAutoPromptClear]);
 
   useEffect(() => { scrollToBottom(); }, [messages, isLoading, pendingAttachments]);
 
@@ -166,7 +166,7 @@ export default function ChatInterface({
     processMessage(finalContent, true);
   };
 
-  const processMessage = async (content: string, isNewUserMessage: boolean = true) => {
+  const processMessage = useCallback(async (content: string, isNewUserMessage: boolean = true) => {
     if (isLoading) return;
 
     const controller = new AbortController();
@@ -257,7 +257,7 @@ export default function ChatInterface({
         setIsLoading(false);
         setAbortController(null);
     }
-  };
+  }, [isLoading, messages, sessionId, aiMode, selectedModel, activeContext, onApplyCode, onSessionUpdate]);
 
   const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setInput(e.target.value);
