@@ -5,6 +5,7 @@ namespace App\Console\Commands;
 use Illuminate\Console\Command;
 use App\Models\Project;
 use Illuminate\Support\Facades\File;
+use Illuminate\Support\Facades\Process;
 
 class MigrateWorkspaces extends Command
 {
@@ -59,25 +60,34 @@ class MigrateWorkspaces extends Command
                 File::put($filePath, $file->content);
             }
             
-            // 4. Git Initialization (FIXED)
+            // 4. Git Initialization
             if (!File::exists($newPath . '/.git')) {
                 $this->info(" - Initializing Git repository...");
-                
-                // Fix "Dubious Ownership"
-                exec("git config --global --add safe.directory " . escapeshellarg($newPath));
 
-                // Commands to Init, Configure Identity, and Commit
-                $commands = [
-                    "cd " . escapeshellarg($newPath),
+                // Fix "Dubious Ownership" — must run before any git command in this dir
+                $safedir = \Illuminate\Support\Facades\Process::run(
+                    "git config --global --add safe.directory " . escapeshellarg($newPath)
+                );
+                if ($safedir->failed()) {
+                    $this->warn("   ! Could not set safe.directory: " . $safedir->errorOutput());
+                }
+
+                $gitCommands = [
                     "git init",
-                    // Fix "Author identity unknown"
                     "git config user.email 'migration@ubiq.com'",
                     "git config user.name 'Migration Bot'",
                     "git add .",
-                    "git commit -m 'Migration init'"
+                    "git commit -m 'Migration init'",
                 ];
 
-                exec(implode(' && ', $commands));
+                foreach ($gitCommands as $cmd) {
+                    $result = \Illuminate\Support\Facades\Process::path($newPath)->run($cmd);
+                    if ($result->failed()) {
+                        $this->warn("   ! Git command failed [{$cmd}]: " . $result->errorOutput());
+                        // Continue migration — a missing git history is not fatal
+                        break;
+                    }
+                }
             }
         }
 

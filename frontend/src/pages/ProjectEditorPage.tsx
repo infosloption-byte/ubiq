@@ -232,16 +232,21 @@ export default function ProjectEditorPage() {
         return map[ext || ''] || 'plaintext';
     };
 
-    // FIX: Memoized with useMemo. Previously this was a plain function called on every render,
-    // which for large projects would concatenate megabytes of file content into a string
-    // every single time ChatInterface re-rendered (e.g. every keystroke in the chat input).
+    // #17 FIX: Previously concatenated full content of all text files (up to 400KB
+    // per message for a 40-file project). Now sends only the file tree (paths only)
+    // as project context. Full content of the currently-open file is passed
+    // separately via activeContext.currentFile, which ChatInterface already handles.
     const projectStructureContext = useMemo(() => {
         if (!files || files.length === 0) return "No files in project.";
-        const textFiles = files.filter(f =>
-            f.size_bytes < 50000 &&
-            !f.name.match(/\.(png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$/i)
-        );
-        return textFiles.map(f => `// FILE: ${f.path}\n${f.content || '// (Empty file)'}`).join('\n\n');
+
+        // Group by folder for a readable tree
+        const tree = files
+          .filter(f => !f.name.match(/\.(png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot|woff)$/i))
+          .map(f => f.path)
+          .sort()
+          .join('\n');
+
+        return `Project file tree:\n${tree}`;
     }, [files]);
 
     const openCreateModal = (type: 'file' | 'folder', parentPath: string = '') => {

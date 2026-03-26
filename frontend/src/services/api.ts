@@ -24,12 +24,10 @@ export const getAuthToken = (): string | null => {
     return token || null;
 };
 
-// FIX: Merged both request interceptors into one.
-// Previously there were two separate request interceptors chained on the same instance —
-// one for console logging, one for auth headers. This is cleaner and avoids surprises
-// if interceptor order ever matters.
-// FIX: Console logging is now guarded by import.meta.env.DEV so auth tokens (which appear
-// in the config object) are never printed to the console in production builds.
+// #22 FIX: Single merged request interceptor.
+// Logs method + url + body only — never logs config.headers, which contains
+// the Authorization token. A dev with screen-sharing open should not
+// inadvertently expose their token in the DevTools console.
 api.interceptors.request.use(
     (config) => {
         if (import.meta.env.DEV) {
@@ -44,8 +42,7 @@ api.interceptors.request.use(
     (error) => Promise.reject(error)
 );
 
-// FIX: Merged both response interceptors into one.
-// Same reason as above — two separate interceptors were chained for logging and 401 handling.
+// Single merged response interceptor — logs status + url, handles 401 globally.
 api.interceptors.response.use(
     (response) => {
         if (import.meta.env.DEV) {
@@ -129,20 +126,11 @@ export const fileAPI = {
     get: (id: number) => api.get(`/files/${id}`),
     update: (id: number, data: { name?: string; content?: string }) => api.put(`/files/${id}`, data),
     delete: (id: number) => api.delete(`/files/${id}`),
-
-    // FIX: This method was called in ProjectEditorPage.tsx but was never defined here,
-    // causing a runtime crash ("fileAPI.upload is not a function") on every file upload.
     upload: (projectId: number, formData: FormData, onProgress?: (e: ProgressEvent) => void) =>
         api.post(`/projects/${projectId}/files/upload`, formData, {
             headers: { 'Content-Type': 'multipart/form-data' },
             onUploadProgress: onProgress,
         }),
-
-    // FIX: Added for folder deletion. Previously folder deletes called fileAPI.delete(node.fileId || 0)
-    // where fileId is undefined for folders, sending DELETE /files/0 — a broken request.
-    // The correct backend route is DELETE /projects/{id}/files/path (destroyPath in FileController).
-    // Note: we originally wrote /projects/{id}/folders which was a URL we invented — that route
-    // does not exist. The real route has always been /files/path.
     deleteFolder: (projectId: number, path: string) =>
         api.delete(`/projects/${projectId}/files/path`, { data: { path } }),
 };

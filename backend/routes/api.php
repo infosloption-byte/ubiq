@@ -7,7 +7,6 @@ use App\Http\Controllers\API\V1\ProjectController;
 use App\Http\Controllers\API\V1\FileController;
 use App\Http\Controllers\API\V1\ChatController;
 use App\Http\Controllers\API\V1\CompletionController;
-use App\Http\Controllers\API\V1\ModelController;
 use App\Http\Controllers\API\V1\UsageController;
 use App\Http\Controllers\API\V1\AiController;
 use App\Http\Controllers\API\V1\AdminController;

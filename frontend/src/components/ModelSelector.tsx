@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { aiAPI, userAPI, authAPI } from '../services/api';
@@ -32,6 +32,8 @@ export default function ModelSelector({ aiMode, selectedModel, onSelectModel, me
   const [ollamaError, setOllamaError] = useState<string | null>(null);
   const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -54,10 +56,21 @@ export default function ModelSelector({ aiMode, selectedModel, onSelectModel, me
 
   // Fetch models whenever aiMode changes
   useEffect(() => {
-    loadModels();
+    // Debounce: if the user toggles mode rapidly, only the last one fires
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => {
+      // Cancel any in-flight request from a previous mode
+      if (abortRef.current) abortRef.current.abort();
+      abortRef.current = new AbortController();
+      loadModels(abortRef.current.signal);
+    }, 150);
+
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
   }, [aiMode]);
 
-  const loadModels = async () => {
+  const loadModels = async (signal?: AbortSignal) => {
     setLoading(true);
     setModels([]);
     setOllamaError(null);
@@ -79,11 +92,12 @@ export default function ModelSelector({ aiMode, selectedModel, onSelectModel, me
             try {
                 const apiUrl = import.meta.env.VITE_API_URL;
                 const authRaw = localStorage.getItem('auth-storage');
-                const token = authRaw ? (JSON.parse(authRaw)?.state?.token || '') : 
+                const token = authRaw ? (JSON.parse(authRaw)?.state?.token || '') :
                               (localStorage.getItem('auth_token') || localStorage.getItem('token') || '');
                 const response = await axios.get(`${apiUrl}/ollama/tags`, {
                     params: { url: ollamaBase },
-                    headers: token ? { Authorization: `Bearer ${token}` } : {}
+                    headers: token ? { Authorization: `Bearer ${token}` } : {},
+                    signal, // pass abort signal
                 });
 
                 if (response.data && Array.isArray(response.data.models)) {
@@ -125,8 +139,10 @@ export default function ModelSelector({ aiMode, selectedModel, onSelectModel, me
             }
         }
     } catch (error) {
+      // AbortError means a newer request superseded this one — not an error
+      if (axios.isCancel(error) || (error as any)?.name === 'AbortError') return;
       console.error('Failed to load models:', error);
-      setModels([]); 
+      setModels([]);
     } finally {
         setLoading(false);
     }

@@ -246,7 +246,7 @@ STRICT RULES:
             };
 
             if (aiMode === 'local') {
-                const localUrl = localStorage.getItem('ubiq_local_url') || 'http://localhost:11434';
+                const localUrl = localStorage.getItem('ubiq_local_url') || LOCAL_OLLAMA_URL;
                 apiConfig.api_keys = { ollama_url: localUrl };
             } else if (aiMode === 'remote') {
                 const currentRemoteUrl = localStorage.getItem(OLLAMA_URL_KEY);

@@ -289,11 +289,14 @@ class ProjectController extends Controller
     private function findFreePort(int $start = 8100, int $end = 8899): int
     {
         for ($port = $start; $port <= $end; $port++) {
-            $sock = @fsockopen('127.0.0.1', $port, $errno, $errstr, 0.1);
-            if ($sock === false) {
-                return $port; // Port is free
+            // stream_socket_server() actually attempts to bind the port — the only
+            // reliable test. @fsockopen() with a short timeout produces false-negatives
+            // on a loaded server, which can cause two containers to race for the same port.
+            $sock = @stream_socket_server("tcp://127.0.0.1:{$port}", $errno, $errstr);
+            if ($sock !== false) {
+                fclose($sock); // release immediately — docker will bind it next
+                return $port;
             }
-            fclose($sock);
         }
         throw new \RuntimeException("No free port found in range {$start}-{$end}");
     }

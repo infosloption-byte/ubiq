@@ -5,10 +5,11 @@ interface User {
   id: number;
   username: string;
   email: string;
+  is_admin?: boolean;           // #15 FIX: was missing — App.tsx guards /admin on this field
   subscription_tier: string;
   subscription_status: 'trialing' | 'active' | 'past_due' | 'canceled' | 'paused' | 'free';
   trial_ends_at: string | null;
-  subscription_ends_at: string | null;  // ✅ ADDED
+  subscription_ends_at: string | null;
   extra_storage_gb: number;
   avatar?: string;
   api_key?: string;
