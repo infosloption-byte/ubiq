@@ -141,6 +141,7 @@ class AuthController extends Controller
             'subscription_status' => $user->subscription_status, // Dynamic attribute
             'trial_days_left' => $user->trial_days_left,
             'api_key' => $user->api_key,
+            'is_admin' => $user->is_admin,
             'avatar' => $user->avatar,
             'created_at' => $user->created_at,
             'preferences' => $prefs

@@ -730,7 +730,7 @@ class ProjectController extends Controller
 
     private function generateStartupScript($runtime, $framework)
     {
-        $header = "#!/bin/sh\n\n# --- UBIQ AUTO-GENERATED STARTUP SCRIPT ---\necho \"[Ubiq] Booting {$framework}...\"\n";
+        $header = "#!/bin/sh\n\n# --- UBIQ AUTO-GENERATED STARTUP SCRIPT ---\necho \"[Ubiq] Booting {$framework}...\"\n\n# Redirect temp file writes to /tmp to avoid volume permission issues\nexport TMPDIR=/tmp\nmkdir -p /tmp/.cache\n";
         
         // --- FIX: Install System Dependencies (Git/Zip) for Alpine ---
         $installDeps = "";
@@ -849,8 +849,18 @@ class ProjectController extends Controller
                 echo "[Ubiq] Installing NPM packages..."
                 npm install
 
+                # PERMISSION FIX: Vite writes a temp .mjs file next to vite.config.js
+                # during startup. The mounted /app volume is owned by the host user (uid 1000)
+                # which differs from the container process uid, causing EACCES errors.
+                # Setting TMPDIR=/tmp redirects all Vite temp file writes to /tmp which
+                # is always writable inside the container regardless of volume permissions.
+                export TMPDIR=/tmp
+                export VITE_CACHE_DIR=/tmp/.vite-cache
+
+                # Ensure /tmp is writable (it always should be, but be explicit)
+                mkdir -p /tmp/.vite-cache
+
                 # CRITICAL FIX: Vite requires index.html in the ROOT.
-                # If AI put it in public/, we move it to root automatically.
                 if [ -f "public/index.html" ] && [ ! -f "index.html" ]; then
                     echo "[Ubiq] Detected index.html in public/. Moving to root for Vite compatibility..."
                     mv public/index.html .
@@ -858,11 +868,9 @@ class ProjectController extends Controller
 
                 echo "[Ubiq] Starting Development Server..."
                 if [ -f "vite.config.js" ] || [ -f "vite.config.ts" ]; then
-                    # Run Vite directly to ensure port/host binding works correctly
                     echo "[Ubiq] Detected Vite config. Launching via npx..."
                     npx vite --host 0.0.0.0 --port 5173
                 else
-                    # Fallback
                     npm run dev -- --host 0.0.0.0 --port 5173
                 fi
                 EOT;

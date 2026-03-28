@@ -50,5 +50,19 @@ class AppServiceProvider extends ServiceProvider
         $this->app['router']->pushMiddlewareToGroup('web',
             \App\Http\Middleware\SecurityHeaders::class
         );
+
+        // Attach authenticated user context to every Sentry event.
+        // This lets you search errors by user ID or email in the dashboard.
+        if (app()->bound('sentry')) {
+            \Sentry\configureScope(function (\Sentry\State\Scope $scope): void {
+                if ($user = auth()->user()) {
+                    $scope->setUser([
+                        'id'       => $user->id,
+                        'email'    => $user->email,
+                        'username' => $user->username,
+                    ]);
+                }
+            });
+        }
     }
 }

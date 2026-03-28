@@ -71,13 +71,6 @@ export default function ChatInterface({
 
   useEffect(() => { loadMessages(); }, [sessionId]);
 
-  useEffect(() => {
-    if (autoPrompt) {
-        processMessage(autoPrompt, true);
-        if (onAutoPromptClear) onAutoPromptClear();
-    }
-}, [autoPrompt, processMessage, onAutoPromptClear]);
-
   useEffect(() => { scrollToBottom(); }, [messages, isLoading, pendingAttachments]);
 
   const loadMessages = async () => {
@@ -258,6 +251,13 @@ export default function ChatInterface({
         setAbortController(null);
     }
   }, [isLoading, messages, sessionId, aiMode, selectedModel, activeContext, onApplyCode, onSessionUpdate]);
+
+  useEffect(() => {
+    if (autoPrompt) {
+        processMessage(autoPrompt, true);
+        if (onAutoPromptClear) onAutoPromptClear();
+    }
+  }, [autoPrompt, processMessage, onAutoPromptClear]);
 
   const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setInput(e.target.value);

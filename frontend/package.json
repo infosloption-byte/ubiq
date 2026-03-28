@@ -12,6 +12,7 @@
   "dependencies": {
     "@heroicons/react": "^2.2.0",
     "@monaco-editor/react": "^4.7.0",
+    "@sentry/react": "^10.46.0",
     "axios": "^1.6.5",
     "framer-motion": "^12.33.0",
     "lucide-react": "^0.563.0",

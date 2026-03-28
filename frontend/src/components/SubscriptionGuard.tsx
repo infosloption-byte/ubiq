@@ -16,9 +16,7 @@ export const SubscriptionGuard: React.FC<{ children: React.ReactNode }> = ({ chi
   // We check status as a secondary guard to block expired/canceled accounts.
   const BLOCKED_STATUSES = ['canceled', 'paused', 'free'];
 
-  const canAccess = 
-    user?.subscription_tier === 'pro' && 
-    !BLOCKED_STATUSES.includes(user?.subscription_status ?? 'free');
+  const canAccess = user?.is_admin || (user?.subscription_tier === 'pro' && !BLOCKED_STATUSES.includes(user?.subscription_status ?? 'free'));
 
   // ✅ This covers ALL cases cleanly:
   // trialing + pro  → ✅ access (on trial, not yet charged)

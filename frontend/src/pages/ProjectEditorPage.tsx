@@ -14,6 +14,7 @@ import FilePreview from '../components/FilePreview';
 import ProjectRunner from '../components/panels/ProjectRunner';
 import TerminalPanel from '../components/panels/TerminalPanel';
 import { useAiModeStore } from '../stores/aiModeStore';
+import { useSandboxAutoStop } from '../hooks/useSandboxAutoStop';
 import {
     CodeBracketIcon, ChatBubbleLeftRightIcon, XMarkIcon, ArrowPathIcon,
     CheckIcon, NoSymbolIcon, PlusIcon, FolderPlusIcon, MagnifyingGlassIcon,
@@ -99,6 +100,9 @@ export default function ProjectEditorPage() {
             initializeProjectChat(projectId);
         }
     }, [projectId]);
+
+    // Auto-stop sandbox when user leaves the page (tab close, navigation, etc.)
+    useSandboxAutoStop(projectId, isSandboxRunning);
 
     // 2. Restore Tabs & Active File — runs once after filesLoaded becomes true.
     // FIX: The old code triggered on `files` array changes and checked `files.length > 0`.

@@ -32,5 +32,11 @@ return Application::configure(basePath: dirname(__DIR__))
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions) {
-        //
+        // Report all unhandled exceptions to Sentry.
+        // Excludes validation errors and 404s which are not actionable.
+        $exceptions->reportable(function (\Throwable $e) {
+            if (app()->bound('sentry') && $e instanceof \Exception) {
+                \Sentry\captureException($e);
+            }
+        });
     })->create();
