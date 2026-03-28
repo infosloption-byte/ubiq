@@ -12,7 +12,8 @@ import {
   PlusIcon,
   ClockIcon,
   SparklesIcon,
-  CircleStackIcon
+  CircleStackIcon,
+  LockClosedIcon,
 } from '@heroicons/react/24/outline';
 
 interface Project {
@@ -48,18 +49,20 @@ export default function DashboardPage() {
   const [stats, setStats] = useState<Stats | null>(null);
   const [storageStats, setStorageStats] = useState<StorageStats | null>(null);
   const [loading, setLoading] = useState(true);
-  // #16 FIX: track per-section errors so one failing API doesn't blank the whole page
   const [errors, setErrors] = useState<{ projects?: string; stats?: string; storage?: string }>({});
 
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
   const [isAiModalOpen, setIsAiModalOpen] = useState(false);
 
+  // Detect 402 / payment_required responses from the backend
+  const isSubscriptionError = (err: any) =>
+    err?.response?.status === 402 ||
+    err?.response?.data?.action === 'payment_required';
+
+  const isBlocked =
+    errors.stats === '__subscription__' || errors.projects === '__subscription__';
+
   const loadData = async () => {
-    // #16 FIX: Promise.allSettled instead of Promise.all.
-    // With Promise.all, a single failing call (e.g. getStorageStats timing out)
-    // rejects the entire block and the dashboard shows nothing.
-    // allSettled lets each call succeed or fail independently — we show whatever
-    // data arrived and surface a small per-section error for the rest.
     const [userResult, projectsResult, statsResult, storageResult] = await Promise.allSettled([
       authAPI.me(),
       projectAPI.getAll(),
@@ -71,29 +74,26 @@ export default function DashboardPage() {
 
     if (userResult.status === 'fulfilled') {
       setUser(userResult.value.data.user);
-    } else {
-      console.error('Failed to refresh user', userResult.reason);
     }
 
     if (projectsResult.status === 'fulfilled') {
       setProjects(projectsResult.value.data.projects);
     } else {
-      newErrors.projects = 'Could not load projects.';
-      console.error('Failed to load projects', projectsResult.reason);
+      newErrors.projects = isSubscriptionError(projectsResult.reason)
+        ? '__subscription__'
+        : 'Could not load projects.';
     }
 
     if (statsResult.status === 'fulfilled') {
       setStats(statsResult.value.data.stats);
     } else {
-      newErrors.stats = 'Could not load stats.';
-      console.error('Failed to load stats', statsResult.reason);
+      newErrors.stats = isSubscriptionError(statsResult.reason)
+        ? '__subscription__'
+        : 'Could not load stats.';
     }
 
     if (storageResult.status === 'fulfilled') {
       setStorageStats(storageResult.value.data);
-    } else {
-      // Storage widget is non-critical — just skip it silently
-      console.error('Failed to load storage stats', storageResult.reason);
     }
 
     setErrors(newErrors);
@@ -118,9 +118,36 @@ export default function DashboardPage() {
 
   return (
     <Layout>
-      <div className="p-8 max-w-7xl mx-auto space-y-8">
+      <div className="p-8 max-w-7xl mx-auto space-y-6">
 
-        {/* Welcome Header */}
+        {/* ── Subscription Expired Banner ─────────────────────────────────── */}
+        {isBlocked && (
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-5 bg-gradient-to-r from-amber-500/15 via-orange-500/10 to-amber-500/5 border border-amber-500/30 rounded-2xl">
+            <div className="flex items-start gap-3">
+              <div className="p-2 bg-amber-500/20 rounded-lg shrink-0 mt-0.5">
+                <svg className="w-5 h-5 text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+                </svg>
+              </div>
+              <div>
+                <h3 className="text-amber-300 font-bold text-sm">Your subscription has expired</h3>
+                <p className="text-amber-200/70 text-xs mt-0.5 leading-relaxed max-w-md">
+                  Activate a Pro plan to access your projects, AI features, and cloud storage.
+                  All your existing data is safe and waiting for you.
+                </p>
+              </div>
+            </div>
+            <Link
+              to="/settings?tab=billing"
+              className="shrink-0 inline-flex items-center gap-2 px-5 py-2.5 bg-amber-500 hover:bg-amber-400 text-black font-bold text-sm rounded-xl transition-all shadow-lg shadow-amber-500/20"
+            >
+              <SparklesIcon className="w-4 h-4" />
+              Activate Pro
+            </Link>
+          </div>
+        )}
+
+        {/* ── Header ─────────────────────────────────────────────────────── */}
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div>
             <h1 className="text-2xl font-bold text-white">Dashboard</h1>
@@ -128,25 +155,51 @@ export default function DashboardPage() {
           </div>
 
           <div className="flex gap-3">
-            <button
-              onClick={() => setIsAiModalOpen(true)}
-              className="flex items-center gap-2 px-4 py-2 rounded-lg bg-purple-600 hover:bg-purple-500 text-white transition-all shadow-lg shadow-purple-900/20 font-medium text-sm"
-            >
-              <SparklesIcon className="w-5 h-5" />
-              <span>Generate with AI</span>
-            </button>
+            {/* Generate with AI — disabled + tooltip when blocked */}
+            <div className="relative group/btn">
+              <button
+                onClick={() => !isBlocked && setIsAiModalOpen(true)}
+                disabled={isBlocked}
+                className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium text-sm transition-all shadow-lg
+                  ${isBlocked
+                    ? 'bg-purple-600/40 text-white/40 cursor-not-allowed shadow-none'
+                    : 'bg-purple-600 hover:bg-purple-500 text-white shadow-purple-900/20'
+                  }`}
+              >
+                {isBlocked ? <LockClosedIcon className="w-4 h-4" /> : <SparklesIcon className="w-5 h-5" />}
+                <span>Generate with AI</span>
+              </button>
+              {isBlocked && (
+                <div className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 w-max max-w-[200px] text-center px-3 py-1.5 bg-ubiq-900 border border-white/10 rounded-lg text-[11px] text-slate-300 opacity-0 group-hover/btn:opacity-100 pointer-events-none transition-opacity z-10 shadow-xl">
+                  Activate Pro to use this feature
+                </div>
+              )}
+            </div>
 
-            <button
-              onClick={() => setIsCreateDialogOpen(true)}
-              className="flex items-center gap-2 px-4 py-2 rounded-lg bg-ubiq-accent hover:bg-ubiq-accent-hover text-white transition-colors shadow-lg shadow-ubiq-accent/20 text-sm font-medium"
-            >
-              <PlusIcon className="w-5 h-5" />
-              <span>New Project</span>
-            </button>
+            {/* New Project — disabled + tooltip when blocked */}
+            <div className="relative group/btn2">
+              <button
+                onClick={() => !isBlocked && setIsCreateDialogOpen(true)}
+                disabled={isBlocked}
+                className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors shadow-lg
+                  ${isBlocked
+                    ? 'bg-ubiq-accent/40 text-white/40 cursor-not-allowed shadow-none'
+                    : 'bg-ubiq-accent hover:bg-ubiq-accent-hover text-white shadow-ubiq-accent/20'
+                  }`}
+              >
+                {isBlocked ? <LockClosedIcon className="w-4 h-4" /> : <PlusIcon className="w-5 h-5" />}
+                <span>New Project</span>
+              </button>
+              {isBlocked && (
+                <div className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 w-max max-w-[200px] text-center px-3 py-1.5 bg-ubiq-900 border border-white/10 rounded-lg text-[11px] text-slate-300 opacity-0 group-hover/btn2:opacity-100 pointer-events-none transition-opacity z-10 shadow-xl">
+                  Activate Pro to use this feature
+                </div>
+              )}
+            </div>
           </div>
         </div>
 
-        {/* Stats Grid */}
+        {/* ── Stats Grid ─────────────────────────────────────────────────── */}
         {stats && !errors.stats && (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
             <StatCard title="Total Projects" value={stats.total_projects} icon={FolderIcon} color="bg-blue-500" />
@@ -163,13 +216,15 @@ export default function DashboardPage() {
             </div>
           </div>
         )}
-        {errors.stats && (
+
+        {/* Stats error — only show for non-subscription errors */}
+        {errors.stats && errors.stats !== '__subscription__' && (
           <p className="text-xs text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2">
             Could not load stats — {errors.stats}
           </p>
         )}
 
-        {/* Storage Usage Widget */}
+        {/* ── Storage Usage ──────────────────────────────────────────────── */}
         {storageStats && (
           <div className="glass-panel p-5 rounded-xl">
             <div className="flex items-center justify-between mb-3">
@@ -180,13 +235,11 @@ export default function DashboardPage() {
               <span className="text-xs text-slate-500">
                 {storageStats.used_mb < 1024
                   ? `${storageStats.used_mb.toFixed(1)} MB`
-                  : `${(storageStats.used_mb / 1024).toFixed(2)} GB`
-                }
+                  : `${(storageStats.used_mb / 1024).toFixed(2)} GB`}
                 {' '}of{' '}
                 {storageStats.limit_mb >= 1024
                   ? `${(storageStats.limit_mb / 1024).toFixed(0)} GB`
-                  : `${storageStats.limit_mb} MB`
-                }
+                  : `${storageStats.limit_mb} MB`}
                 {' '}used
               </span>
             </div>
@@ -209,8 +262,8 @@ export default function DashboardPage() {
               <span className="text-xs text-slate-600">
                 {storageStats.limit_mb >= 1024
                   ? `${((storageStats.limit_mb - storageStats.used_mb) / 1024).toFixed(2)} GB`
-                  : `${(storageStats.limit_mb - storageStats.used_mb).toFixed(0)} MB`
-                } remaining
+                  : `${(storageStats.limit_mb - storageStats.used_mb).toFixed(0)} MB`}
+                {' '}remaining
               </span>
             </div>
             {storageStats.percent > 80 && (
@@ -221,28 +274,59 @@ export default function DashboardPage() {
           </div>
         )}
 
-        {/* Projects List */}
+        {/* ── Recent Projects ────────────────────────────────────────────── */}
         <div className="space-y-4">
           <h2 className="text-lg font-semibold text-white">Recent Projects</h2>
 
           {loading ? (
             <div className="text-center py-20 text-slate-500 animate-pulse">Loading workspace...</div>
-          ) : errors.projects ? (
-            <div className="text-center py-12 text-amber-400 text-sm border border-amber-500/20 rounded-xl bg-amber-500/5">
-              {errors.projects} <button onClick={loadData} className="underline ml-2 hover:text-amber-300">Retry</button>
+
+          ) : errors.projects === '__subscription__' ? (
+            /* Subscription expired — locked projects state */
+            <div className="glass-panel rounded-xl p-12 text-center border border-amber-500/20 bg-amber-500/5">
+              <div className="w-16 h-16 bg-amber-500/10 rounded-full flex items-center justify-center mx-auto mb-4">
+                <LockClosedIcon className="w-8 h-8 text-amber-400" />
+              </div>
+              <h3 className="text-white font-semibold text-lg mb-2">Your projects are locked</h3>
+              <p className="text-slate-400 text-sm mb-6 max-w-sm mx-auto leading-relaxed">
+                Activate a Pro subscription to access your projects and continue building.
+                All your data is safe and will be restored instantly.
+              </p>
+              <Link
+                to="/settings?tab=billing"
+                className="inline-flex items-center gap-2 px-6 py-3 bg-amber-500 hover:bg-amber-400 text-black font-bold text-sm rounded-xl transition-all shadow-lg shadow-amber-500/20"
+              >
+                <SparklesIcon className="w-4 h-4" />
+                Activate Pro — $9/month
+              </Link>
             </div>
+
+          ) : errors.projects ? (
+            /* Generic error */
+            <div className="text-center py-12 text-amber-400 text-sm border border-amber-500/20 rounded-xl bg-amber-500/5">
+              {errors.projects}
+              <button onClick={loadData} className="underline ml-2 hover:text-amber-300">Retry</button>
+            </div>
+
           ) : projects.length === 0 ? (
+            /* Empty state */
             <div className="glass-panel rounded-xl p-12 text-center border-dashed border-ubiq-700">
               <FolderIcon className="w-12 h-12 text-slate-600 mx-auto mb-4" />
               <h3 className="text-white font-medium mb-1">No projects found</h3>
               <p className="text-slate-500 text-sm mb-4">Get started by creating your first AI-powered project.</p>
               <div className="flex justify-center gap-3">
-                <button onClick={() => setIsCreateDialogOpen(true)} className="text-ubiq-accent hover:text-white text-sm font-medium">Create Project</button>
+                <button onClick={() => setIsCreateDialogOpen(true)} className="text-ubiq-accent hover:text-white text-sm font-medium">
+                  Create Project
+                </button>
                 <span className="text-slate-600">|</span>
-                <button onClick={() => setIsAiModalOpen(true)} className="text-purple-400 hover:text-white text-sm font-medium flex items-center gap-1"><SparklesIcon className="w-4 h-4"/> Generate with AI</button>
+                <button onClick={() => setIsAiModalOpen(true)} className="text-purple-400 hover:text-white text-sm font-medium flex items-center gap-1">
+                  <SparklesIcon className="w-4 h-4" /> Generate with AI
+                </button>
               </div>
             </div>
+
           ) : (
+            /* Project grid */
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {projects.map((project) => (
                 <Link
@@ -263,14 +347,11 @@ export default function DashboardPage() {
 
                   <h3 className="text-white font-medium mb-1 truncate">{project.name}</h3>
                   <p className="text-slate-500 text-xs mb-4 line-clamp-2 h-8">
-                    {project.description || "No description provided."}
+                    {project.description || 'No description provided.'}
                   </p>
                   <span className="text-[10px] text-slate-500 mt-1">
                     Created: {new Date(project.created_at).toLocaleString('en-US', {
-                      month: 'short',
-                      day: 'numeric',
-                      hour: '2-digit',
-                      minute: '2-digit'
+                      month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
                     })}
                   </span>
 
@@ -293,7 +374,7 @@ export default function DashboardPage() {
           )}
         </div>
 
-        {/* --- MODALS --- */}
+        {/* ── Modals ─────────────────────────────────────────────────────── */}
         <CreateProjectDialog
           isOpen={isCreateDialogOpen}
           onClose={() => setIsCreateDialogOpen(false)}
