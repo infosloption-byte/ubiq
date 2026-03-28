@@ -24,8 +24,9 @@ class ProjectController extends Controller
         $path = storage_path("app/workspaces/{$project->user_id}/{$project->id}");
         if (!FileSystem::exists($path)) {
             // Ensure recursive creation with correct permissions
-            FileSystem::makeDirectory($path, 0755, true);
+            FileSystem::makeDirectory($path, 0777, true);
         }
+        chmod($path, 0777);
         return $path;
     }
 
@@ -602,6 +603,9 @@ class ProjectController extends Controller
 
         // RESET LOGS
         file_put_contents($workspacePath . '/startup.log', "[Ubiq] Initializing Container...\n");
+        chmod($workspacePath . '/startup.log', 0777);
+        chmod($workspacePath . '/startup.sh', 0777);
+        chmod($workspacePath, 0777);
 
         // 3. Container Config
         $containerName = "ubiq_project_{$project->id}";
@@ -730,218 +734,181 @@ class ProjectController extends Controller
 
     private function generateStartupScript($runtime, $framework)
     {
-        $header = "#!/bin/sh\n\n# --- UBIQ AUTO-GENERATED STARTUP SCRIPT ---\necho \"[Ubiq] Booting {$framework}...\"\n\n# Redirect temp file writes to /tmp to avoid volume permission issues\nexport TMPDIR=/tmp\nmkdir -p /tmp/.cache\n";
-        
-        // --- FIX: Install System Dependencies (Git/Zip) for Alpine ---
-        $installDeps = "";
-        if ($runtime === 'node') $installDeps = "apk add --no-cache git";
-        if ($runtime === 'php') $installDeps = "apk add --no-cache git zip unzip libzip-dev sqlite-dev nodejs npm";
-        if ($runtime === 'python') $installDeps = "apk add --no-cache git build-base libffi-dev";
+        $header = "#!/bin/sh\n"
+            . "\n"
+            . "# --- UBIQ AUTO-GENERATED STARTUP SCRIPT ---\n"
+            . "echo \"[Ubiq] Booting {$framework}...\"\n"
+            . "\n"
+            . "# Redirect temp file writes to /tmp to avoid volume permission issues\n"
+            . "export TMPDIR=/tmp\n"
+            . "mkdir -p /tmp/.cache\n";
 
-        $header .= $installDeps . "\n\n";
-        
+        if ($runtime === 'node') $header .= "apk add --no-cache git\n\n";
+        elseif ($runtime === 'php') $header .= "apk add --no-cache git zip unzip libzip-dev sqlite-dev nodejs npm\n\n";
+        elseif ($runtime === 'python') $header .= "apk add --no-cache git build-base libffi-dev\n\n";
+        else $header .= "\n";
+
         switch ($framework) {
-            case 'laravel':
-                return $header . <<<EOT
-                # 0. AUTO-HEAL: Fix broken artisan file
-                echo "[Ubiq] Verifying artisan script..."
-                cat <<'PHP_SCRIPT' > artisan
-                #!/usr/bin/env php
-                <?php
-                define('LARAVEL_START', microtime(true));
-
-                if (file_exists(__DIR__.'/vendor/autoload.php')) {
-                    require __DIR__.'/vendor/autoload.php';
-                } else {
-                    fwrite(STDERR, "Vendor autoload not found. Please run composer install.\\n");
-                    exit(1);
-                }
-
-                if (!file_exists(__DIR__.'/bootstrap/app.php')) {
-                    fwrite(STDERR, "Bootstrap file not found at bootstrap/app.php\\n");
-                    exit(1);
-                }
-
-                \$app = require_once __DIR__.'/bootstrap/app.php';
-
-                \$kernel = \$app->make(Illuminate\Contracts\Console\Kernel::class);
-
-                \$status = \$kernel->handle(
-                    \$input = new Symfony\Component\Console\Input\ArgvInput,
-                    new Symfony\Component\Console\Output\ConsoleOutput
-                );
-
-                \$kernel->terminate(\$input, \$status);
-
-                exit(\$status);
-                PHP_SCRIPT
-
-                # 1. PRE-INSTALL: Create Dirs & Fix Permissions
-                echo "[Ubiq] Configuring directories & permissions..."
-                mkdir -p storage/framework/sessions storage/framework/views storage/framework/cache storage/logs bootstrap/cache
-                chmod -R 777 storage bootstrap/cache 2>/dev/null || true
-                chmod +x artisan
-
-                # 2. VERSION ENFORCER: Upgrade dependencies for Laravel 11
-                if grep -q "Application::configure" bootstrap/app.php; then
-                    echo "[Ubiq] Detected Laravel 11 syntax. Upgrading dependencies..."
-                    sed -i 's/"laravel\/framework": *"[^"]*"/"laravel\/framework": "^11.0"/' composer.json
-                    sed -i 's/"laravel\/sanctum": *"[^"]*"/"laravel\/sanctum": "^4.0"/' composer.json
-                    sed -i 's/"laravel\/tinker": *"[^"]*"/"laravel\/tinker": "^2.9"/' composer.json
-                    sed -i 's/"nunomaduro\/collision": *"[^"]*"/"nunomaduro\/collision": "^8.1"/' composer.json
-                    sed -i 's/"spatie\/laravel-ignition": *"[^"]*"/"spatie\/laravel-ignition": "^2.4"/' composer.json
-                    sed -i 's/"phpunit\/phpunit": *"[^"]*"/"phpunit\/phpunit": "^10.5"/' composer.json
-                fi
-
-                # 3. Install PHP Dependencies
-                echo "[Ubiq] Installing Composer dependencies..."
-                composer config -g platform-check false
-                composer config --no-plugins allow-plugins.kylekatarnls/update-helper true
-                composer install --ignore-platform-reqs --no-interaction
-
-                # 4. FRONTEND BUILD
-                if [ -f package.json ]; then
-                    echo "[Ubiq] Detected package.json. Installing Frontend Dependencies..."
-                    npm install
-                    
-                    # AUTO-HEAL: Create missing bootstrap.js
-                    # FIX: Used printf instead of HereDoc to avoid indentation/syntax errors
-                    if [ -f resources/js/app.js ] && [ ! -f resources/js/bootstrap.js ]; then
-                        echo "[Ubiq] Missing resources/js/bootstrap.js detected. Creating default..."
-                        mkdir -p resources/js
-                        printf "import axios from 'axios';\\nwindow.axios = axios;\\nwindow.axios.defaults.headers.common['X-Requested-With'] = 'XMLHttpRequest';\\n" > resources/js/bootstrap.js
-                    fi
-
-                    echo "[Ubiq] Building Frontend Assets..."
-                    npm run build
-                fi
-
-                # 5. Environment Setup (Fixes Unsupported Cipher Error)
-                if [ ! -f .env ]; then
-                    echo "[Ubiq] Creating .env file..."
-                    cp .env.example .env
-                fi
-                
-                # Force Key Generation if missing or empty
-                if ! grep -q "^APP_KEY=base64:" .env; then
-                    echo "[Ubiq] Generating missing App Key..."
-                    php artisan key:generate --force
-                fi
-
-                # Ensure DB exists
-                if [ ! -f database/database.sqlite ]; then
-                    touch database/database.sqlite
-                fi
-
-                # 6. Migrations
-                echo "[Ubiq] Running migrations..."
-                php artisan migrate --force
-
-                # 7. Serve
-                echo "[Ubiq] Starting Server..."
-                php artisan serve --host=0.0.0.0 --port=8000
-                EOT;
 
             case 'react':
             case 'vue':
-                // --- VITE AUTO-FIX ---
-                return $header . <<<EOT
-                echo "[Ubiq] Installing NPM packages..."
-                npm install
-
-                # PERMISSION FIX: Vite writes a temp .mjs file next to vite.config.js
-                # during startup. The mounted /app volume is owned by the host user (uid 1000)
-                # which differs from the container process uid, causing EACCES errors.
-                # Setting TMPDIR=/tmp redirects all Vite temp file writes to /tmp which
-                # is always writable inside the container regardless of volume permissions.
-                export TMPDIR=/tmp
-                export VITE_CACHE_DIR=/tmp/.vite-cache
-
-                # Ensure /tmp is writable (it always should be, but be explicit)
-                mkdir -p /tmp/.vite-cache
-
-                # CRITICAL FIX: Vite requires index.html in the ROOT.
-                if [ -f "public/index.html" ] && [ ! -f "index.html" ]; then
-                    echo "[Ubiq] Detected index.html in public/. Moving to root for Vite compatibility..."
-                    mv public/index.html .
-                fi
-
-                echo "[Ubiq] Starting Development Server..."
-                if [ -f "vite.config.js" ] || [ -f "vite.config.ts" ]; then
-                    echo "[Ubiq] Detected Vite config. Launching via npx..."
-                    npx vite --host 0.0.0.0 --port 5173
-                else
-                    npm run dev -- --host 0.0.0.0 --port 5173
-                fi
-                EOT;
+                return $header
+                    . "echo \"[Ubiq] Installing NPM packages...\"\n"
+                    . "npm install\n"
+                    . "\n"
+                    . "export TMPDIR=/tmp\n"
+                    . "export VITE_CACHE_DIR=/tmp/.vite-cache\n"
+                    . "mkdir -p /tmp/.vite-cache\n"
+                    . "\n"
+                    . "if [ -f \"public/index.html\" ] && [ ! -f \"index.html\" ]; then\n"
+                    . "    echo \"[Ubiq] Detected index.html in public/. Moving to root for Vite compatibility...\"\n"
+                    . "    mv public/index.html .\n"
+                    . "fi\n"
+                    . "\n"
+                    . "echo \"[Ubiq] Starting Development Server...\"\n"
+                    . "if [ -f \"vite.config.js\" ] || [ -f \"vite.config.ts\" ]; then\n"
+                    . "    echo \"[Ubiq] Detected Vite config. Launching via npx...\"\n"
+                    . "    npx vite --host 0.0.0.0 --port 5173\n"
+                    . "else\n"
+                    . "    npm run dev -- --host 0.0.0.0 --port 5173\n"
+                    . "fi\n";
 
             case 'nextjs':
-                return $header . <<<EOT
-                echo "[Ubiq] Installing NPM packages..."
-                npm install
+                return $header
+                    . "echo \"[Ubiq] Installing NPM packages...\"\n"
+                    . "npm install\n"
+                    . "\n"
+                    . "echo \"[Ubiq] Starting Next.js...\"\n"
+                    . "npx next dev -p 5173 -H 0.0.0.0\n";
 
-                echo "[Ubiq] Starting Next.js..."
-                npx next dev -p 5173 -H 0.0.0.0
-                EOT;
+            case 'node':
+                return $header
+                    . "echo \"[Ubiq] Installing dependencies...\"\n"
+                    . "npm install\n"
+                    . "\n"
+                    . "echo \"[Ubiq] Starting Node...\"\n"
+                    . "if grep -q '\"start\":' package.json; then\n"
+                    . "    npm start\n"
+                    . "elif [ -f index.js ]; then\n"
+                    . "    node index.js\n"
+                    . "elif [ -f app.js ]; then\n"
+                    . "    node app.js\n"
+                    . "else\n"
+                    . "    echo \"Error: Could not determine entry point.\"\n"
+                    . "    exit 1\n"
+                    . "fi\n";
 
             case 'django':
-                return $header . <<<EOT
-                echo "[Ubiq] Installing Python requirements..."
-                if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+                return $header
+                    . "echo \"[Ubiq] Installing Python requirements...\"\n"
+                    . "if [ -f requirements.txt ]; then pip install -r requirements.txt; fi\n"
+                    . "\n"
+                    . "echo \"[Ubiq] Migrating Database...\"\n"
+                    . "python manage.py migrate\n"
+                    . "\n"
+                    . "echo \"[Ubiq] Starting Django Server...\"\n"
+                    . "python manage.py runserver 0.0.0.0:8000\n";
 
-                echo "[Ubiq] Migrating Database..."
-                python manage.py migrate
-
-                echo "[Ubiq] Starting Django Server..."
-                python manage.py runserver 0.0.0.0:8000
-                EOT;
+            case 'flask':
+                return $header
+                    . "echo \"[Ubiq] Installing Python requirements...\"\n"
+                    . "if [ -f requirements.txt ]; then pip install -r requirements.txt; fi\n"
+                    . "\n"
+                    . "echo \"[Ubiq] Starting Flask Server...\"\n"
+                    . "if [ -f app.py ]; then\n"
+                    . "    flask run --host=0.0.0.0 --port=8000 || python app.py\n"
+                    . "elif [ -f main.py ]; then\n"
+                    . "    python main.py\n"
+                    . "else\n"
+                    . "    echo \"Error: No entry point found.\"\n"
+                    . "    exit 1\n"
+                    . "fi\n";
 
             case 'spring':
-                return $header . <<<EOT
-                echo "[Ubiq] Preparing Java Environment..."
-                chmod +x mvnw 2>/dev/null || true
-                chmod +x gradlew 2>/dev/null || true
+                return $header
+                    . "echo \"[Ubiq] Preparing Java Environment...\"\n"
+                    . "chmod +x mvnw 2>/dev/null || true\n"
+                    . "chmod +x gradlew 2>/dev/null || true\n"
+                    . "\n"
+                    . "if [ -f mvnw ]; then\n"
+                    . "    echo \"[Ubiq] Running Maven...\"\n"
+                    . "    ./mvnw spring-boot:run -Dspring-boot.run.arguments=--server.port=8080\n"
+                    . "elif [ -f gradlew ]; then\n"
+                    . "    echo \"[Ubiq] Running Gradle...\"\n"
+                    . "    ./gradlew bootRun --args='--server.port=8080'\n"
+                    . "else\n"
+                    . "    echo \"Error: No build wrapper found.\"\n"
+                    . "    exit 1\n"
+                    . "fi\n";
 
-                if [ -f mvnw ]; then
-                    echo "[Ubiq] Running Maven..."
-                    ./mvnw spring-boot:run -Dspring-boot.run.arguments=--server.port=8080
-                elif [ -f gradlew ]; then
-                    echo "[Ubiq] Running Gradle..."
-                    ./gradlew bootRun --args='--server.port=8080'
-                else
-                    echo "Error: No build wrapper found."
-                    exit 1
-                fi
-                EOT;
+            case 'laravel':
+                return $header
+                    . "echo \"[Ubiq] Verifying artisan script...\"\n"
+                    . "cat > artisan << 'ARTISAN_SCRIPT'\n"
+                    . "#!/usr/bin/env php\n"
+                    . "<?php\n"
+                    . "define('LARAVEL_START', microtime(true));\n"
+                    . "if (file_exists(__DIR__.'/vendor/autoload.php')) {\n"
+                    . "    require __DIR__.'/vendor/autoload.php';\n"
+                    . "} else {\n"
+                    . "    fwrite(STDERR, \"Vendor autoload not found.\\n\");\n"
+                    . "    exit(1);\n"
+                    . "}\n"
+                    . "\\$app = require_once __DIR__.'/bootstrap/app.php';\n"
+                    . "\\$kernel = \\$app->make(Illuminate\\Contracts\\Console\\Kernel::class);\n"
+                    . "\\$status = \\$kernel->handle(\\$input = new Symfony\\Component\\Console\\Input\\ArgvInput, new Symfony\\Component\\Console\\Output\\ConsoleOutput);\n"
+                    . "\\$kernel->terminate(\\$input, \\$status);\n"
+                    . "exit(\\$status);\n"
+                    . "ARTISAN_SCRIPT\n"
+                    . "\n"
+                    . "echo \"[Ubiq] Configuring directories & permissions...\"\n"
+                    . "mkdir -p storage/framework/sessions storage/framework/views storage/framework/cache storage/logs bootstrap/cache\n"
+                    . "chmod -R 777 storage bootstrap/cache 2>/dev/null || true\n"
+                    . "chmod +x artisan\n"
+                    . "\n"
+                    . "echo \"[Ubiq] Installing Composer dependencies...\"\n"
+                    . "composer config -g platform-check false\n"
+                    . "composer install --ignore-platform-reqs --no-interaction\n"
+                    . "\n"
+                    . "if [ -f package.json ]; then\n"
+                    . "    echo \"[Ubiq] Installing Frontend Dependencies...\"\n"
+                    . "    npm install\n"
+                    . "    if [ -f resources/js/app.js ] && [ ! -f resources/js/bootstrap.js ]; then\n"
+                    . "        echo \"[Ubiq] Creating default bootstrap.js...\"\n"
+                    . "        printf \"import axios from 'axios';\\nwindow.axios = axios;\\nwindow.axios.defaults.headers.common['X-Requested-With'] = 'XMLHttpRequest';\\n\" > resources/js/bootstrap.js\n"
+                    . "    fi\n"
+                    . "    echo \"[Ubiq] Building Frontend Assets...\"\n"
+                    . "    npm run build\n"
+                    . "fi\n"
+                    . "\n"
+                    . "if [ ! -f .env ]; then\n"
+                    . "    echo \"[Ubiq] Creating .env file...\"\n"
+                    . "    cp .env.example .env\n"
+                    . "fi\n"
+                    . "\n"
+                    . "if ! grep -q \"^APP_KEY=base64:\" .env; then\n"
+                    . "    echo \"[Ubiq] Generating missing App Key...\"\n"
+                    . "    php artisan key:generate --force\n"
+                    . "fi\n"
+                    . "\n"
+                    . "if [ ! -f database/database.sqlite ]; then\n"
+                    . "    touch database/database.sqlite\n"
+                    . "fi\n"
+                    . "\n"
+                    . "echo \"[Ubiq] Running migrations...\"\n"
+                    . "php artisan migrate --force\n"
+                    . "\n"
+                    . "echo \"[Ubiq] Starting Server...\"\n"
+                    . "php artisan serve --host=0.0.0.0 --port=8000\n";
 
-            case 'node': 
-                return $header . <<<EOT
-                echo "[Ubiq] Installing dependencies..."
-                npm install
-
-                echo "[Ubiq] Starting Node..."
-                if grep -q '"start":' package.json; then
-                    npm start
-                elif [ -f index.js ]; then
-                    node index.js
-                elif [ -f app.js ]; then
-                    node app.js
-                else
-                    echo "Error: Could not determine entry point."
-                    exit 1
-                fi
-                EOT;
-
-            default: 
-                // Static: If index.html is in public, Nginx needs to know, or we move it.
-                return $header . <<<EOT
-                if [ -f "public/index.html" ] && [ ! -f "index.html" ]; then
-                    echo "[Ubiq] Promoting public/index.html to root..."
-                    mv public/index.html .
-                fi
-                echo '[Ubiq] Static site ready.'
-                tail -f /dev/null
-                EOT;
+            default:
+                return $header
+                    . "if [ -f \"public/index.html\" ] && [ ! -f \"index.html\" ]; then\n"
+                    . "    echo \"[Ubiq] Promoting public/index.html to root...\"\n"
+                    . "    mv public/index.html .\n"
+                    . "fi\n"
+                    . "echo '[Ubiq] Static site ready.'\n"
+                    . "tail -f /dev/null\n";
         }
     }
 }
