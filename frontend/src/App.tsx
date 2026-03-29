@@ -9,7 +9,6 @@ import LoginPage from './pages/LoginPage';
 import RegisterPage from './pages/RegisterPage';
 
 const DashboardPage    = lazy(() => import('./pages/DashboardPage'));
-const EditorPage       = lazy(() => import('./pages/EditorPage'));
 const ChatPage         = lazy(() => import('./pages/ChatPage'));
 const SettingsPage     = lazy(() => import('./pages/SettingsPage'));
 const ProjectsPage     = lazy(() => import('./pages/ProjectsPage'));
@@ -92,10 +91,6 @@ function App() {
                     <Route
                         path="/editor/:id"
                         element={token ? <SubscriptionGuard><ProjectEditorPage /></SubscriptionGuard> : <Navigate to="/login" />}
-                    />
-                    <Route
-                        path="/legacy-editor"
-                        element={token ? <SubscriptionGuard><EditorPage /></SubscriptionGuard> : <Navigate to="/login" />}
                     />
 
                     <Route path="*" element={<Navigate to="/" />} />
