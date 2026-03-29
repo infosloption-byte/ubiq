@@ -11,7 +11,7 @@ import {
   ClipboardIcon, CheckIcon, ArrowPathIcon, PhotoIcon, 
   DocumentTextIcon, ArrowDownOnSquareIcon, XMarkIcon,
   CommandLineIcon, WrenchScrewdriverIcon, AcademicCapIcon, RocketLaunchIcon,
-  Cog6ToothIcon // [Modified] Added Icon
+  Cog6ToothIcon
 } from '@heroicons/react/24/outline';
 
 interface Message {
@@ -37,7 +37,7 @@ interface ChatInterfaceProps {
   onApplyCode?: (code: string) => void;
   autoPrompt?: string | null;
   onAutoPromptClear?: () => void;
-  aiMode?: string; // Cloud vs Local Mode
+  aiMode?: string;
 }
 
 export default function ChatInterface({ 
@@ -60,7 +60,6 @@ export default function ChatInterface({
   
   const [selectedModel, setSelectedModel] = useState<string>('');
 
-  // [Modified] Settings State for Remote Ollama — shared key with AiGeneratorModal
   const [showSettings, setShowSettings] = useState(false);
   const [localUrl, setLocalUrl] = useState(localStorage.getItem('ubiq_local_url') || 'http://localhost:11434');
   const [remoteUrl, setRemoteUrl] = useState(localStorage.getItem('ubiq_ollama_url') || '');
@@ -70,7 +69,6 @@ export default function ChatInterface({
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => { loadMessages(); }, [sessionId]);
-
   useEffect(() => { scrollToBottom(); }, [messages, isLoading, pendingAttachments]);
 
   const loadMessages = async () => {
@@ -98,7 +96,6 @@ export default function ChatInterface({
     }
   };
 
-  // [Modified] Save the custom URL
   const handleSaveSettings = () => {
       if (aiMode === 'remote') localStorage.setItem('ubiq_ollama_url', remoteUrl);
       else localStorage.setItem('ubiq_local_url', localUrl);
@@ -108,11 +105,9 @@ export default function ChatInterface({
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
       if (!file) return;
-
       setIsUploading(true);
       const formData = new FormData();
       formData.append('file', file);
-
       try {
           const res = await chatAPI.uploadAttachment(sessionId, formData);
           const { url, name, type } = res.data;
@@ -133,29 +128,19 @@ export default function ChatInterface({
 
   const handleSubmit = (e?: React.FormEvent) => {
     e?.preventDefault();
-    
     let finalContent = input.trim();
-    
     if (pendingAttachments.length > 0) {
         const attachmentMarkdown = pendingAttachments.map(att => 
             att.type.startsWith('image/') 
                 ? `![${att.name}](${att.url})` 
                 : `[📎 ${att.name}](${att.url})`
         ).join('\n\n');
-        
-        if (finalContent) {
-            finalContent += `\n\n${attachmentMarkdown}`;
-        } else {
-            finalContent = attachmentMarkdown;
-        }
+        finalContent = finalContent ? `${finalContent}\n\n${attachmentMarkdown}` : attachmentMarkdown;
     }
-
     if (!finalContent) return;
-
     setInput('');
     setPendingAttachments([]); 
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
-    
     processMessage(finalContent, true);
   };
 
@@ -170,8 +155,15 @@ export default function ChatInterface({
       if (isNewUserMessage) {
         const tempUserMsg: Message = { role: 'user', content, created_at: new Date().toISOString() };
         setMessages(prev => [...prev, tempUserMsg]);
-        if (aiMode === 'cloud') {
-            await chatAPI.sendMessage(sessionId, { content }); 
+
+        // FIX #6: Persist user messages for ALL AI modes, not just cloud.
+        // Previously local/remote chats were ephemeral — refreshing lost the history.
+        // The session ID always exists on the backend, so we can always persist.
+        try {
+            await chatAPI.sendMessage(sessionId, { content });
+        } catch (e) {
+            // Non-fatal — message still shows in UI even if DB write fails
+            console.warn('Failed to persist user message:', e);
         }
       }
 
@@ -194,13 +186,12 @@ export default function ChatInterface({
           contextMessages.unshift({ role: 'system', content: systemPrompt });
       }
 
-      // [Modified] Prepare Config based on AI mode
       const apiConfig: AiApiConfig = {};
       if (aiMode === 'local') {
           apiConfig.api_keys = { ollama_url: localStorage.getItem('ubiq_local_url') || 'http://localhost:11434' };
       } else if (aiMode === 'remote') {
-          const remoteUrl = localStorage.getItem('ubiq_ollama_url') || '';
-          if (!remoteUrl.trim()) {
+          const savedRemoteUrl = localStorage.getItem('ubiq_ollama_url') || '';
+          if (!savedRemoteUrl.trim()) {
               setMessages(prev => {
                   const msgs = [...prev];
                   const last = msgs[msgs.length - 1];
@@ -210,16 +201,10 @@ export default function ChatInterface({
               setIsLoading(false);
               return;
           }
-          apiConfig.api_keys = { ollama_url: remoteUrl.trim() };
+          apiConfig.api_keys = { ollama_url: savedRemoteUrl.trim() };
       }
 
-      const response = await aiService.chat(
-          content, 
-          contextMessages, 
-          aiMode, 
-          selectedModel,
-          apiConfig // [Modified] Pass config as 5th argument
-      );
+      const response = await aiService.chat(content, contextMessages, aiMode, selectedModel, apiConfig);
 
       setMessages(prev => {
           const newMsgs = [...prev];
@@ -228,12 +213,19 @@ export default function ChatInterface({
           return newMsgs;
       });
 
-      if (aiMode === 'cloud' && response.content) {
-           await chatAPI.sendMessage(sessionId, { content: response.content, role: 'assistant' });
-           if (messages.length <= 1) { 
+      // FIX #6: Persist assistant messages for ALL AI modes.
+      if (response.content) {
+          try {
+              await chatAPI.sendMessage(sessionId, { content: response.content, role: 'assistant' });
+          } catch (e) {
+              console.warn('Failed to persist assistant message:', e);
+          }
+
+          // Auto-title on first message (any mode)
+          if (messages.length <= 1) { 
               await generateTitle(sessionId, content); 
               if (onSessionUpdate) onSessionUpdate(); 
-           }
+          }
       }
 
     } catch (error: any) {
@@ -278,9 +270,7 @@ export default function ChatInterface({
       return "Good evening";
   };
 
-  const getUsername = () => {
-      return user?.username ? user.username.split(' ')[0] : 'Developer';
-  };
+  const getUsername = () => user?.username ? user.username.split(' ')[0] : 'Developer';
 
   const suggestions = [
       { icon: RocketLaunchIcon, label: "Explain Code", prompt: "Explain the code in the current file step-by-step." },
@@ -303,7 +293,6 @@ export default function ChatInterface({
   const CodeBlockHeader = ({ language, code }: { language: string, code: string }) => {
     const [copied, setCopied] = useState(false);
     const handleCopy = () => { navigator.clipboard.writeText(code); setCopied(true); setTimeout(() => setCopied(false), 2000); };
-
     return (
       <div className="flex items-center justify-between px-3 py-1.5 bg-[#1e1e1e] border-b border-white/5 font-sans">
          <span className="text-[10px] text-slate-500 uppercase font-medium">{language || 'text'}</span>
@@ -341,7 +330,6 @@ export default function ChatInterface({
                           {(aiMode === 'local' || aiMode === 'remote') && <span className="block text-green-400 text-xs mt-2 font-mono">{aiMode === 'remote' ? 'Running on Remote Ollama' : 'Running on Local Ollama'}</span>}
                       </p>
                   </div>
-
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3 w-full max-w-lg">
                       {suggestions.map((item, idx) => (
                           <button 
@@ -363,7 +351,7 @@ export default function ChatInterface({
                   <div className={`w-7 h-7 rounded-full flex-shrink-0 flex items-center justify-center text-[10px] ring-1 ring-white/10 shadow-lg mt-1 ${msg.role === 'user' ? 'bg-ubiq-800 text-slate-300' : 'bg-gradient-to-tr from-indigo-600 to-purple-600 text-white'}`}>
                     {msg.role === 'user' ? <UserIcon className="w-3.5 h-3.5" /> : <SparklesIcon className="w-3.5 h-3.5" />}
                   </div>
-                  <div className={`flex flex-col max-w-[90%] min-w-0`}>
+                  <div className="flex flex-col max-w-[90%] min-w-0">
                       <div className={`rounded-xl px-4 py-3 text-sm leading-relaxed shadow-sm overflow-hidden ${msg.role === 'user' ? 'bg-ubiq-800 text-slate-200 border border-white/5 rounded-tr-none' : 'bg-transparent text-slate-300 px-0 py-0 shadow-none'}`}>
                         <ReactMarkdown components={{
                             code({node, className, children, ...props}) {
@@ -415,7 +403,6 @@ export default function ChatInterface({
              </div>
           )}
 
-          {/* Settings Popover — mode-aware label/value/placeholder */}
           {showSettings && aiMode !== 'cloud' && (
               <div className="absolute -top-16 left-0 right-0 bg-ubiq-900/95 backdrop-blur-md border border-white/10 p-3 rounded-lg z-30 shadow-xl animate-fade-in-up flex items-center gap-2">
                   <span className="text-[10px] uppercase font-bold text-slate-400 whitespace-nowrap">
@@ -448,7 +435,6 @@ export default function ChatInterface({
                                     <span className="text-[8px] text-slate-500 truncate w-full text-center">{att.name.split('.').pop()}</span>
                                 </div>
                             )}
-                            
                             <button 
                                 onClick={() => removeAttachment(idx)}
                                 className="absolute -top-1.5 -right-1.5 bg-red-500 text-white rounded-full p-0.5 shadow-md hover:bg-red-600 transition-colors transform scale-0 group-hover:scale-100"
@@ -462,24 +448,12 @@ export default function ChatInterface({
 
             <textarea ref={textareaRef} rows={1} value={input} onChange={handleInput} onKeyDown={handleKeyDown} placeholder={activeContext?.currentFile ? `Ask about ${activeContext.currentFile.name}...` : "Ask AI..."} className="w-full bg-transparent text-slate-200 text-sm px-3 py-2 focus:outline-none resize-none max-h-[150px] placeholder:text-slate-500 custom-scrollbar" />
             
-            <input 
-                type="file" 
-                ref={fileInputRef} 
-                className="hidden" 
-                onChange={handleFileUpload}
-                accept="image/*,.pdf,.txt" 
-            />
+            <input type="file" ref={fileInputRef} className="hidden" onChange={handleFileUpload} accept="image/*,.pdf,.txt" />
 
             <div className="flex items-center justify-between px-1 pb-0.5">
                 <div className="flex items-center gap-1 md:gap-2">
-                    {/* [Modified] Model Selector + Settings Icon */}
                     <div className="scale-90 origin-left flex items-center gap-1">
-                        <ModelSelector 
-                            aiMode={aiMode} 
-                            selectedModel={selectedModel} 
-                            onSelectModel={setSelectedModel} 
-                        />
-                        {/* Show settings gear for local and remote modes */}
+                        <ModelSelector aiMode={aiMode} selectedModel={selectedModel} onSelectModel={setSelectedModel} />
                         {(aiMode === 'local' || aiMode === 'remote') && (
                             <button 
                                 onClick={() => setShowSettings(!showSettings)}
@@ -490,13 +464,10 @@ export default function ChatInterface({
                             </button>
                         )}
                     </div>
-                    
                     <button 
                         onClick={() => fileInputRef.current?.click()} 
                         disabled={isUploading || isLoading}
-                        className={`p-2 rounded-lg transition-colors hidden md:block ${
-                            isUploading ? 'text-ubiq-accent animate-pulse cursor-wait' : 'text-slate-500 hover:text-slate-300 hover:bg-white/5'
-                        }`}
+                        className={`p-2 rounded-lg transition-colors hidden md:block ${isUploading ? 'text-ubiq-accent animate-pulse cursor-wait' : 'text-slate-500 hover:text-slate-300 hover:bg-white/5'}`}
                         title="Attach Image or File"
                     >
                         <PhotoIcon className="w-5 h-5" />

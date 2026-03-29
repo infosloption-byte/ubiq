@@ -19,17 +19,13 @@ class ChatController extends Controller
         $query = ChatSession::where('user_id', $user->id);
 
         // --- FILTERING LOGIC ---
-        // If frontend sends ?project_id=123, return only those chats.
-        // If frontend sends NOTHING, return only Global chats (where project_id is NULL).
         if ($request->has('project_id')) {
             $query->where('project_id', $request->input('project_id'));
         } else {
             // GLOBAL CHATS (Dashboard)
             $query->whereNull('project_id');
             
-            // --- FIX: Filter out "Project Generation" logs ---
-            // These are the scaffolding logs created by the AI Architect.
-            // They should not appear in your normal "New Chat" list.
+            // Filter out "Project Generation" logs
             $query->where('title', '!=', 'Project Generation');
         }
 
@@ -53,7 +49,7 @@ class ChatController extends Controller
 
         $session = ChatSession::create([
             'user_id' => $request->user()->id,
-            'project_id' => $request->project_id, // Can be null
+            'project_id' => $request->project_id,
             'title' => $request->title ?? 'New Chat',
         ]);
 
@@ -112,9 +108,9 @@ class ChatController extends Controller
         }
 
         $message = $session->messages()->create([
-            'role' => $request->role ?? 'user',
-            'content' => $request->content,
-            'tokens' => 0 
+            'role'        => $request->role ?? 'user',
+            'content'     => $request->content,
+            'tokens_used' => 0, // FIX #1: was 'tokens' => 0 — column is tokens_used
         ]);
 
         // Update session timestamp
@@ -168,18 +164,17 @@ class ChatController extends Controller
         }
 
         $request->validate([
-            'file' => 'required|file|max:10240|mimes:jpeg,png,jpg,gif,webp,pdf,txt' // 10MB Limit
+            'file' => 'required|file|max:10240|mimes:jpeg,png,jpg,gif,webp,pdf,txt'
         ]);
 
         if ($request->hasFile('file')) {
             $file = $request->file('file');
-            $path = $file->store('chat_attachments', 'public'); // Ensure 'public' disk is configured
+            $path = $file->store('chat_attachments', 'public');
             
-            // Generate full URL
             $url = asset('storage/' . $path);
 
             return response()->json([
-                'url' => $url,
+                'url'  => $url,
                 'name' => $file->getClientOriginalName(),
                 'type' => $file->getClientMimeType()
             ]);

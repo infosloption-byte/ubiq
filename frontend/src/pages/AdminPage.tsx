@@ -187,7 +187,7 @@ export default function AdminPage() {
                         <p className="text-slate-500 text-xs font-medium uppercase">Subscription Split</p>
                         <div className="flex gap-3 mt-2 text-sm">
                           <span className="text-white"><span className="text-slate-500">Free:</span> {stats.tiers?.free || 0}</span>
-                          <span className="text-indigo-400 font-bold"><span className="text-slate-500 font-normal">Pro:</span> {stats.tiers?.premium || 0}</span>
+                          <span className="text-indigo-400 font-bold"><span className="text-slate-500 font-normal">Pro:</span> {stats.tiers?.pro || 0}</span>
                         </div>
                       </div>
                       <div className="p-3 rounded-full bg-indigo-500/10 text-indigo-400">
@@ -280,7 +280,7 @@ export default function AdminPage() {
                             </div>
                           </td>
                           <td className="p-4">
-                            <span className={`px-2 py-1 rounded text-xs font-medium ${u.subscription_tier === 'premium' ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30' : 'bg-slate-700/30 text-slate-400'}`}>
+                            <span className={`px-2 py-1 rounded text-xs font-medium ${u.subscription_tier === 'pro' ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30' : 'bg-slate-700/30 text-slate-400'}`}>
                               {(u.subscription_tier || 'free').toUpperCase()}
                             </span>
                           </td>

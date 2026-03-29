@@ -10,7 +10,6 @@ const POLL_INTERVAL_MS = 3000;
 const POLL_TIMEOUT_MS  = 120000;
 const WEBHOOK_DELAY_MS = 4000;
 
-// ✅ All statuses that mean "user has paid / is on trial" = polling success
 const ACTIVE_STATUSES = ['active', 'past_due', 'trialing'];
 
 export default function PricingCard() {
@@ -20,9 +19,9 @@ export default function PricingCard() {
     const navigate = useNavigate();
     const { user, setUser } = useAuthStore();
 
-    const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
-    const timeoutRef = useRef<ReturnType<typeof setTimeout>  | null>(null);
-    const didSucceed = useRef(false);
+    const pollingRef  = useRef<ReturnType<typeof setInterval> | null>(null);
+    const timeoutRef  = useRef<ReturnType<typeof setTimeout>  | null>(null);
+    const didSucceed  = useRef(false);
 
     useEffect(() => { return () => stopPolling(); }, []);
 
@@ -33,15 +32,12 @@ export default function PricingCard() {
         timeoutRef.current = null;
     };
 
-    // ── Fetch latest user, return true if now subscribed ─────────────────────
     const loadUserData = useCallback(async (): Promise<boolean> => {
         try {
             const response = await authAPI.me();
             const userData = response.data?.user || response.data;
             if (userData) {
                 setUser(userData);
-                console.log("✅ [PricingCard] Synced:", userData.email, "| status:", userData.subscription_status, "| tier:", userData.subscription_tier);
-                // ✅ FIX: succeed on trialing too, not just active/past_due
                 return ACTIVE_STATUSES.includes(userData.subscription_status) && userData.subscription_tier === 'pro';
             }
         } catch (err) {
@@ -54,17 +50,14 @@ export default function PricingCard() {
         loadUserData().finally(() => setInitializing(false));
     }, [loadUserData]);
 
-    // ── Polling loop ──────────────────────────────────────────────────────────
     const startPollingForActivation = useCallback(async () => {
         if (didSucceed.current) return;
         setLoading(true);
         setPollStatus("Waiting for payment confirmation...");
-        console.log(`💰 [Poll] Starting — every ${POLL_INTERVAL_MS / 1000}s for up to ${POLL_TIMEOUT_MS / 1000}s`);
 
         await new Promise(r => setTimeout(r, WEBHOOK_DELAY_MS));
 
         pollingRef.current = setInterval(async () => {
-            console.log("🔄 [Poll] Checking...");
             setPollStatus("Verifying subscription...");
 
             const isActive = await loadUserData();
@@ -74,7 +67,6 @@ export default function PricingCard() {
                 stopPolling();
                 setLoading(false);
                 setPollStatus(null);
-                console.log("🎉 [Poll] Subscription confirmed!");
                 alert("Pro Plan Activated Successfully! Your trial starts now.");
                 navigate("/dashboard");
             }
@@ -85,13 +77,12 @@ export default function PricingCard() {
                 stopPolling();
                 setLoading(false);
                 setPollStatus(null);
-                console.warn("⏰ [Poll] Timed out.");
                 alert("Payment received! Status is still syncing — please refresh in a moment.");
             }
         }, POLL_TIMEOUT_MS);
     }, [loadUserData]);
 
-    // ── Paddle init ───────────────────────────────────────────────────────────
+    // Keep ref current so Paddle event callback always calls latest version
     const startPollingRef = useRef(startPollingForActivation);
     useEffect(() => { startPollingRef.current = startPollingForActivation; }, [startPollingForActivation]);
 
@@ -102,19 +93,21 @@ export default function PricingCard() {
             token: import.meta.env.VITE_PADDLE_CLIENT_TOKEN,
             eventCallback: (event: any) => {
                 console.log("🔔 [Paddle Event]:", event?.name);
+
+                // FIX #3: Only start polling when checkout actually completes.
+                // Previously startPollingForActivation() was also called directly
+                // in handleSubscribe() — before the user had even seen the overlay —
+                // so we were burning 4s + poll intervals on every button click.
                 if (["checkout.completed", "checkout.finished", "transaction.completed"].includes(event?.name)) {
                     startPollingRef.current();
                 }
             }
         });
-        console.log("💳 [Paddle] SDK Initialized");
     }, []);
 
-    // ── Open checkout + start polling immediately ─────────────────────────────
     const handleSubscribe = () => {
         if (!user?.email || loading) return;
         didSucceed.current = false;
-        console.log("🚀 [Checkout] Opening for:", user.email);
 
         Paddle.Checkout.open({
             settings:   { displayMode: "overlay", theme: "dark", locale: "en" },
@@ -123,7 +116,8 @@ export default function PricingCard() {
             customData: { user_id: user.id.toString() },
         });
 
-        startPollingForActivation();
+        // FIX #3: Polling is now ONLY triggered from the eventCallback above.
+        // Removed the direct startPollingForActivation() call that was here.
     };
 
     if (initializing) {

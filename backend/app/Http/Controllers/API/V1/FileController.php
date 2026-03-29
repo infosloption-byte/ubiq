@@ -16,22 +16,6 @@ class FileController extends Controller
      * SECURITY: Resolve a user-supplied relative path to an absolute path
      * and verify it stays within the project's workspace directory.
      * Prevents path traversal attacks (e.g. ../../etc/passwd).
-     *
-     * FIX: The previous version used realpath() as the primary resolution strategy.
-     * realpath() only works on paths that already exist on disk — it returns false for
-     * non-existent files AND non-existent parent directories.
-     *
-     * The old fallback was:
-     *   $resolvedDir = realpath(dirname($candidate));   // returns false if dir missing
-     *   $resolved    = $resolvedDir . '/' . basename(); // false . '/' . 'file' = '/file'
-     *
-     * That made the path traversal check fail for any new folder whose parent didn't
-     * exist yet — i.e. every single folder creation and every subfolder file upload.
-     *
-     * The fix: manually normalize the relative path by processing each segment,
-     * collapsing any '..' and '.' entries, WITHOUT requiring anything to exist on disk.
-     * Then concatenate with the real base path (which always exists after mkdir).
-     * The final str_starts_with() guard still prevents any traversal attempt.
      */
     private function safePath(Project $project, string $relativePath): string
     {
@@ -45,9 +29,6 @@ class FileController extends Controller
 
         $realBase = realpath($base);
 
-        // Manually normalize the relative path — resolves '..' and '.' without
-        // requiring the path to exist on disk. This is the correct approach for a
-        // path safety function that must work with paths that don't exist yet.
         $parts      = explode('/', str_replace('\\', '/', $relativePath));
         $normalized = [];
 
@@ -56,8 +37,6 @@ class FileController extends Controller
                 continue;
             }
             if ($part === '..') {
-                // Pop the last segment. If already empty, '..' would escape the base —
-                // we simply ignore it (can't go above root of the workspace).
                 if (!empty($normalized)) {
                     array_pop($normalized);
                 }
@@ -68,7 +47,6 @@ class FileController extends Controller
 
         $fullPath = $realBase . DIRECTORY_SEPARATOR . implode(DIRECTORY_SEPARATOR, $normalized);
 
-        // Final guard: the assembled path must still be inside the workspace base.
         if (!str_starts_with($fullPath, $realBase . DIRECTORY_SEPARATOR) && $fullPath !== $realBase) {
             abort(403, 'Invalid file path.');
         }
@@ -76,10 +54,6 @@ class FileController extends Controller
         return $fullPath;
     }
 
-    /**
-     * Syncs file content to the physical workspace folder.
-     * All writes go through safePath() to prevent traversal.
-     */
     private function syncToDisk(Project $project, $relativePath, $content)
     {
         $fullPath  = $this->safePath($project, $relativePath);
@@ -167,7 +141,6 @@ class FileController extends Controller
         $path = $request->input('path');
         if (!$path) return response()->json(['error' => 'Path is required'], 422);
 
-        // Delete DB records
         $deleted = $project->files()
             ->where(function ($query) use ($path) {
                 $query->where('path', $path)
@@ -175,7 +148,6 @@ class FileController extends Controller
             })
             ->delete();
 
-        // Delete from disk
         try {
             $fullPath = $this->safePath($project, $path);
         } catch (\Symfony\Component\HttpKernel\Exception\HttpException $e) {
@@ -348,15 +320,64 @@ class FileController extends Controller
             ->header('X-Frame-Options', 'SAMEORIGIN');
     }
 
+    /**
+     * FIX #7: Replace N+1 firstOrCreate loop with a single batch query.
+     *
+     * Old approach: called firstOrCreate() inside a foreach over every file on disk.
+     * For a 100-file project, GET /projects/{id}/files fired 100 separate queries.
+     *
+     * New approach:
+     *   1. Load all existing DB records for this project in ONE query.
+     *   2. Build a lookup map keyed by path.
+     *   3. Scan disk, match against map — batch-insert only genuinely new paths.
+     *   4. Return the merged result set.
+     */
     private function scanDirectory($dir, $basePath, $project, &$results = [])
+    {
+        // ── Step 1: load all existing records once ───────────────────────────
+        $existingByPath = \App\Models\File::where('project_id', $project->id)
+            ->get()
+            ->keyBy('path');
+
+        // ── Step 2: walk the disk ────────────────────────────────────────────
+        $newRecords = [];
+        $this->walkDir($dir, $basePath, $project, $existingByPath, $results, $newRecords);
+
+        // ── Step 3: batch-insert new records (one query regardless of count) ─
+        if (!empty($newRecords)) {
+            $now = now()->toDateTimeString();
+            foreach ($newRecords as &$record) {
+                $record['created_at'] = $now;
+                $record['updated_at'] = $now;
+            }
+            \App\Models\File::insert($newRecords);
+
+            // Reload to get auto-incremented IDs for the inserted rows
+            $freshByPath = \App\Models\File::where('project_id', $project->id)
+                ->whereIn('path', array_column($newRecords, 'path'))
+                ->get()
+                ->keyBy('path');
+
+            // Replace placeholder entries with real records
+            foreach ($results as &$entry) {
+                if (isset($entry['_needs_id']) && isset($freshByPath[$entry['path']])) {
+                    $entry = $freshByPath[$entry['path']];
+                }
+            }
+            unset($entry);
+        }
+
+        return $results;
+    }
+
+    private function walkDir($dir, $basePath, $project, $existingByPath, &$results, &$newRecords)
     {
         $items = scandir($dir);
 
         foreach ($items as $item) {
-            if ($item === '.' || $item === '..') continue;
-            if ($item === '.git') continue;
+            if ($item === '.' || $item === '..' || $item === '.git') continue;
 
-            if ($item === 'node_modules' || $item === 'vendor' || $item === '__pycache__') {
+            if (in_array($item, ['node_modules', 'vendor', '__pycache__'])) {
                 $relativePath = ltrim(substr($dir . '/' . $item, strlen($basePath)), '/');
                 $results[] = [
                     'id'         => 0,
@@ -373,23 +394,26 @@ class FileController extends Controller
             $relativePath = ltrim(substr($fullPath, strlen($basePath)), '/');
 
             if (is_dir($fullPath)) {
-                $this->scanDirectory($fullPath, $basePath, $project, $results);
+                $this->walkDir($fullPath, $basePath, $project, $existingByPath, $results, $newRecords);
             } else {
-                $fileRecord = \App\Models\File::firstOrCreate(
-                    ['project_id' => $project->id, 'path' => $relativePath],
-                    [
+                if (isset($existingByPath[$relativePath])) {
+                    // Already in DB — just use the existing record
+                    $results[] = $existingByPath[$relativePath];
+                } else {
+                    // New file found on disk — queue for batch insert
+                    $newRecords[] = [
+                        'project_id' => $project->id,
+                        'path'       => $relativePath,
                         'name'       => $item,
                         'content'    => '',
                         'language'   => pathinfo($item, PATHINFO_EXTENSION),
                         'size_bytes' => filesize($fullPath),
-                        'is_deleted' => false
-                    ]
-                );
-
-                $results[] = $fileRecord;
+                        'is_deleted' => false,
+                    ];
+                    // Temporary placeholder so ordering is preserved
+                    $results[] = ['_needs_id' => true, 'path' => $relativePath];
+                }
             }
         }
-
-        return $results;
     }
 }

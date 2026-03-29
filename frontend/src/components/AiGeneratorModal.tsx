@@ -10,49 +10,36 @@ interface AiGeneratorModalProps {
     onClose: () => void;
 }
 
-// Shared localStorage key for Ollama URL across all components
 const OLLAMA_URL_KEY = 'ubiq_ollama_url';
-
-// Docker-hosted Ollama: use host.docker.internal so the container can reach
-// the host machine's Ollama process. Falls back to localhost for non-Docker envs.
 const LOCAL_OLLAMA_URL = 'http://host.docker.internal:11434';
 
 export default function AiGeneratorModal({ isOpen, onClose }: AiGeneratorModalProps) {
     const navigate = useNavigate();
     
-    // --- STATE ---
     const [prompt, setPrompt] = useState('');
     const [loading, setLoading] = useState(false);
     const [status, setStatus] = useState('');
     
-    // AI Configuration
     const [aiMode, setAiMode] = useState<'cloud' | 'local' | 'remote'>('cloud');
     const [selectedModel, setSelectedModel] = useState('gpt-4o'); 
     
-    // Remote Connection Settings — shared key with ChatInterface
     const [showSettings, setShowSettings] = useState(false);
     const [remoteUrl, setRemoteUrl] = useState(localStorage.getItem(OLLAMA_URL_KEY) || 'http://localhost:11434');
-    const [rawModelOutput, setRawModelOutput] = useState<string | null>(null); // shown on parse failure
+    const [rawModelOutput, setRawModelOutput] = useState<string | null>(null);
 
-    // Save remote URL to local storage (shared key)
     const handleSaveSettings = () => {
         localStorage.setItem(OLLAMA_URL_KEY, remoteUrl);
         setShowSettings(false);
     };
 
-    // Auto-select defaults when switching modes
     useEffect(() => {
         if (aiMode === 'cloud') setSelectedModel('gpt-4o');
     }, [aiMode]);
 
-    // ── Universal Response Parser ──────────────────────────────────────────────
-    // 8 strategies covering every known model output style.
-    // Tries each in order; first one that yields ≥1 file wins.
     const parseResponse = (rawOutput: string) => {
         const raw = rawOutput.trim();
         type FileEntry = { path: string; content: string };
 
-        /** Helpers **/
         const isValidFilename = (s: string) =>
             /^[\w\-./]+\.[a-zA-Z0-9]{1,10}$/.test(s) && !s.includes(' ');
 
@@ -67,7 +54,7 @@ export default function AiGeneratorModal({ isOpen, onClose }: AiGeneratorModalPr
             return 'output.txt';
         };
 
-        // ── S1: ---START_FILE: filename--- ... ---END_FILE--- ─────────────────────
+        // ── S1: ---START_FILE: filename--- ... ---END_FILE--- ─────────────────
         if (raw.includes('---START_FILE:')) {
             const files: FileEntry[] = [];
             for (const part of raw.split('---START_FILE:')) {
@@ -84,7 +71,7 @@ export default function AiGeneratorModal({ isOpen, onClose }: AiGeneratorModalPr
             if (files.length > 0) return files;
         }
 
-        // ── S2: === filename === or ==== filename ==== separators ─────────────────
+        // ── S2: === filename === separators ───────────────────────────────────
         if (raw.includes('===')) {
             const sepRegex = /={2,}\s*([\w\-./ ]+\.[a-zA-Z0-9]{1,10})\s*={2,}/g;
             const matches = [...raw.matchAll(sepRegex)];
@@ -101,11 +88,7 @@ export default function AiGeneratorModal({ isOpen, onClose }: AiGeneratorModalPr
             }
         }
 
-        // ── S3: Markdown header (##/###) or bold (**name**) before a fence ────────
-        // e.g.  ### src/App.jsx
-```jsx
-...
-```
+        // ── S3: Markdown header before a fence ───────────────────────────────
         const headerFenceRegex = /(?:#{1,4}\s+|\*{1,2})([\w\-./]+\.[a-zA-Z0-9]{1,10})(?:\*{1,2})?\s*\n```[a-z]*\n([\s\S]*?)```/gi;
         {
             const files: FileEntry[] = [];
@@ -118,7 +101,7 @@ export default function AiGeneratorModal({ isOpen, onClose }: AiGeneratorModalPr
             if (files.length > 0) return files;
         }
 
-        // ── S4: "File: filename" or "// filename" or "/* filename */" label before fence ─
+        // ── S4: "File: filename" label before fence ───────────────────────────
         const labelFenceRegex = /(?:(?:File|filename|path):\s*|(?:\/\/|#)\s*)([\w\-./]+\.[a-zA-Z0-9]{1,10})\s*\n```[a-z]*\n([\s\S]*?)```/gi;
         {
             const files: FileEntry[] = [];
@@ -131,8 +114,7 @@ export default function AiGeneratorModal({ isOpen, onClose }: AiGeneratorModalPr
             if (files.length > 0) return files;
         }
 
-        // ── S5: Fenced block with filename ON the opening fence line ─────────────
-        // e.g. ```jsx src/App.jsx  OR  ```src/App.jsx
+        // ── S5: Fenced block with filename on opening fence line ──────────────
         const fenceWithNameRegex = /```(?:[a-z]+\s+)?([\w\-./]+\.[a-zA-Z0-9]{1,10})\n([\s\S]*?)```/gi;
         {
             const files: FileEntry[] = [];
@@ -145,25 +127,31 @@ export default function AiGeneratorModal({ isOpen, onClose }: AiGeneratorModalPr
             if (files.length > 0) return files;
         }
 
-        // ── S6: JSON array [{path, content}] or [{filename, code}] ───────────────
-        const jsonStart = raw.indexOf('[');
-        const jsonEnd   = raw.lastIndexOf(']');
-        if (jsonStart !== -1 && jsonEnd !== -1) {
-            const jsonStr = raw.substring(jsonStart, jsonEnd + 1)
-                .replace(/```json/g, '').replace(/```/g, '');
-            try {
-                const parsed = JSON.parse(jsonStr);
-                if (Array.isArray(parsed) && parsed.length > 0) {
-                    const normalised = parsed.map((f: any) => ({
-                        path:    f.path || f.filename || f.name || f.file,
-                        content: f.content || f.code || f.body || ''
-                    })).filter((f: any) => f.path && f.content);
-                    if (normalised.length > 0) return normalised;
-                }
-            } catch (_) { /* fall through */ }
+        // ── S6: JSON array [{path, content}] ─────────────────────────────────
+        // FIX #8: Old approach grabbed from the FIRST '[' to the LAST ']' in the
+        // entire output. That fails when the model wraps its response in markdown
+        // and a code block contains a JS array — the parser then grabs the wrong
+        // content entirely. Now we try each `[...]` block individually and stop at
+        // the first one that parses successfully as an array of file objects.
+        {
+            const arrayRegex = /\[[\s\S]*?\]/g;
+            let m: RegExpExecArray | null;
+            while ((m = arrayRegex.exec(raw)) !== null) {
+                const candidate = m[0].replace(/```json/g, '').replace(/```/g, '');
+                try {
+                    const parsed = JSON.parse(candidate);
+                    if (Array.isArray(parsed) && parsed.length > 0) {
+                        const normalised = parsed.map((f: any) => ({
+                            path:    f.path || f.filename || f.name || f.file,
+                            content: f.content || f.code || f.body || ''
+                        })).filter((f: any) => f.path && f.content && isValidFilename(f.path));
+                        if (normalised.length > 0) return normalised;
+                    }
+                } catch (_) { /* not valid JSON, try next match */ }
+            }
         }
 
-        // ── S7: Multiple unnamed fenced blocks — pair with implied filenames ───────
+        // ── S7: Multiple unnamed fenced blocks ────────────────────────────────
         const unnamedFences = [...raw.matchAll(/```[a-z]*\n([\s\S]*?)```/gi)];
         if (unnamedFences.length > 1) {
             const files: FileEntry[] = [];
@@ -171,7 +159,6 @@ export default function AiGeneratorModal({ isOpen, onClose }: AiGeneratorModalPr
                 const content = m[1].trim();
                 if (content.length > 10) files.push({ path: guessFilename(content), content });
             });
-            // Deduplicate paths by appending index
             const seen: Record<string, number> = {};
             files.forEach(f => {
                 if (seen[f.path] !== undefined) {
@@ -183,7 +170,7 @@ export default function AiGeneratorModal({ isOpen, onClose }: AiGeneratorModalPr
             if (files.length > 0) return files;
         }
 
-        // ── S8: Whole output is a single file (last resort) ───────────────────────
+        // ── S8: Whole output is a single file (last resort) ───────────────────
         const stripped = raw.replace(/^```[a-z]*\n?/, '').replace(/\n?```$/, '').trim();
         if (stripped.length > 30) {
             return [{ path: guessFilename(stripped), content: stripped }];
@@ -199,7 +186,6 @@ export default function AiGeneratorModal({ isOpen, onClose }: AiGeneratorModalPr
         setRawModelOutput(null);
 
         try {
-            // 1. Create Project Container
             const projectRes = await projectAPI.create({
                 name: "AI App " + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
                 description: prompt.substring(0, 50) + "...",
@@ -210,8 +196,6 @@ export default function AiGeneratorModal({ isOpen, onClose }: AiGeneratorModalPr
 
             setStatus(`Architecting with ${selectedModel}...`);
             
-            // 2. Universal system prompt — same format for ALL models (cloud + local + remote).
-            //    The parser handles whatever format the model actually returns.
             const systemPrompt = `You are a code generator. Your only job is to output file blocks.
 
 OUTPUT FORMAT (use this exactly):
@@ -237,13 +221,7 @@ STRICT RULES:
 
             const fullMessage = `${systemPrompt}\n\nBuild this: ${prompt}`;
 
-            // 3. Prepare Config based on Mode
-            //    - cloud:  no ollama_url needed, BYOK keys come from chatCloud() via localStorage
-            //    - local:  explicitly pass Docker host URL so container can reach host Ollama
-            //    - remote: pass user-configured EC2/Azure URL (shared key with ChatInterface)
-            const apiConfig: AiApiConfig = {
-                project_id: projectId
-            };
+            const apiConfig: AiApiConfig = { project_id: projectId };
 
             if (aiMode === 'local') {
                 const localUrl = localStorage.getItem('ubiq_local_url') || LOCAL_OLLAMA_URL;
@@ -254,7 +232,6 @@ STRICT RULES:
                 apiConfig.api_keys = { ollama_url: currentRemoteUrl };
             }
 
-            // 4. Call AI — with one automatic retry using a simpler prompt
             setRawModelOutput(null);
 
             const callAI = async (message: string) => {
@@ -272,7 +249,6 @@ Request: ${prompt}`;
 
             let rawContent = await callAI(fullMessage);
 
-            // Detect empty / refusal / too-short response
             const looksEmpty = (s: string) => {
                 const cleaned = s.replace(/[\s\n]+/g, ' ').trim();
                 return cleaned.length < 30 ||
@@ -284,7 +260,6 @@ Request: ${prompt}`;
                 rawContent = await callAI(FALLBACK_PROMPT);
             }
 
-            // Store raw output so user can inspect it if parsing still fails
             setRawModelOutput(rawContent);
 
             if (looksEmpty(rawContent)) {
@@ -307,14 +282,12 @@ Request: ${prompt}`;
                 });
             } catch (e: any) {
                 console.error("Parsing Error:", e);
-                // rawModelOutput is already set — UI will show it
                 throw new Error(e.message || "Failed to parse AI output.");
             }
 
             setStatus(`Saving ${files.length} files...`);
             await projectAPI.scaffold(projectId, files);
 
-            // 5. Dynamic Title Update
             try {
                 const ubiqFile = files.find((f: any) => f.path === 'ubiq.json');
                 if (ubiqFile) {
@@ -348,7 +321,6 @@ Request: ${prompt}`;
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
             <div className="w-full max-w-lg bg-ubiq-900 border border-white/10 rounded-xl shadow-2xl overflow-visible flex flex-col max-h-[90vh]">
                 
-                {/* Header */}
                 <div className="p-4 border-b border-white/5 flex justify-between items-center bg-white/5 shrink-0">
                     <h3 className="text-sm font-bold text-white flex items-center gap-2">
                         <Sparkles className="w-4 h-4 text-purple-400" /> Generate with AI
@@ -360,12 +332,10 @@ Request: ${prompt}`;
                 
                 <div className="p-6 space-y-5 overflow-visible">
                     
-                    {/* Model Selection UI */}
                     <div className="space-y-2">
                         <div className="flex items-center justify-between mb-2">
                             <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">AI Provider</label>
                             
-                            {/* 3-WAY TOGGLE */}
                             <div className="flex bg-black/30 rounded-lg p-0.5 border border-white/5">
                                 <button 
                                     onClick={() => setAiMode('cloud')} 
@@ -388,18 +358,11 @@ Request: ${prompt}`;
                             </div>
                         </div>
 
-                        {/* Model Selector Row */}
                         <div className="flex items-center gap-2">
                             <div className="flex-1">
-                                <ModelSelector 
-                                    aiMode={aiMode} 
-                                    selectedModel={selectedModel} 
-                                    onSelectModel={setSelectedModel} 
-                                    menuPosition="bottom" 
-                                />
+                                <ModelSelector aiMode={aiMode} selectedModel={selectedModel} onSelectModel={setSelectedModel} menuPosition="bottom" />
                             </div>
                             
-                            {/* Settings Toggle (Only for Remote) */}
                             {aiMode === 'remote' && (
                                 <button 
                                     onClick={() => setShowSettings(!showSettings)}
@@ -411,7 +374,6 @@ Request: ${prompt}`;
                             )}
                         </div>
 
-                        {/* Inline Settings Panel (Only for Remote) */}
                         {showSettings && aiMode === 'remote' && (
                             <div className="mt-2 p-3 bg-black/40 border border-white/10 rounded-lg animate-fade-in">
                                 <label className="block text-[10px] font-bold text-slate-500 mb-1.5 uppercase">Remote Server URL (EC2 / Azure)</label>
@@ -437,7 +399,6 @@ Request: ${prompt}`;
                             </div>
                         )}
                         
-                        {/* Info Banner for Local Mode */}
                         {aiMode === 'local' && (
                             <div className="text-[10px] text-emerald-400 bg-emerald-900/20 border border-emerald-900/50 p-2 rounded flex items-center gap-2">
                                 <Cpu className="w-3 h-3" />
@@ -446,7 +407,6 @@ Request: ${prompt}`;
                         )}
                     </div>
 
-                    {/* Prompt Input */}
                     <div>
                         <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">What do you want to build?</label>
                         <div className="relative">
@@ -459,14 +419,12 @@ Request: ${prompt}`;
                         </div>
                     </div>
 
-                    {/* Status Message */}
                     {status && (
                         <div className={`text-xs text-center font-medium ${status.includes('Error') ? 'text-red-400' : 'text-purple-300 animate-pulse'}`}>
                             {status}
                         </div>
                     )}
 
-                    {/* Raw model output — shown only when parsing fails, so user knows what the model said */}
                     {!loading && status.includes('Error') && rawModelOutput && (
                         <div className="mt-2 rounded-lg border border-red-500/20 bg-black/40 overflow-hidden">
                             <div className="flex items-center justify-between px-3 py-1.5 border-b border-white/5">
@@ -484,7 +442,6 @@ Request: ${prompt}`;
                         </div>
                     )}
 
-                    {/* Action Button */}
                     <button 
                         onClick={handleGenerate} 
                         disabled={loading || !prompt} 

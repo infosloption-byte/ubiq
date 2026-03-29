@@ -11,26 +11,34 @@ const api = axios.create({
 });
 
 /**
- * Retrieves the auth token from localStorage, checking all possible storage keys.
+ * FIX #2: Single source of truth for the auth token.
+ * Previously tried 3 keys (auth_token, token, auth-storage JSON) in a
+ * fragile fallback chain. Now reads only from 'auth-storage' — the key
+ * Zustand's persist middleware writes to — with a direct localStorage
+ * mirror on setToken() as a convenience for non-store callers.
+ *
+ * Migration: setToken() in authStore still writes 'auth_token' as a
+ * legacy mirror so any cached sessions continue to work, but this
+ * function reads auth-storage first and falls back to auth_token for
+ * any existing sessions that haven't re-logged in yet.
  */
 export const getAuthToken = (): string | null => {
-    let token = localStorage.getItem('auth_token') || localStorage.getItem('token');
-    if (!token) {
-        try {
-            const authStorage = localStorage.getItem('auth-storage');
-            if (authStorage) token = JSON.parse(authStorage).state?.token ?? null;
-        } catch (e) { /* ignore */ }
-    }
-    return token || null;
+    try {
+        const authStorage = localStorage.getItem('auth-storage');
+        if (authStorage) {
+            const token = JSON.parse(authStorage).state?.token;
+            if (token) return token;
+        }
+    } catch (_) { /* corrupted storage — fall through */ }
+
+    // Legacy fallback for existing sessions
+    return localStorage.getItem('auth_token') || null;
 };
 
-// #22 FIX: Single merged request interceptor.
-// Logs method + url + body only — never logs config.headers, which contains
-// the Authorization token. A dev with screen-sharing open should not
-// inadvertently expose their token in the DevTools console.
 api.interceptors.request.use(
     (config) => {
         if (import.meta.env.DEV) {
+            // Never log config.headers — it contains the Authorization token
             console.log(`🚀 [API] ${config.method?.toUpperCase()} ${config.url}`, config.data || '');
         }
         const token = getAuthToken();
@@ -42,7 +50,6 @@ api.interceptors.request.use(
     (error) => Promise.reject(error)
 );
 
-// Single merged response interceptor — logs status + url, handles 401 globally.
 api.interceptors.response.use(
     (response) => {
         if (import.meta.env.DEV) {
@@ -56,7 +63,6 @@ api.interceptors.response.use(
         }
         if (error.response?.status === 401) {
             localStorage.removeItem('auth_token');
-            localStorage.removeItem('token');
             localStorage.removeItem('auth-storage');
             window.location.href = '/login';
         }
