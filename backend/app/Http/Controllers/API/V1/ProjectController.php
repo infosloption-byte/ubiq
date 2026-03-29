@@ -284,25 +284,6 @@ class ProjectController extends Controller
     }
 
     /**
-     * Scans a port range and returns the first port not in use.
-     * Prevents container launch failures from port collisions.
-     */
-    private function findFreePort(int $start = 8100, int $end = 8899): int
-    {
-        for ($port = $start; $port <= $end; $port++) {
-            // stream_socket_server() actually attempts to bind the port — the only
-            // reliable test. @fsockopen() with a short timeout produces false-negatives
-            // on a loaded server, which can cause two containers to race for the same port.
-            $sock = @stream_socket_server("tcp://127.0.0.1:{$port}", $errno, $errstr);
-            if ($sock !== false) {
-                fclose($sock); // release immediately — docker will bind it next
-                return $port;
-            }
-        }
-        throw new \RuntimeException("No free port found in range {$start}-{$end}");
-    }
-
-    /**
      * POST /projects/{project}/stop
      * Kills the running sandbox container without deleting project data.
      */
@@ -546,128 +527,186 @@ class ProjectController extends Controller
     }
 
     /**
-     * Start a Docker Sandbox container to run the project
+     * FIX #10: findFreePort with Docker-bind retry to eliminate the TOCTOU race.
+     *
+     * The old approach:
+     *   1. Probe a port with stream_socket_server() to see if it's free.
+     *   2. Close the socket immediately.
+     *   3. Pass the port number to Docker.
+     *
+     * Under concurrent load, two requests could complete step 2 before either
+     * reaches step 3, letting both get the same port. Docker would then fail
+     * to start the second container with "address already in use".
+     *
+     * The correct mitigation is NOT trying to eliminate the race (impossible
+     * with a probe-then-use pattern) but to catch the Docker failure and retry
+     * with a new port. That's what runProject() now does.
+     *
+     * findFreePort() itself is kept as a fast pre-check to avoid obviously
+     * occupied ports; the retry loop in runProject() is the real safety net.
+     *
+     * @param  int $start  First port in the scan range (inclusive)
+     * @param  int $end    Last port in the scan range (inclusive)
+     * @return int         A port that appeared free at probe time
+     * @throws \RuntimeException if the entire range is occupied
+     */
+    private function findFreePort(int $start = 8100, int $end = 8899): int
+    {
+        for ($port = $start; $port <= $end; $port++) {
+            $sock = @stream_socket_server("tcp://127.0.0.1:{$port}", $errno, $errstr);
+            if ($sock !== false) {
+                fclose($sock);
+                return $port;
+            }
+        }
+        throw new \RuntimeException("No free port found in range {$start}-{$end}");
+    }
+ 
+    /**
+     * Start a Docker Sandbox container to run the project.
+     *
+     * FIX #10: Wraps the docker run call in a retry loop (up to 3 attempts).
+     * If Docker reports "address already in use" — which happens when two
+     * concurrent requests race through findFreePort — we probe for a new port
+     * and retry rather than returning a 500 to the user.
      */
     public function runProject(Request $request, Project $project)
     {
         if ($project->user_id !== $request->user()->id) {
             return response()->json(['error' => 'Unauthorized'], 403);
         }
-
+ 
         $workspacePath = $this->getProjectPath($project);
-        $baseHostPath = env('HOST_WORKSPACE_PATH', '/home/ubuntu/ubiq/backend/storage/app/workspaces');
+        $baseHostPath  = env('HOST_WORKSPACE_PATH', '/home/ubuntu/ubiq/backend/storage/app/workspaces');
         $hostMountPath = $baseHostPath . "/{$project->user_id}/{$project->id}";
-        
+ 
         // 1. Detect Runtime
-        $runtimeInfo = $this->detectRuntime($workspacePath);
-        $runtime = $runtimeInfo['runtime'];
-        $framework = $runtimeInfo['framework'];
-
-        // 2. Generate Recipe (startup.sh)
+        $runtimeInfo   = $this->detectRuntime($workspacePath);
+        $runtime       = $runtimeInfo['runtime'];
+        $framework     = $runtimeInfo['framework'];
+ 
+        // 2. Generate startup.sh
         $startupScript = $this->generateStartupScript($runtime, $framework);
-        
-        // --- CRITICAL FIX: Enforce Unix Line Endings (\n) ---
-        // Windows uses \r\n, which breaks Linux shells ("install\r: command not found")
         $startupScript = str_replace(["\r\n", "\r"], "\n", $startupScript);
-
-        // WRITE TO DISK
+ 
         file_put_contents($workspacePath . '/startup.sh', $startupScript);
         chmod($workspacePath . '/startup.sh', 0755);
-
-        // SYNC TO DATABASE
+ 
         $project->files()->updateOrCreate(
             ['path' => 'startup.sh'],
             [
-                'name' => 'startup.sh',
-                'content' => $startupScript,
-                'language' => 'shell',
+                'name'       => 'startup.sh',
+                'content'    => $startupScript,
+                'language'   => 'shell',
                 'size_bytes' => strlen($startupScript),
                 'is_deleted' => false
             ]
         );
-
-        // --- FIX: SYNC LOG TO DB ---
-        // We put a placeholder in the DB so the file doesn't look "Empty" in the editor
-        // The real logs are still streamed from disk via getBuildLog()
+ 
         $logPlaceholder = "[Ubiq] Build process started. Check the 'Live Server Logs' panel for real-time output.";
         $project->files()->updateOrCreate(
             ['path' => 'startup.log'],
             [
-                'name' => 'startup.log',
-                'content' => $logPlaceholder, 
-                'language' => 'plaintext',
+                'name'       => 'startup.log',
+                'content'    => $logPlaceholder,
+                'language'   => 'plaintext',
                 'size_bytes' => strlen($logPlaceholder),
                 'is_deleted' => false
             ]
         );
-
-        // RESET LOGS
+ 
         file_put_contents($workspacePath . '/startup.log', "[Ubiq] Initializing Container...\n");
         chmod($workspacePath . '/startup.log', 0777);
         chmod($workspacePath . '/startup.sh', 0777);
         chmod($workspacePath, 0777);
-
-        // 3. Container Config
+ 
+        // 3. Container config
         $containerName = "ubiq_project_{$project->id}";
-        $port = $this->findFreePort(8100, 8899);
-
         Process::run("docker stop {$containerName}");
-        Process::run("docker rm {$containerName}");
-
+        Process::run("docker rm   {$containerName}");
+ 
         // 4. Select Image
-        $image = "nginx:alpine"; 
+        $image        = "nginx:alpine";
         $internalPort = 80;
-
+ 
         switch ($runtime) {
-            case 'node': $image = "node:20-alpine"; $internalPort = 5173; break;
-            case 'php': $image = "composer:2.7"; $internalPort = 8000; break;
-            case 'python': $image = "python:3.11-alpine"; $internalPort = 8000; break;
-            case 'java': $image = "amazoncorretto:17-alpine-jdk"; $internalPort = 8080; break;
+            case 'node':   $image = "node:20-alpine";            $internalPort = 5173; break;
+            case 'php':    $image = "composer:2.7";              $internalPort = 8000; break;
+            case 'python': $image = "python:3.11-alpine";        $internalPort = 8000; break;
+            case 'java':   $image = "amazoncorretto:17-alpine-jdk"; $internalPort = 8080; break;
         }
-
-        // 5. Run Docker — with strict resource limits to prevent abuse
-        $cmd = implode(' ', [
-            'docker run -d',
-            '--name',          escapeshellarg($containerName),
-            '-p',              "{$port}:{$internalPort}",
-            '-e',              "PORT={$internalPort}",
-            '-v',              escapeshellarg($hostMountPath) . ':/app',
-            '-w',              '/app',
-            // ── Resource caps ──────────────────────────────────────────
-            '--memory=512m',          // Hard RAM limit
-            '--memory-swap=512m',     // Disable swap (= no extra swap on top)
-            '--cpus=0.75',            // Max 75% of one CPU core
-            '--pids-limit=100',       // Prevent fork bombs
-            '--ulimit', 'nofile=512:512',   // File descriptor cap
-            '--ulimit', 'nproc=50:50',      // Process count cap (belt + suspenders)
-            // ── Network isolation ──────────────────────────────────────
-            // Use a restricted bridge network instead of host network.
-            // Containers can reach the internet for npm install etc,
-            // but cannot reach other containers or the EC2 metadata endpoint.
-            '--network=ubiq_sandbox',
-            // ── Filesystem hardening ───────────────────────────────────
-            '--cap-drop=ALL',         // Drop ALL Linux capabilities
-            '--cap-add=NET_BIND_SERVICE', // Re-add only what's needed for port binding
-            '--security-opt', 'no-new-privileges:true', // Prevent privilege escalation
-            // ── Logging ────────────────────────────────────────────────
-            '--log-driver=json-file',
-            '--log-opt', 'max-size=10m',
-            '--log-opt', 'max-file=1',
-            // ── Auto-cleanup ───────────────────────────────────────────
-            '--restart=no',
-            $image,
-            "sh -c 'sh startup.sh > /app/startup.log 2>&1 || tail -f /dev/null'",
-        ]);
-
-        $result = Process::timeout(120)->run($cmd);
-
-        if ($result->failed()) {
-            return response()->json(['error' => 'Docker failed', 'details' => $result->errorOutput()], 500);
+ 
+        // 5. Run Docker with port-collision retry
+        // FIX #10: If Docker reports "address already in use" we pick a new port
+        // and retry up to MAX_ATTEMPTS times. This handles the TOCTOU window
+        // between findFreePort() releasing the probe socket and Docker binding.
+        $maxAttempts = 3;
+        $result      = null;
+        $port        = null;
+        $lastError   = '';
+ 
+        for ($attempt = 1; $attempt <= $maxAttempts; $attempt++) {
+            try {
+                $port = $this->findFreePort(8100, 8899);
+            } catch (\RuntimeException $e) {
+                return response()->json(['error' => 'No free ports available. Try again later.'], 503);
+            }
+ 
+            $cmd = implode(' ', [
+                'docker run -d',
+                '--name',   escapeshellarg($containerName),
+                '-p',       "{$port}:{$internalPort}",
+                '-e',       "PORT={$internalPort}",
+                '-v',       escapeshellarg($hostMountPath) . ':/app',
+                '-w',       '/app',
+                '--memory=512m',
+                '--memory-swap=512m',
+                '--cpus=0.75',
+                '--pids-limit=100',
+                '--ulimit', 'nofile=512:512',
+                '--ulimit', 'nproc=50:50',
+                '--network=ubiq_sandbox',
+                '--cap-drop=ALL',
+                '--cap-add=NET_BIND_SERVICE',
+                '--security-opt', 'no-new-privileges:true',
+                '--log-driver=json-file',
+                '--log-opt', 'max-size=10m',
+                '--log-opt', 'max-file=1',
+                '--restart=no',
+                $image,
+                "sh -c 'sh startup.sh > /app/startup.log 2>&1 || tail -f /dev/null'",
+            ]);
+ 
+            $result = Process::timeout(120)->run($cmd);
+ 
+            if ($result->successful()) {
+                break; // Docker bound the port — we're done
+            }
+ 
+            $lastError = $result->errorOutput();
+ 
+            // Only retry on port-collision errors; surface everything else immediately
+            if (!str_contains($lastError, 'address already in use') &&
+                !str_contains($lastError, 'port is already allocated')) {
+                break;
+            }
+ 
+            Log::warning("[Sandbox] Port {$port} collision on attempt {$attempt}/{$maxAttempts} for project {$project->id}. Retrying.");
+ 
+            // Clean up any half-created container before retrying
+            Process::run("docker stop {$containerName} 2>/dev/null || true");
+            Process::run("docker rm   {$containerName} 2>/dev/null || true");
         }
-
+ 
+        if (!$result->successful()) {
+            return response()->json([
+                'error'   => 'Docker failed to start the sandbox.',
+                'details' => $lastError,
+            ], 500);
+        }
+ 
         $serverIp = env('SERVER_PUBLIC_IP', $request->getHost());
-
-        // ── Audit log ──────────────────────────────────────────────────────
+ 
         SandboxRun::create([
             'user_id'    => $request->user()->id,
             'project_id' => $project->id,
@@ -678,7 +717,7 @@ class ProjectController extends Controller
             'runtime'    => $runtime,
             'framework'  => $framework,
         ]);
-
+ 
         return response()->json([
             'message'   => 'Project booting...',
             'url'       => "http://{$serverIp}:{$port}",

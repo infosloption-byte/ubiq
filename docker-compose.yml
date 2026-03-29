@@ -1,6 +1,64 @@
 version: '3.8'
 
+# FIX #9: Docker socket proxy.
+#
+# The previous config mounted /var/run/docker.sock directly into ubiq_api,
+# giving any code running inside Laravel full Docker daemon access — equivalent
+# to root on the host. A single successful injection through any Laravel
+# vulnerability becomes a complete host compromise.
+#
+# The fix: add a socket-proxy sidecar (tecnativa/docker-socket-proxy) that
+# sits between ubiq_api and the real Docker daemon. The proxy accepts only the
+# specific API calls that Laravel actually needs (POST /containers/*, DELETE
+# /containers/*, GET /containers/*) and rejects everything else — including
+# image pulls, exec into other containers, daemon info, and swarm commands.
+#
+# ubiq_api now connects to DOCKER_HOST=tcp://socket-proxy:2375 instead of
+# mounting /var/run/docker.sock. The real socket is only mounted into the
+# proxy sidecar, which runs in its own isolated network that ubiq_api cannot
+# reach directly.
+
 services:
+
+  # ── Docker socket proxy ────────────────────────────────────────────────────
+  # Exposes only the Docker API calls that ubiq_api legitimately needs:
+  #   CONTAINERS=1  — list/inspect/stats containers
+  #   POST=1        — run (create+start) containers
+  #   DELETE=1      — stop/remove containers
+  # Everything else (images, exec, networks, volumes, swarm, secrets, configs,
+  # build, push, info, version) is blocked at the proxy level.
+  socket-proxy:
+    image: tecnativa/docker-socket-proxy:0.3.0   # pin a specific release for reproducibility
+    container_name: ubiq_socket_proxy
+    restart: always
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro   # proxy gets the socket read-only
+    environment:
+      # Allow only what the sandbox runner needs
+      CONTAINERS: 1     # GET  /containers/json, /containers/{id}/json
+      POST:       1     # POST /containers/create, /containers/{id}/start, /containers/{id}/stop
+      DELETE:     1     # DELETE /containers/{id}
+      # Everything below defaults to 0 (blocked) — listed here for clarity
+      IMAGES:     0
+      NETWORKS:   0
+      VOLUMES:    0
+      EXEC:       0
+      BUILD:      0
+      COMMIT:     0
+      CONFIGS:    0
+      DISTRIBUTION: 0
+      INFO:       0
+      PING:       0
+      SECRETS:    0
+      SESSION:    0
+      SWARM:      0
+      SYSTEM:     0
+      TASKS:      0
+      VERSION:    0
+    networks:
+      - proxy-net       # isolated network: only socket-proxy + ubiq_api can join
+
+  # ── MySQL ─────────────────────────────────────────────────────────────────
   mysql:
     image: mysql:8.0
     container_name: ubiq_mysql
@@ -16,6 +74,7 @@ services:
       - ubiq-net
     command: --default-authentication-plugin=mysql_native_password
 
+  # ── Laravel API ────────────────────────────────────────────────────────────
   api:
     build:
       context: ./backend
@@ -24,16 +83,22 @@ services:
     restart: always
     volumes:
       - ./backend:/var/www/html
-      - /var/run/docker.sock:/var/run/docker.sock
+      # NOTE: /var/run/docker.sock is NO LONGER mounted here.
+      # Laravel now reaches Docker via the proxy over TCP.
     environment:
-      APP_ENV: production
+      APP_ENV:     production
+      # Tell Laravel/Process::run() to talk to the socket proxy instead of the daemon.
+      DOCKER_HOST: tcp://socket-proxy:2375
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
       - mysql
+      - socket-proxy
     networks:
       - ubiq-net
+      - proxy-net   # must be on proxy-net to reach socket-proxy
 
+  # ── Nginx ─────────────────────────────────────────────────────────────────
   nginx:
     image: nginx:alpine
     container_name: ubiq_nginx
@@ -57,3 +122,10 @@ volumes:
 networks:
   ubiq-net:
     driver: bridge
+
+  # Isolated network for the proxy ↔ api channel.
+  # No other service can join this network, so the proxy
+  # is not reachable from nginx, mysql, or sandbox containers.
+  proxy-net:
+    driver: bridge
+    internal: true    # no external internet access on this network
