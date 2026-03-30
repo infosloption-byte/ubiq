@@ -746,28 +746,42 @@ class ProjectController extends Controller
 
     private function detectRuntime($path)
     {
-        if (FileSystem::exists($path . '/pom.xml') || FileSystem::exists($path . '/build.gradle')) {
+        if (\Illuminate\Support\Facades\File::exists($path . '/pom.xml') || \Illuminate\Support\Facades\File::exists($path . '/build.gradle')) {
             return ['runtime' => 'java', 'framework' => 'spring'];
         }
-        if (FileSystem::exists($path . '/artisan')) {
+        
+        // 1. Aggressive Laravel Detection
+        // AI often forgets artisan or composer.json, but it usually creates routes/ or app/
+        $hasComposerLaravel = \Illuminate\Support\Facades\File::exists($path . '/composer.json') && str_contains(file_get_contents($path . '/composer.json'), '"laravel/framework"');
+        
+        if (\Illuminate\Support\Facades\File::exists($path . '/artisan') || 
+            \Illuminate\Support\Facades\File::exists($path . '/routes/web.php') || 
+            \Illuminate\Support\Facades\File::isDirectory($path . '/app/Http') ||
+            $hasComposerLaravel) {
             return ['runtime' => 'php', 'framework' => 'laravel'];
         }
-        if (FileSystem::exists($path . '/composer.json')) {
+        
+        // 2. Raw PHP Detection
+        if (\Illuminate\Support\Facades\File::exists($path . '/composer.json') || \Illuminate\Support\Facades\File::exists($path . '/index.php')) {
             return ['runtime' => 'php', 'framework' => 'raw'];
         }
-        if (FileSystem::exists($path . '/manage.py')) {
+
+        if (\Illuminate\Support\Facades\File::exists($path . '/manage.py')) {
             return ['runtime' => 'python', 'framework' => 'django'];
         }
-        if (FileSystem::exists($path . '/requirements.txt')) {
-            return ['runtime' => 'python', 'framework' => 'flask']; // Assumption
+        
+        if (\Illuminate\Support\Facades\File::exists($path . '/requirements.txt') || \Illuminate\Support\Facades\File::exists($path . '/app.py') || \Illuminate\Support\Facades\File::exists($path . '/main.py')) {
+            return ['runtime' => 'python', 'framework' => 'flask']; 
         }
-        if (FileSystem::exists($path . '/package.json')) {
+        
+        if (\Illuminate\Support\Facades\File::exists($path . '/package.json')) {
             $content = file_get_contents($path . '/package.json');
             if (str_contains($content, '"next"')) return ['runtime' => 'node', 'framework' => 'nextjs'];
             if (str_contains($content, '"react"')) return ['runtime' => 'node', 'framework' => 'react'];
             if (str_contains($content, '"vue"')) return ['runtime' => 'node', 'framework' => 'vue'];
             return ['runtime' => 'node', 'framework' => 'node'];
         }
+        
         return ['runtime' => 'static', 'framework' => 'html'];
     }
 
@@ -880,6 +894,19 @@ class ProjectController extends Controller
                     . "    exit 1\n"
                     . "fi\n";
 
+            case 'raw':
+                return $header
+                    . "export COMPOSER_MEMORY_LIMIT=-1\n"
+                    . "echo \"[Ubiq] Installing Composer dependencies...\"\n"
+                    . "if [ -f composer.json ]; then composer install --ignore-platform-reqs --no-interaction; fi\n"
+                    . "\n"
+                    . "echo \"[Ubiq] Starting PHP Built-in Server...\"\n"
+                    . "if [ -d \"public\" ]; then\n"
+                    . "    php -S 0.0.0.0:8000 -t public\n"
+                    . "else\n"
+                    . "    php -S 0.0.0.0:8000\n"
+                    . "fi\n";
+
             case 'laravel':
                 return $header
                     . "echo \"[Ubiq] Verifying artisan script...\"\n"
@@ -893,18 +920,58 @@ class ProjectController extends Controller
                     . "    fwrite(STDERR, \"Vendor autoload not found.\\n\");\n"
                     . "    exit(1);\n"
                     . "}\n"
-                    . "\\$app = require_once __DIR__.'/bootstrap/app.php';\n"
-                    . "\\$kernel = \\$app->make(Illuminate\\Contracts\\Console\\Kernel::class);\n"
-                    . "\\$status = \\$kernel->handle(\\$input = new Symfony\\Component\\Console\\Input\\ArgvInput, new Symfony\\Component\\Console\\Output\\ConsoleOutput);\n"
-                    . "\\$kernel->terminate(\\$input, \\$status);\n"
-                    . "exit(\\$status);\n"
+                    // FIX 1: We use SINGLE QUOTES here so the backend PHP ignores the variables!
+                    . '$app = require_once __DIR__."/bootstrap/app.php";' . "\n"
+                    . '$kernel = $app->make(Illuminate\Contracts\Console\Kernel::class);' . "\n"
+                    . '$status = $kernel->handle($input = new Symfony\Component\Console\Input\ArgvInput, new Symfony\Component\Console\Output\ConsoleOutput);' . "\n"
+                    . '$kernel->terminate($input, $status);' . "\n"
+                    . 'exit($status);' . "\n"
                     . "ARTISAN_SCRIPT\n"
                     . "\n"
                     . "echo \"[Ubiq] Configuring directories & permissions...\"\n"
-                    . "mkdir -p storage/framework/sessions storage/framework/views storage/framework/cache storage/logs bootstrap/cache\n"
-                    . "chmod -R 777 storage bootstrap/cache 2>/dev/null || true\n"
+                    . "mkdir -p storage/framework/sessions storage/framework/views storage/framework/cache storage/logs bootstrap/cache database\n"
+                    . "chmod -R 777 storage bootstrap/cache database 2>/dev/null || true\n"
                     . "chmod +x artisan\n"
                     . "\n"
+                    // FIX 2: AI-Proofing Core Files (bootstrap/app.php)
+                    . "if [ ! -f bootstrap/app.php ]; then\n"
+                    . "    echo \"[Ubiq] AI forgot bootstrap/app.php! Creating default...\"\n"
+                    . "    cat > bootstrap/app.php << 'BOOTSTRAP_EOF'\n"
+                    . "<?php\n"
+                    . "use Illuminate\\Foundation\\Application;\n"
+                    . "use Illuminate\\Foundation\\Configuration\\Exceptions;\n"
+                    . "use Illuminate\\Foundation\\Configuration\\Middleware;\n"
+                    . "return Application::configure(basePath: dirname(__DIR__))\n"
+                    . "    ->withRouting(web: __DIR__.'/../routes/web.php', commands: __DIR__.'/../routes/console.php', health: '/up')\n"
+                    . "    ->withMiddleware(function (Middleware \$middleware) {}) \n"
+                    . "    ->withExceptions(function (Exceptions \$exceptions) {}) \n"
+                    . "    ->create();\n"
+                    . "BOOTSTRAP_EOF\n"
+                    . "fi\n"
+                    . "\n"
+                    // FIX 3: AI-Proofing Core Files (composer.json)
+                    . "if [ ! -f composer.json ]; then\n"
+                    . "    echo \"[Ubiq] AI forgot composer.json! Creating a default one...\"\n"
+                    . "    cat > composer.json << 'COMPOSER_EOF'\n"
+                    . "    {\n"
+                    . "        \"name\": \"laravel/laravel\",\n"
+                    . "        \"require\": {\n"
+                    . "            \"php\": \"^8.1\",\n"
+                    . "            \"laravel/framework\": \"^10.0\",\n"
+                    . "            \"laravel/tinker\": \"^2.8\"\n"
+                    . "        },\n"
+                    . "        \"autoload\": {\n"
+                    . "            \"psr-4\": {\n"
+                    . "                \"App\\\\\": \"app/\",\n"
+                    . "                \"Database\\\\Factories\\\\\": \"database/factories/\",\n"
+                    . "                \"Database\\\\Seeders\\\\\": \"database/seeders/\"\n"
+                    . "            }\n"
+                    . "        }\n"
+                    . "    }\n"
+                    . "COMPOSER_EOF\n"
+                    . "fi\n"
+                    . "\n"
+                    . "export COMPOSER_MEMORY_LIMIT=-1\n"
                     . "echo \"[Ubiq] Installing Composer dependencies...\"\n"
                     . "composer config -g platform-check false\n"
                     . "composer install --ignore-platform-reqs --no-interaction\n"
@@ -922,7 +989,12 @@ class ProjectController extends Controller
                     . "\n"
                     . "if [ ! -f .env ]; then\n"
                     . "    echo \"[Ubiq] Creating .env file...\"\n"
-                    . "    cp .env.example .env\n"
+                    . "    if [ -f .env.example ]; then\n"
+                    . "        cp .env.example .env\n"
+                    . "    else\n"
+                    . "        touch .env\n"
+                    . "        echo 'APP_KEY=' >> .env\n"
+                    . "    fi\n"
                     . "fi\n"
                     . "\n"
                     . "if ! grep -q \"^APP_KEY=base64:\" .env; then\n"
@@ -932,7 +1004,10 @@ class ProjectController extends Controller
                     . "\n"
                     . "if [ ! -f database/database.sqlite ]; then\n"
                     . "    touch database/database.sqlite\n"
+                    . "    chmod 666 database/database.sqlite\n" // FIX 4: SQLite write permissions
                     . "fi\n"
+                    . "sed -i 's/DB_CONNECTION=.*/DB_CONNECTION=sqlite/g' .env 2>/dev/null || true\n"
+                    . "sed -i 's/DB_DATABASE=.*/DB_DATABASE=\\/app\\/database\\/database.sqlite/g' .env 2>/dev/null || true\n"
                     . "\n"
                     . "echo \"[Ubiq] Running migrations...\"\n"
                     . "php artisan migrate --force\n"
