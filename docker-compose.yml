@@ -21,12 +21,6 @@ version: '3.8'
 services:
 
   # ── Docker socket proxy ────────────────────────────────────────────────────
-  # Exposes only the Docker API calls that ubiq_api legitimately needs:
-  #   CONTAINERS=1  — list/inspect/stats containers
-  #   POST=1        — run (create+start) containers
-  #   DELETE=1      — stop/remove containers
-  # Everything else (images, exec, networks, volumes, swarm, secrets, configs,
-  # build, push, info, version) is blocked at the proxy level.
   socket-proxy:
     image: tecnativa/docker-socket-proxy:0.3.0   # pin a specific release for reproducibility
     container_name: ubiq_socket_proxy
@@ -34,11 +28,9 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro   # proxy gets the socket read-only
     environment:
-      # Allow only what the sandbox runner needs
-      CONTAINERS: 1     # GET  /containers/json, /containers/{id}/json
-      POST:       1     # POST /containers/create, /containers/{id}/start, /containers/{id}/stop
-      DELETE:     1     # DELETE /containers/{id}
-      # Everything below defaults to 0 (blocked) — listed here for clarity
+      CONTAINERS: 1
+      POST:       1
+      DELETE:     1
       IMAGES:     0
       NETWORKS:   0
       VOLUMES:    0
@@ -58,21 +50,25 @@ services:
     networks:
       - proxy-net       # isolated network: only socket-proxy + ubiq_api can join
 
-  # ── MySQL ─────────────────────────────────────────────────────────────────
-  mysql:
-    image: mysql:8.0
-    container_name: ubiq_mysql
-    restart: always
-    environment:
-      MYSQL_ROOT_PASSWORD: root
-      MYSQL_DATABASE: ubiq
-      MYSQL_USER: ubiq_user
-      MYSQL_PASSWORD: 123456
-    volumes:
-      - db_data:/var/lib/mysql
-    networks:
-      - ubiq-net
-    command: --default-authentication-plugin=mysql_native_password
+  # ── MySQL (LOCAL — no longer used) ──────────────────────────────────────────
+  # ubiq now points at shared_mysql (172.17.0.1:3306, see the api service below),
+  # the same shared MySQL instance used by Voxora. This local container and its
+  # volume are kept only as a fallback; safe to delete once shared_mysql is
+  # confirmed working end-to-end.
+  # mysql:
+  #   image: mysql:8.0
+  #   container_name: ubiq_mysql
+  #   restart: always
+  #   environment:
+  #     MYSQL_ROOT_PASSWORD: root
+  #     MYSQL_DATABASE: ubiq
+  #     MYSQL_USER: ubiq_user
+  #     MYSQL_PASSWORD: 123456
+  #   volumes:
+  #     - db_data:/var/lib/mysql
+  #   networks:
+  #     - ubiq-net
+  #   command: --default-authentication-plugin=mysql_native_password
 
   # ── Laravel API ────────────────────────────────────────────────────────────
   api:
@@ -89,10 +85,18 @@ services:
       APP_ENV:     production
       # Tell Laravel/Process::run() to talk to the socket proxy instead of the daemon.
       DOCKER_HOST: tcp://socket-proxy:2375
+      # Shared MySQL (same instance used by Voxora), reached via the Docker
+      # bridge gateway IP rather than a container name, since shared_mysql
+      # lives on a different compose project's network.
+      DB_CONNECTION: mysql
+      DB_HOST: 172.17.0.1
+      DB_PORT: 3306
+      DB_DATABASE: ubiq
+      DB_USERNAME: ${DB_USERNAME:-root}
+      DB_PASSWORD: ${DB_PASSWORD}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
-      - mysql
       - socket-proxy
     networks:
       - ubiq-net
@@ -121,9 +125,6 @@ networks:
   ubiq-net:
     driver: bridge
 
-  # Isolated network for the proxy ↔ api channel.
-  # No other service can join this network, so the proxy
-  # is not reachable from nginx, mysql, or sandbox containers.
   proxy-net:
     driver: bridge
     internal: true    # no external internet access on this network
