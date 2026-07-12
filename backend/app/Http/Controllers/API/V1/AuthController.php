@@ -19,29 +19,6 @@ use App\Http\Controllers\Controller;
 class AuthController extends Controller
 {
     /**
-     * Get the Paddle Checkout Pay Link
-     */
-    public function getPayLink(Request $request)
-    {
-        // Replace 'pri_0123456' with your actual Paddle Price ID from the dashboard
-        return $request->user()
-            ->checkout('') 
-            ->returnTo(env('VITE_API_URL') . '/dashboard')
-            ->create();
-    }
-
-    /**
-     * Get the Paddle Customer Management Portal
-     */
-    public function getManagementPortal(Request $request)
-    {
-        // Generates a link for users to update cards or cancel subscriptions
-        return response()->json([
-            'url' => $request->user()->customerPortalUrl()
-        ]);
-    }
-
-    /**
      * Register a new user
      */
     public function register(Request $request)

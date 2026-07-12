@@ -132,25 +132,34 @@ class TerminalController extends Controller
         $hostMountPath = $baseHostPath . "/{$project->user_id}/{$project->id}";
         $workspacePath = storage_path("app/workspaces/{$project->user_id}/{$project->id}");
 
-        // Reuse the same detection logic (simplified for Terminal)
+        // Read the ubiq.json contract (matching ProjectController logic)
         $runtime = 'static';
         $image = 'nginx:alpine';
         $internalPort = 80;
 
-        if (\Illuminate\Support\Facades\File::exists($workspacePath . '/package.json')) {
-            $runtime = 'node'; $image = 'node:20-alpine'; $internalPort = 5173;
+        if (\Illuminate\Support\Facades\File::exists($workspacePath . '/ubiq.json')) {
+            $config = json_decode(file_get_contents($workspacePath . '/ubiq.json'), true);
+            $runtime = $config['runtime'] ?? 'static';
+            $internalPort = $config['port'] ?? 8000;
+        } elseif (\Illuminate\Support\Facades\File::exists($workspacePath . '/package.json')) {
+            $runtime = 'node'; $internalPort = 5173;
         } elseif (\Illuminate\Support\Facades\File::exists($workspacePath . '/composer.json')) {
-            $runtime = 'php'; $image = 'composer:2.7'; $internalPort = 8000;
+            $runtime = 'php'; $internalPort = 8000;
         } elseif (\Illuminate\Support\Facades\File::exists($workspacePath . '/requirements.txt')) {
-            $runtime = 'python'; $image = 'python:3.11-alpine'; $internalPort = 8000;
+            $runtime = 'python'; $internalPort = 8000;
         }
 
-        // Cleanup
+        // Apply new Base Images
+        switch ($runtime) {
+            case 'node':   $image = "node:20-alpine"; break;
+            case 'php':    $image = "composer:2.7"; break;
+            case 'python': $image = "python:3.11-alpine"; break;
+            default:       $image = "nginx:alpine"; $internalPort = 80; break;
+        }
+
         Process::run("docker stop {$containerName}");
         Process::run("docker rm {$containerName}");
 
-        // CRITICAL: Ensure startup.sh exists. 
-        // If it doesn't (user never clicked Run Project), we create a basic fallback.
         if (!\Illuminate\Support\Facades\File::exists($workspacePath . '/startup.sh')) {
             file_put_contents($workspacePath . '/startup.sh', "#!/bin/sh\necho 'Fallback shell'\ntail -f /dev/null");
             chmod($workspacePath . '/startup.sh', 0755);
@@ -158,8 +167,7 @@ class TerminalController extends Controller
 
         $port = 8000 + ($project->id % 1000); 
 
-        // THE FIX: Use the exact same command structure as ProjectController
-        $cmd = "docker run -d --name {$containerName} -p {$port}:{$internalPort} -e PORT={$internalPort} -v " . escapeshellarg($hostMountPath) . ":/app -w /app {$image} sh -c 'sh startup.sh || tail -f /dev/null'";
+        $cmd = "docker run -d --name {$containerName} -p {$port}:{$internalPort} -e PORT={$internalPort} -v " . escapeshellarg($hostMountPath) . ":/app -w /app {$image} sh -c 'sh startup.sh > /app/startup.log 2>&1 || tail -f /dev/null'";
 
         Process::run($cmd);
     }

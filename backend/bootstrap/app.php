@@ -28,7 +28,7 @@ return Application::configure(basePath: dirname(__DIR__))
         // CORS configuration for API
         $middleware->validateCsrfTokens(except: [
             'api/*',
-            'api/v1/paddle/webhook', // Explicitly excluded for clarity
+            'api/v1/paypal/webhook', // Explicitly excluded for clarity
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions) {

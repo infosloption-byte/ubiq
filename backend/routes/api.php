@@ -12,6 +12,7 @@ use App\Http\Controllers\API\V1\AiController;
 use App\Http\Controllers\API\V1\AdminController;
 use App\Http\Controllers\API\V1\GitController;
 use App\Http\Controllers\API\V1\TerminalController;
+use App\Http\Controllers\API\V1\PayPalController;
 use App\Http\Controllers\OllamaProxyController;
 
 // ── Unauthenticated fallback ───────────────────────────────────────────────
@@ -41,8 +42,9 @@ Route::prefix('v1')->group(function () {
     Route::get('/auth/google',          [AuthController::class, 'redirectToGoogle']);
     Route::get('/auth/google/callback', [AuthController::class, 'handleGoogleCallback']);
 
-    // Paddle Webhook — must be public, Paddle signs the payload
-    Route::post('/paddle/webhook', '\Laravel\Paddle\Http\Controllers\WebhookController');
+    // PayPal Webhook — must be public; PayPalController::webhook() verifies
+    // the signature itself against PayPal's verify-webhook-signature API.
+    Route::post('/paypal/webhook', [PayPalController::class, 'webhook']);
 
     // File Preview — authenticated issues a signed URL, public route validates the signature
     Route::get('/projects/{project}/preview-url/{path}', [FileController::class, 'getPreviewUrl'])
@@ -62,9 +64,12 @@ Route::prefix('v1')->group(function () {
             Route::post('/ollama/chat', [OllamaProxyController::class, 'chat']);
         });
 
-        // Subscription management — allowed even with expired sub
-        Route::get('/user/subscription/pay-link', [AuthController::class, 'getPayLink']);
-        Route::get('/user/subscription/portal',   [AuthController::class, 'getManagementPortal']);
+        // Subscription management — allowed even with expired sub.
+        // Checkout itself happens client-side via PayPal's Smart Buttons;
+        // these confirm/cancel/verify against PayPal's API server-side.
+        Route::post('/paypal/confirm', [PayPalController::class, 'confirm']);
+        Route::post('/paypal/cancel',  [PayPalController::class, 'cancel']);
+        Route::get('/paypal/subscription', [PayPalController::class, 'status']);
 
         // Admin
         Route::middleware('admin')->prefix('admin')->group(function () {

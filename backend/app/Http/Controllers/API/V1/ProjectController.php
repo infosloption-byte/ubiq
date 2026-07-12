@@ -94,26 +94,80 @@ class ProjectController extends Controller
         }
 
         $request->validate([
-            'files' => 'required|array',
-            'files.*.path' => 'required|string',
+            'files'  => 'required|array',
+            'files.*.path'    => 'required|string',
             'files.*.content' => 'required|string',
+            'prompt' => 'nullable|string|max:5000',  // FIX: accept the original user prompt
         ]);
 
-        $savedCount = 0;
-        $projectPath = $this->getProjectPath($project);
+        $savedCount    = 0;
+        $projectPath   = $this->getProjectPath($project);
+        $incomingFiles = $request->input('files');
+
+        // ── FIX: Detect boilerplate key from the original user prompt first ───
+        // This is the most reliable signal. The AI only sends app-specific files
+        // (controllers, views, routes) — NOT composer.json or package.json, which
+        // are protected scaffold files. So detectBoilerplateKeyFromFiles() almost
+        // always returns null for Laravel/Node projects, which previously caused
+        // the disk-based fallback to return 'html' on a fresh (empty) workspace,
+        // giving us protected=['ubiq.json'] only and letting AI overwrite
+        // all Laravel scaffold files.
+        //
+        // Priority: prompt → incoming files → disk
+        $userPrompt     = $request->input('prompt', '');
+        $boilerplateKey = ($userPrompt !== '')
+            ? \App\Services\BoilerplateManager::detectFromPrompt($userPrompt)
+            : ($this->detectBoilerplateKeyFromFiles($incomingFiles)
+               ?? $this->detectBoilerplateKeyFromDisk($projectPath));
+
+        $protected = \App\Services\BoilerplateManager::getProtectedPaths($boilerplateKey);
+
+        // ── Write hardcoded scaffold to disk + sync scaffold files to DB ──────
+        // write() generates all scaffold files from the in-memory template and
+        // calls the callback per file. No zip files or artisan commands needed.
+        // Using updateOrCreate so re-runs always refresh scaffold content in DB.
+        \App\Services\BoilerplateManager::write(
+            $boilerplateKey,
+            $projectPath,
+            function (string $relativePath, string $content) use ($project) {
+                $project->files()->updateOrCreate(
+                    ['path' => $relativePath],
+                    [
+                        'name'       => basename($relativePath),
+                        'content'    => $content,
+                        'language'   => $this->detectLanguage(pathinfo($relativePath, PATHINFO_EXTENSION)),
+                        'size_bytes' => strlen($content),
+                        'is_deleted' => false,
+                    ]
+                );
+            }
+        );
 
         foreach ($request->input('files') as $fileData) {
-            $path = $fileData['path'];
+            $path    = ltrim(str_replace(['../', '..\\',' \\'], ['', '', '/'], $fileData['path']), '/');
             $content = $fileData['content'];
+
+            // Skip empty — AI hallucinated the file
+            if (trim((string)$content) === '') {
+                Log::warning("[Ubiq] scaffold: skipping empty file: {$path}");
+                continue;
+            }
+
+            // Never let AI overwrite scaffold files
+            if (in_array($path, $protected, true)) {
+                Log::info("[Ubiq] scaffold: protected path blocked: {$path}");
+                continue;
+            }
 
             // 1. Save to DB
             $project->files()->updateOrCreate(
                 ['path' => $path],
                 [
-                    'name' => basename($path),
-                    'content' => $content,
-                    'language' => $this->detectLanguage(pathinfo($path, PATHINFO_EXTENSION)),
-                    'size_bytes' => strlen($content)
+                    'name'       => basename($path),
+                    'content'    => $content,
+                    'language'   => $this->detectLanguage(pathinfo($path, PATHINFO_EXTENSION)),
+                    'size_bytes' => strlen($content),
+                    'is_deleted' => false,
                 ]
             );
 
@@ -126,7 +180,22 @@ class ProjectController extends Controller
             $savedCount++;
         }
 
-        return response()->json(['message' => "Scaffolded $savedCount files successfully"]);
+        // FIX: Return the full file list so the frontend can refresh the editor tree.
+        // Previously returning only a message string left the UI with no way to know
+        // which files were created, so the editor never updated after generation.
+        $savedFiles = $project->files()
+            ->where('is_deleted', false)
+            ->get(['id', 'path', 'name', 'language', 'size_bytes'])
+            ->toArray();
+
+        Log::info("[Ubiq] scaffold() complete — boilerplate: {$boilerplateKey}, ai files saved: {$savedCount}, project: {$project->id}");
+
+        return response()->json([
+            'message'        => "Scaffolded {$savedCount} files successfully",
+            'boilerplate'    => $boilerplateKey,
+            'files_saved'    => $savedCount,
+            'files'          => $savedFiles,
+        ]);
     }
 
     /**
@@ -426,6 +495,250 @@ class ProjectController extends Controller
         return response()->json(['message' => 'Project imported successfully', 'project' => $project], 201);
     }
 
+    /**
+     * Repair critical Laravel scaffold files after AI generation.
+     * Same logic as CompletionController::repairLaravelScaffold.
+     * Called from scaffold() and generate() after saving AI files.
+     */
+    private function repairLaravelScaffold(\App\Models\Project $project, string $workspacePath): void
+    {
+        $composerPath = $workspacePath . '/composer.json';
+        $laravelMajor = 10;
+        if (file_exists($composerPath)) {
+            $comp = json_decode((string)file_get_contents($composerPath), true);
+            $constraint = $comp['require']['laravel/framework'] ?? '^10.0';
+            preg_match('/(\d+)/', ltrim($constraint, '^~>='), $m);
+            $laravelMajor = isset($m[1]) ? (int)$m[1] : 10;
+        }
+
+        // bootstrap/app.php
+        $bootstrapPath = $workspacePath . '/bootstrap/app.php';
+        $bootstrapContent = (string)@file_get_contents($bootstrapPath);
+        if (trim($bootstrapContent) === ''
+            || (str_contains($bootstrapContent, 'Application::configure') && $laravelMajor < 11)
+            || !str_contains($bootstrapContent, 'Application')) {
+            if ($laravelMajor >= 11) {
+                $bootstrap = "<?php\nreturn \\Illuminate\\Foundation\\Application::configure(basePath: dirname(__DIR__))\n    ->withRouting(web: __DIR__.'/../routes/web.php', health: '/up')\n    ->withMiddleware(function (\$m) {})\n    ->withExceptions(function (\$e) {})\n    ->create();\n";
+            } else {
+                $bootstrap = "<?php\n\$app = new Illuminate\\Foundation\\Application(dirname(__DIR__));\n\$app->singleton(Illuminate\\Contracts\\Http\\Kernel::class, App\\Http\\Kernel::class);\n\$app->singleton(Illuminate\\Contracts\\Console\\Kernel::class, App\\Console\\Kernel::class);\n\$app->singleton(Illuminate\\Contracts\\Debug\\ExceptionHandler::class, App\\Exceptions\\Handler::class);\nreturn \$app;\n";
+            }
+            if (!is_dir(dirname($bootstrapPath))) mkdir(dirname($bootstrapPath), 0777, true);
+            $this->saveRepairFile($project, $workspacePath, 'bootstrap/app.php', $bootstrap);
+        }
+
+        // public/index.php
+        $indexPath = $workspacePath . '/public/index.php';
+        $indexContent = (string)@file_get_contents($indexPath);
+        if (trim($indexContent) === ''
+            || (str_contains($indexContent, 'handleRequest') && $laravelMajor < 11)
+            || !str_contains($indexContent, 'vendor/autoload')) {
+            if ($laravelMajor >= 11) {
+                $index = "<?php\ndefine('LARAVEL_START', microtime(true));\nif (file_exists(\$m = __DIR__.'/../storage/framework/maintenance.php')) require \$m;\nrequire __DIR__.'/../vendor/autoload.php';\n\$app = require_once __DIR__.'/../bootstrap/app.php';\n\$app->handleRequest(Illuminate\\Http\\Request::capture());\n";
+            } else {
+                $index = "<?php\ndefine('LARAVEL_START', microtime(true));\nif (file_exists(\$m = __DIR__.'/../storage/framework/maintenance.php')) require \$m;\nrequire __DIR__.'/../vendor/autoload.php';\n\$app = require_once __DIR__.'/../bootstrap/app.php';\n\$kernel = \$app->make(Illuminate\\Contracts\\Http\\Kernel::class);\n\$response = \$kernel->handle(\$request = Illuminate\\Http\\Request::capture());\n\$response->send();\n\$kernel->terminate(\$request, \$response);\n";
+            }
+            if (!is_dir(dirname($indexPath))) mkdir(dirname($indexPath), 0777, true);
+            $this->saveRepairFile($project, $workspacePath, 'public/index.php', $index);
+        }
+
+        // artisan
+        $artisanPath = $workspacePath . '/artisan';
+        $artisanContent = (string)@file_get_contents($artisanPath);
+        if (trim($artisanContent) === '' || !str_contains($artisanContent, 'vendor/autoload')) {
+            $artisan = "#!/usr/bin/env php\n<?php\ndefine('LARAVEL_START', microtime(true));\nif (!file_exists(\$a = __DIR__.'/vendor/autoload.php')) { fwrite(STDERR, 'Run: composer install\\n'); exit(1); }\nrequire \$a;\n\$app = require_once __DIR__.'/bootstrap/app.php';\nif (method_exists(\$app, 'handleCommand')) { exit(\$app->handleCommand(new Symfony\\Component\\Console\\Input\\ArgvInput)); }\n\$kernel = \$app->make(Illuminate\\Contracts\\Console\\Kernel::class);\n\$input = new Symfony\\Component\\Console\\Input\\ArgvInput;\n\$status = \$kernel->handle(\$input, new Symfony\\Component\\Console\\Output\\ConsoleOutput);\n\$kernel->terminate(\$input, \$status);\nexit(\$status);\n";
+            $this->saveRepairFile($project, $workspacePath, 'artisan', $artisan);
+            @chmod($artisanPath, 0755);
+        }
+
+        // app/Http/Kernel.php (L10 only)
+        if ($laravelMajor < 11) {
+            $httpKernelPath = $workspacePath . '/app/Http/Kernel.php';
+            $hkContent = (string)@file_get_contents($httpKernelPath);
+            if (trim($hkContent) === '' || !str_contains($hkContent, 'extends')) {
+                $hk = "<?php\nnamespace App\\Http;\nuse Illuminate\\Foundation\\Http\\Kernel as HttpKernel;\nclass Kernel extends HttpKernel {\n    protected \$middleware = [\n        \\Illuminate\\Http\\Middleware\\TrustProxies::class,\n        \\Illuminate\\Http\\Middleware\\HandleCors::class,\n        \\Illuminate\\Foundation\\Http\\Middleware\\PreventRequestsDuringMaintenance::class,\n        \\Illuminate\\Http\\Middleware\\ValidatePostSize::class,\n        \\Illuminate\\Foundation\\Http\\Middleware\\TrimStrings::class,\n        \\Illuminate\\Foundation\\Http\\Middleware\\ConvertEmptyStringsToNull::class,\n    ];\n    protected \$middlewareGroups = [\n        'web' => [\n            \\Illuminate\\Cookie\\Middleware\\EncryptCookies::class,\n            \\Illuminate\\Cookie\\Middleware\\AddQueuedCookiesToResponse::class,\n            \\Illuminate\\Session\\Middleware\\StartSession::class,\n            \\Illuminate\\View\\Middleware\\ShareErrorsFromSession::class,\n            \\Illuminate\\Foundation\\Http\\Middleware\\VerifyCsrfToken::class,\n            \\Illuminate\\Routing\\Middleware\\SubstituteBindings::class,\n        ],\n        'api' => [\n            \\Illuminate\\Routing\\Middleware\\ThrottleRequests::class.':api',\n            \\Illuminate\\Routing\\Middleware\\SubstituteBindings::class,\n        ],\n    ];\n    protected \$middlewareAliases = [\n        'auth'    => \\Illuminate\\Auth\\Middleware\\Authenticate::class,\n        'throttle'=> \\Illuminate\\Routing\\Middleware\\ThrottleRequests::class,\n    ];\n}\n";
+                if (!is_dir(dirname($httpKernelPath))) mkdir(dirname($httpKernelPath), 0777, true);
+                $this->saveRepairFile($project, $workspacePath, 'app/Http/Kernel.php', $hk);
+            }
+        }
+
+        // app/Console/Kernel.php (L10 only)
+        if ($laravelMajor < 11) {
+            $ckPath = $workspacePath . '/app/Console/Kernel.php';
+            $ckContent = (string)@file_get_contents($ckPath);
+            if (trim($ckContent) === '' || !str_contains($ckContent, 'extends')) {
+                $ck = "<?php\nnamespace App\\Console;\nuse Illuminate\\Console\\Scheduling\\Schedule;\nuse Illuminate\\Foundation\\Console\\Kernel as ConsoleKernel;\nclass Kernel extends ConsoleKernel {\n    protected function schedule(Schedule \$s): void {}\n    protected function commands(): void {\n        \$this->load(__DIR__.'/Commands');\n        if (file_exists(base_path('routes/console.php'))) require base_path('routes/console.php');\n    }\n}\n";
+                if (!is_dir(dirname($ckPath))) mkdir(dirname($ckPath), 0777, true);
+                $this->saveRepairFile($project, $workspacePath, 'app/Console/Kernel.php', $ck);
+            }
+        }
+
+        // app/Exceptions/Handler.php
+        $handlerPath = $workspacePath . '/app/Exceptions/Handler.php';
+        $handlerContent = (string)@file_get_contents($handlerPath);
+        if (trim($handlerContent) === '' || !str_contains($handlerContent, 'extends')) {
+            $handler = "<?php\nnamespace App\\Exceptions;\nuse Illuminate\\Foundation\\Exceptions\\Handler as ExceptionHandler;\nuse Throwable;\nclass Handler extends ExceptionHandler {\n    protected \$dontFlash = ['current_password','password','password_confirmation'];\n    public function register(): void {}\n}\n";
+            if (!is_dir(dirname($handlerPath))) mkdir(dirname($handlerPath), 0777, true);
+            $this->saveRepairFile($project, $workspacePath, 'app/Exceptions/Handler.php', $handler);
+        }
+
+        // routes/web.php
+        $webPath = $workspacePath . '/routes/web.php';
+        if (!file_exists($webPath) || trim((string)file_get_contents($webPath)) === '') {
+            if (!is_dir(dirname($webPath))) mkdir(dirname($webPath), 0777, true);
+            $this->saveRepairFile($project, $workspacePath, 'routes/web.php', "<?php\nuse Illuminate\\Support\\Facades\\Route;\nRoute::get('/', fn() => response()->json(['status'=>'ok','message'=>'Laravel is running']));\n");
+        }
+
+        // routes/console.php
+        $consolePath = $workspacePath . '/routes/console.php';
+        if (!file_exists($consolePath)) {
+            $this->saveRepairFile($project, $workspacePath, 'routes/console.php', "<?php\nuse Illuminate\\Support\\Facades\\Artisan;\n");
+        }
+
+        // Delete empty config files — let Laravel use package defaults
+        $configDir = $workspacePath . '/config';
+        if (is_dir($configDir)) {
+            foreach (glob($configDir . '/*.php') ?: [] as $configFile) {
+                $cfg = (string)@file_get_contents($configFile);
+                if (trim($cfg) === '' || trim($cfg) === '<?php') {
+                    unlink($configFile);
+                    $project->files()->where('path', 'config/' . basename($configFile))->delete();
+                }
+            }
+        }
+
+        // database.sqlite
+        $dbPath = $workspacePath . '/database/database.sqlite';
+        if (!file_exists($dbPath)) {
+            if (!is_dir(dirname($dbPath))) mkdir(dirname($dbPath), 0777, true);
+            touch($dbPath); chmod($dbPath, 0666);
+        }
+    }
+
+    /**
+     * Detect the boilerplate key from what's already on disk.
+     * Used by scaffold() so it knows which paths are protected.
+     */
+    /**
+     * Detect boilerplate key by inspecting the AI-generated files being sent in.
+     * This is more reliable than disk detection on a fresh (empty) project directory.
+     *
+     * Looks for tell-tale files like composer.json with laravel/framework,
+     * package.json with react/vue/next etc., requirements.txt with flask/fastapi.
+     *
+     * Returns null if detection is inconclusive (falls back to disk detection).
+     */
+    private function detectBoilerplateKeyFromFiles(array $files): ?string
+    {
+        // Index files by path for quick lookup
+        $fileMap = [];
+        foreach ($files as $f) {
+            $fileMap[$f['path'] ?? ''] = $f['content'] ?? '';
+        }
+
+        // Check composer.json for Laravel
+        if (isset($fileMap['composer.json'])) {
+            $composer = json_decode($fileMap['composer.json'], true) ?? [];
+            $constraint = $composer['require']['laravel/framework']
+                       ?? $composer['require']['laravel/framework'] ?? '';
+            if ($constraint) {
+                preg_match('/(\d+)/', ltrim($constraint, '^~>='), $m);
+                return ((int)($m[1] ?? 11)) >= 11 ? 'laravel@11' : 'laravel@10';
+            }
+            // Any composer.json without laravel → raw PHP → default laravel@11
+            if (!empty($composer)) return 'laravel@11';
+        }
+
+        // Check package.json for JS frameworks
+        if (isset($fileMap['package.json'])) {
+            $pkg  = json_decode($fileMap['package.json'], true) ?? [];
+            $deps = array_merge($pkg['dependencies'] ?? [], $pkg['devDependencies'] ?? []);
+            if (isset($deps['next']))            return 'nextjs';
+            if (isset($deps['@angular/core']))   return 'angular';
+            if (isset($deps['react']))           return 'react';
+            if (isset($deps['vue']))             return 'vue';
+            return 'node';
+        }
+
+        // Check requirements.txt for Python
+        if (isset($fileMap['requirements.txt'])) {
+            $req = $fileMap['requirements.txt'];
+            if (str_contains($req, 'django'))  return 'django';
+            if (str_contains($req, 'fastapi')) return 'fastapi';
+            if (str_contains($req, 'flask'))   return 'flask';
+            return 'flask'; // default python
+        }
+
+        // Check for Django manage.py
+        if (isset($fileMap['manage.py'])) return 'django';
+
+        // Check ubiq.json if AI sent it
+        if (isset($fileMap['ubiq.json'])) {
+            $ubiq      = json_decode($fileMap['ubiq.json'], true) ?? [];
+            $framework = $ubiq['framework'] ?? '';
+            $version   = $ubiq['version']   ?? '';
+            if ($framework === 'laravel') return $version === '10' ? 'laravel@10' : 'laravel@11';
+            if (in_array($framework, ['react','vue','nextjs','angular','node','flask','fastapi','django'], true)) {
+                return $framework;
+            }
+        }
+
+        return null; // inconclusive — caller falls back to disk detection
+    }
+
+    private function detectBoilerplateKeyFromDisk(string $path): string
+    {
+        // Check ubiq.json first (most reliable — written by BoilerplateManager)
+        $ubiqPath = $path . '/ubiq.json';
+        if (file_exists($ubiqPath)) {
+            $ubiq      = json_decode((string)file_get_contents($ubiqPath), true) ?? [];
+            $framework = $ubiq['framework'] ?? '';
+            $version   = $ubiq['version']   ?? '';
+            if ($framework === 'laravel') {
+                return $version === '10' ? 'laravel@10' : 'laravel@11';
+            }
+            if (in_array($framework, ['react','vue','nextjs','angular','node','flask','fastapi','django','html'], true)) {
+                return $framework;
+            }
+        }
+
+        // Fall back to disk detection
+        if (file_exists($path . '/composer.json')) {
+            $comp       = json_decode((string)file_get_contents($path . '/composer.json'), true) ?? [];
+            $constraint = $comp['require']['laravel/framework'] ?? '';
+            if ($constraint) {
+                preg_match('/(\d+)/', ltrim($constraint, '^~>='), $m);
+                return ((int)($m[1] ?? 11)) >= 11 ? 'laravel@11' : 'laravel@10';
+            }
+        }
+        if (file_exists($path . '/package.json')) {
+            $pkg  = json_decode((string)file_get_contents($path . '/package.json'), true) ?? [];
+            $deps = array_merge($pkg['dependencies'] ?? [], $pkg['devDependencies'] ?? []);
+            if (isset($deps['next']))            return 'nextjs';
+            if (isset($deps['@angular/core']))   return 'angular';
+            if (isset($deps['react']))           return 'react';
+            if (isset($deps['vue']))             return 'vue';
+            return 'node';
+        }
+        if (file_exists($path . '/manage.py'))         return 'django';
+        if (file_exists($path . '/requirements.txt')) {
+            $req = (string)file_get_contents($path . '/requirements.txt');
+            if (str_contains($req, 'fastapi')) return 'fastapi';
+            return 'flask';
+        }
+        return 'html';
+    }
+
+    private function saveRepairFile(\App\Models\Project $project, string $workspacePath, string $relativePath, string $content): void
+    {
+        $fullPath = $workspacePath . '/' . $relativePath;
+        if (!is_dir(dirname($fullPath))) mkdir(dirname($fullPath), 0777, true);
+        file_put_contents($fullPath, $content);
+        $project->files()->updateOrCreate(
+            ['path' => $relativePath],
+            ['name' => basename($relativePath), 'content' => $content, 'language' => $this->detectLanguage(pathinfo($relativePath, PATHINFO_EXTENSION)), 'size_bytes' => strlen($content), 'is_deleted' => false]
+        );
+    }
+
     private function detectLanguage($ext)
     {
         $map = [
@@ -580,13 +893,15 @@ class ProjectController extends Controller
         $baseHostPath  = env('HOST_WORKSPACE_PATH', '/home/ubuntu/ubiq/backend/storage/app/workspaces');
         $hostMountPath = $baseHostPath . "/{$project->user_id}/{$project->id}";
  
-        // 1. Detect Runtime
-        $runtimeInfo   = $this->detectRuntime($workspacePath);
-        $runtime       = $runtimeInfo['runtime'];
-        $framework     = $runtimeInfo['framework'];
+        // --- 1. GET DYNAMIC CONFIGURATION ---
+        $config = $this->getRuntimeConfig($workspacePath);
+        $runtime = $config['runtime'];
+        $framework = $config['framework'];
  
-        // 2. Generate startup.sh
-        $startupScript = $this->generateStartupScript($runtime, $framework);
+        // --- 2. GENERATE SCRIPT ---
+        // Pass $workspacePath so generateStartupScript can write bootstrap/app.php
+        // and artisan directly to disk via PHP before the container starts.
+        $startupScript = $this->generateStartupScript($config, $workspacePath);
         $startupScript = str_replace(["\r\n", "\r"], "\n", $startupScript);
  
         file_put_contents($workspacePath . '/startup.sh', $startupScript);
@@ -620,26 +935,17 @@ class ProjectController extends Controller
         chmod($workspacePath . '/startup.sh', 0777);
         chmod($workspacePath, 0777);
  
-        // 3. Container config
+        // --- 3. CONTAINER PREP ---
         $containerName = "ubiq_project_{$project->id}";
         Process::run("docker stop {$containerName}");
         Process::run("docker rm   {$containerName}");
  
-        // 4. Select Image
-        $image        = "nginx:alpine";
-        $internalPort = 80;
+        // --- 4. SELECT DOCKER IMAGE ---
+        $dockerConfig = $this->selectDockerImage($config);
+        $image = $dockerConfig['image'];
+        $internalPort = $dockerConfig['port'];
  
-        switch ($runtime) {
-            case 'node':   $image = "node:20-alpine";            $internalPort = 5173; break;
-            case 'php':    $image = "composer:2.7";              $internalPort = 8000; break;
-            case 'python': $image = "python:3.11-alpine";        $internalPort = 8000; break;
-            case 'java':   $image = "amazoncorretto:17-alpine-jdk"; $internalPort = 8080; break;
-        }
- 
-        // 5. Run Docker with port-collision retry
-        // FIX #10: If Docker reports "address already in use" we pick a new port
-        // and retry up to MAX_ATTEMPTS times. This handles the TOCTOU window
-        // between findFreePort() releasing the probe socket and Docker binding.
+        // --- 5. EXECUTE (With Port Retry) ---
         $maxAttempts = 3;
         $result      = null;
         $port        = null;
@@ -652,6 +958,13 @@ class ProjectController extends Controller
                 return response()->json(['error' => 'No free ports available. Try again later.'], 503);
             }
  
+            // Angular CLI + esbuild needs ~700-900MB RAM during build.
+            // Node containers get 1GB; PHP/Python stay at 512MB.
+            $memoryLimit = ($runtime === 'node') ? '1g' : '512m';
+            $memorySwap  = ($runtime === 'node') ? '1g' : '512m';
+            // Angular also spawns more processes (tsc, esbuild workers)
+            $pidsLimit   = ($runtime === 'node') ? 200 : 100;
+
             $cmd = implode(' ', [
                 'docker run -d',
                 '--name',   escapeshellarg($containerName),
@@ -659,12 +972,12 @@ class ProjectController extends Controller
                 '-e',       "PORT={$internalPort}",
                 '-v',       escapeshellarg($hostMountPath) . ':/app',
                 '-w',       '/app',
-                '--memory=512m',
-                '--memory-swap=512m',
+                "--memory={$memoryLimit}",
+                "--memory-swap={$memorySwap}",
                 '--cpus=0.75',
-                '--pids-limit=100',
-                '--ulimit', 'nofile=512:512',
-                '--ulimit', 'nproc=50:50',
+                "--pids-limit={$pidsLimit}",
+                '--ulimit', 'nofile=1024:1024',
+                '--ulimit', 'nproc=100:100',
                 '--network=ubiq_sandbox',
                 '--cap-drop=ALL',
                 '--cap-add=NET_BIND_SERVICE',
@@ -678,31 +991,20 @@ class ProjectController extends Controller
             ]);
  
             $result = Process::timeout(120)->run($cmd);
- 
-            if ($result->successful()) {
-                break; // Docker bound the port — we're done
-            }
+            if ($result->successful()) break; 
  
             $lastError = $result->errorOutput();
- 
-            // Only retry on port-collision errors; surface everything else immediately
-            if (!str_contains($lastError, 'address already in use') &&
-                !str_contains($lastError, 'port is already allocated')) {
+            if (!str_contains($lastError, 'address already in use') && !str_contains($lastError, 'port is already allocated')) {
                 break;
             }
  
             Log::warning("[Sandbox] Port {$port} collision on attempt {$attempt}/{$maxAttempts} for project {$project->id}. Retrying.");
- 
-            // Clean up any half-created container before retrying
             Process::run("docker stop {$containerName} 2>/dev/null || true");
             Process::run("docker rm   {$containerName} 2>/dev/null || true");
         }
  
         if (!$result->successful()) {
-            return response()->json([
-                'error'   => 'Docker failed to start the sandbox.',
-                'details' => $lastError,
-            ], 500);
+            return response()->json(['error' => 'Docker failed to start the sandbox.', 'details' => $lastError], 500);
         }
  
         $serverIp = env('SERVER_PUBLIC_IP', $request->getHost());
@@ -727,313 +1029,551 @@ class ProjectController extends Controller
         ]);
     }
 
-    /**
-     * NEW: Fetch the real-time build logs
-     */
     public function getBuildLog(Request $request, Project $project)
     {
         if ($project->user_id !== $request->user()->id) abort(403);
-        
         $logPath = $this->getProjectPath($project) . '/startup.log';
-        
-        if (file_exists($logPath)) {
-            $content = file_get_contents($logPath);
-            return response()->json(['log' => $content]);
-        }
-        
+        if (file_exists($logPath)) return response()->json(['log' => file_get_contents($logPath)]);
         return response()->json(['log' => 'Waiting for logs...']);
     }
 
-    private function detectRuntime($path)
-    {
-        if (\Illuminate\Support\Facades\File::exists($path . '/pom.xml') || \Illuminate\Support\Facades\File::exists($path . '/build.gradle')) {
-            return ['runtime' => 'java', 'framework' => 'spring'];
+    // =========================================================================
+    // CORE DYNAMIC CONFIGURATION ENGINE
+    // =========================================================================
+
+    private function getRuntimeConfig(string $workspacePath): array {
+        $ubiq = [];
+        $ubiqPath = $workspacePath . '/ubiq.json';
+        if (FileSystem::exists($ubiqPath)) {
+            $ubiq = json_decode(file_get_contents($ubiqPath), true) ?? [];
         }
-        
-        // 1. Aggressive Laravel Detection
-        // AI often forgets artisan or composer.json, but it usually creates routes/ or app/
-        $hasComposerLaravel = \Illuminate\Support\Facades\File::exists($path . '/composer.json') && str_contains(file_get_contents($path . '/composer.json'), '"laravel/framework"');
-        
-        if (\Illuminate\Support\Facades\File::exists($path . '/artisan') || 
-            \Illuminate\Support\Facades\File::exists($path . '/routes/web.php') || 
-            \Illuminate\Support\Facades\File::isDirectory($path . '/app/Http') ||
-            $hasComposerLaravel) {
-            return ['runtime' => 'php', 'framework' => 'laravel'];
-        }
-        
-        // 2. Raw PHP Detection
-        if (\Illuminate\Support\Facades\File::exists($path . '/composer.json') || \Illuminate\Support\Facades\File::exists($path . '/index.php')) {
-            return ['runtime' => 'php', 'framework' => 'raw'];
+        $detected = $this->detectFromDisk($workspacePath);
+        $merged = array_merge($detected, $ubiq);
+
+        // FIX: If disk detection found Laravel but ubiq.json has a different/wrong
+        // framework value (e.g. 'raw', 'html', 'php'), trust the disk detection.
+        // AI sometimes generates ubiq.json with framework=raw or wrong runtime
+        // for Laravel projects, causing the startup script to run php -S instead
+        // of php artisan serve with the full Laravel boot sequence.
+        if (($detected['framework'] ?? '') === 'laravel' && ($merged['framework'] ?? '') !== 'laravel') {
+            $merged['framework'] = 'laravel';
+            $merged['runtime']   = 'php';
+            $merged['port']      = $merged['port'] ?? 8000;
         }
 
-        if (\Illuminate\Support\Facades\File::exists($path . '/manage.py')) {
-            return ['runtime' => 'python', 'framework' => 'django'];
-        }
-        
-        if (\Illuminate\Support\Facades\File::exists($path . '/requirements.txt') || \Illuminate\Support\Facades\File::exists($path . '/app.py') || \Illuminate\Support\Facades\File::exists($path . '/main.py')) {
-            return ['runtime' => 'python', 'framework' => 'flask']; 
-        }
-        
-        if (\Illuminate\Support\Facades\File::exists($path . '/package.json')) {
-            $content = file_get_contents($path . '/package.json');
-            if (str_contains($content, '"next"')) return ['runtime' => 'node', 'framework' => 'nextjs'];
-            if (str_contains($content, '"react"')) return ['runtime' => 'node', 'framework' => 'react'];
-            if (str_contains($content, '"vue"')) return ['runtime' => 'node', 'framework' => 'vue'];
-            return ['runtime' => 'node', 'framework' => 'node'];
-        }
-        
-        return ['runtime' => 'static', 'framework' => 'html'];
+        return $merged;
     }
 
-    private function generateStartupScript($runtime, $framework)
-    {
-        $header = "#!/bin/sh\n"
-            . "\n"
-            . "# --- UBIQ AUTO-GENERATED STARTUP SCRIPT ---\n"
-            . "echo \"[Ubiq] Booting {$framework}...\"\n"
-            . "\n"
-            . "# Redirect temp file writes to /tmp to avoid volume permission issues\n"
-            . "export TMPDIR=/tmp\n"
-            . "mkdir -p /tmp/.cache\n";
-
-        if ($runtime === 'node') $header .= "apk add --no-cache git\n\n";
-        elseif ($runtime === 'php') $header .= "apk add --no-cache git zip unzip libzip-dev sqlite-dev nodejs npm\n\n";
-        elseif ($runtime === 'python') $header .= "apk add --no-cache git build-base libffi-dev\n\n";
-        else $header .= "\n";
-
-        switch ($framework) {
-
-            case 'react':
-            case 'vue':
-                return $header
-                    . "echo \"[Ubiq] Installing NPM packages...\"\n"
-                    . "npm install\n"
-                    . "\n"
-                    . "export TMPDIR=/tmp\n"
-                    . "export VITE_CACHE_DIR=/tmp/.vite-cache\n"
-                    . "mkdir -p /tmp/.vite-cache\n"
-                    . "\n"
-                    . "if [ -f \"public/index.html\" ] && [ ! -f \"index.html\" ]; then\n"
-                    . "    echo \"[Ubiq] Detected index.html in public/. Moving to root for Vite compatibility...\"\n"
-                    . "    mv public/index.html .\n"
-                    . "fi\n"
-                    . "\n"
-                    . "echo \"[Ubiq] Starting Development Server...\"\n"
-                    . "if [ -f \"vite.config.js\" ] || [ -f \"vite.config.ts\" ]; then\n"
-                    . "    echo \"[Ubiq] Detected Vite config. Launching via npx...\"\n"
-                    . "    npx vite --host 0.0.0.0 --port 5173\n"
-                    . "else\n"
-                    . "    npm run dev -- --host 0.0.0.0 --port 5173\n"
-                    . "fi\n";
-
-            case 'nextjs':
-                return $header
-                    . "echo \"[Ubiq] Installing NPM packages...\"\n"
-                    . "npm install\n"
-                    . "\n"
-                    . "echo \"[Ubiq] Starting Next.js...\"\n"
-                    . "npx next dev -p 5173 -H 0.0.0.0\n";
-
-            case 'node':
-                return $header
-                    . "echo \"[Ubiq] Installing dependencies...\"\n"
-                    . "npm install\n"
-                    . "\n"
-                    . "echo \"[Ubiq] Starting Node...\"\n"
-                    . "if grep -q '\"start\":' package.json; then\n"
-                    . "    npm start\n"
-                    . "elif [ -f index.js ]; then\n"
-                    . "    node index.js\n"
-                    . "elif [ -f app.js ]; then\n"
-                    . "    node app.js\n"
-                    . "else\n"
-                    . "    echo \"Error: Could not determine entry point.\"\n"
-                    . "    exit 1\n"
-                    . "fi\n";
-
-            case 'django':
-                return $header
-                    . "echo \"[Ubiq] Installing Python requirements...\"\n"
-                    . "if [ -f requirements.txt ]; then pip install -r requirements.txt; fi\n"
-                    . "\n"
-                    . "echo \"[Ubiq] Migrating Database...\"\n"
-                    . "python manage.py migrate\n"
-                    . "\n"
-                    . "echo \"[Ubiq] Starting Django Server...\"\n"
-                    . "python manage.py runserver 0.0.0.0:8000\n";
-
-            case 'flask':
-                return $header
-                    . "echo \"[Ubiq] Installing Python requirements...\"\n"
-                    . "if [ -f requirements.txt ]; then pip install -r requirements.txt; fi\n"
-                    . "\n"
-                    . "echo \"[Ubiq] Starting Flask Server...\"\n"
-                    . "if [ -f app.py ]; then\n"
-                    . "    flask run --host=0.0.0.0 --port=8000 || python app.py\n"
-                    . "elif [ -f main.py ]; then\n"
-                    . "    python main.py\n"
-                    . "else\n"
-                    . "    echo \"Error: No entry point found.\"\n"
-                    . "    exit 1\n"
-                    . "fi\n";
-
-            case 'spring':
-                return $header
-                    . "echo \"[Ubiq] Preparing Java Environment...\"\n"
-                    . "chmod +x mvnw 2>/dev/null || true\n"
-                    . "chmod +x gradlew 2>/dev/null || true\n"
-                    . "\n"
-                    . "if [ -f mvnw ]; then\n"
-                    . "    echo \"[Ubiq] Running Maven...\"\n"
-                    . "    ./mvnw spring-boot:run -Dspring-boot.run.arguments=--server.port=8080\n"
-                    . "elif [ -f gradlew ]; then\n"
-                    . "    echo \"[Ubiq] Running Gradle...\"\n"
-                    . "    ./gradlew bootRun --args='--server.port=8080'\n"
-                    . "else\n"
-                    . "    echo \"Error: No build wrapper found.\"\n"
-                    . "    exit 1\n"
-                    . "fi\n";
-
-            case 'raw':
-                return $header
-                    . "export COMPOSER_MEMORY_LIMIT=-1\n"
-                    . "echo \"[Ubiq] Installing Composer dependencies...\"\n"
-                    . "if [ -f composer.json ]; then composer install --ignore-platform-reqs --no-interaction; fi\n"
-                    . "\n"
-                    . "echo \"[Ubiq] Starting PHP Built-in Server...\"\n"
-                    . "if [ -d \"public\" ]; then\n"
-                    . "    php -S 0.0.0.0:8000 -t public\n"
-                    . "else\n"
-                    . "    php -S 0.0.0.0:8000\n"
-                    . "fi\n";
-
-            case 'laravel':
-                return $header
-                    . "echo \"[Ubiq] Scaffolding required directories...\"\n"
-                    . "mkdir -p storage/framework/sessions storage/framework/views storage/framework/cache storage/logs bootstrap/cache database routes config app/Http/Controllers 2>/dev/null || true\n"
-                    . "chmod -R 777 storage bootstrap/cache database routes config 2>/dev/null || true\n"
-                    . "\n"
-                    . "echo \"[Ubiq] Verifying artisan script...\"\n"
-                    . "cat > artisan << 'ARTISAN_SCRIPT'\n"
-                    . "#!/usr/bin/env php\n"
-                    . "<?php\n"
-                    . "define('LARAVEL_START', microtime(true));\n"
-                    . "if (file_exists(__DIR__.'/vendor/autoload.php')) {\n"
-                    . "    require __DIR__.'/vendor/autoload.php';\n"
-                    . "} else {\n"
-                    . "    fwrite(STDERR, \"Vendor autoload not found.\\n\");\n"
-                    . "    exit(1);\n"
-                    . "}\n"
-                    . '$app = require_once __DIR__."/bootstrap/app.php";' . "\n"
-                    . '$kernel = $app->make(Illuminate\Contracts\Console\Kernel::class);' . "\n"
-                    . '$status = $kernel->handle($input = new Symfony\Component\Console\Input\ArgvInput, new Symfony\Component\Console\Output\ConsoleOutput);' . "\n"
-                    . '$kernel->terminate($input, $status);' . "\n"
-                    . 'exit($status);' . "\n"
-                    . "ARTISAN_SCRIPT\n"
-                    . "chmod +x artisan 2>/dev/null || true\n"
-                    . "\n"
-                    // --- SMART HYBRID BOOTSTRAP (Supports L10 & L11) ---
-                    . "if [ ! -f bootstrap/app.php ]; then\n"
-                    . "    echo \"[Ubiq] AI forgot bootstrap/app.php! Creating Smart Hybrid Bootstrap...\"\n"
-                    . "    cat > bootstrap/app.php << 'BOOTSTRAP_EOF'\n"
-                    . '<?php' . "\n"
-                    . 'if (class_exists("Illuminate\Foundation\Configuration\Middleware")) {' . "\n"
-                    . '    return Illuminate\Foundation\Application::configure(basePath: dirname(__DIR__))' . "\n"
-                    . '        ->withRouting(web: __DIR__."/../routes/web.php", commands: __DIR__."/../routes/console.php", health: "/up")' . "\n"
-                    . '        ->withMiddleware(function ($middleware) {})' . "\n"
-                    . '        ->withExceptions(function ($exceptions) {})' . "\n"
-                    . '        ->create();' . "\n"
-                    . '} else {' . "\n"
-                    . '    $app = new Illuminate\Foundation\Application(dirname(__DIR__));' . "\n"
-                    . '    $app->singleton("Illuminate\Contracts\Http\Kernel", class_exists("App\Http\Kernel") ? "App\Http\Kernel" : "Illuminate\Foundation\Http\Kernel");' . "\n"
-                    . '    $app->singleton("Illuminate\Contracts\Console\Kernel", class_exists("App\Console\Kernel") ? "App\Console\Kernel" : "Illuminate\Foundation\Console\Kernel");' . "\n"
-                    . '    $app->singleton("Illuminate\Contracts\Debug\ExceptionHandler", class_exists("App\Exceptions\Handler") ? "App\Exceptions\Handler" : "Illuminate\Foundation\Exceptions\Handler");' . "\n"
-                    . '    return $app;' . "\n"
-                    . '}' . "\n"
-                    . "BOOTSTRAP_EOF\n"
-                    . "fi\n"
-                    . "\n"
-                    // --- MODERN LARAVEL 11 FALLBACK COMPOSER ---
-                    . "if [ ! -f composer.json ]; then\n"
-                    . "    echo \"[Ubiq] AI forgot composer.json! Creating default (Laravel 11)...\"\n"
-                    . "    cat > composer.json << 'COMPOSER_EOF'\n"
-                    . "{\n"
-                    . "    \"name\": \"laravel/laravel\",\n"
-                    . "    \"require\": {\n"
-                    . "        \"php\": \"^8.2\",\n"
-                    . "        \"laravel/framework\": \"^11.0\",\n"
-                    . "        \"laravel/tinker\": \"^2.9\"\n"
-                    . "    },\n"
-                    . "    \"autoload\": {\n"
-                    . "        \"psr-4\": {\n"
-                    . "            \"App\\\\\": \"app/\",\n"
-                    . "            \"Database\\\\Factories\\\\\": \"database/factories/\",\n"
-                    . "            \"Database\\\\Seeders\\\\\": \"database/seeders/\"\n"
-                    . "        }\n"
-                    . "    }\n"
-                    . "}\n"
-                    . "COMPOSER_EOF\n"
-                    . "fi\n"
-                    . "\n"
-                    . "export COMPOSER_MEMORY_LIMIT=-1\n"
-                    . "echo \"[Ubiq] Installing Composer dependencies...\"\n"
-                    . "composer config -g platform-check false\n"
-                    . "composer install --ignore-platform-reqs --no-interaction\n"
-                    . "\n"
-                    . "if [ -f package.json ]; then\n"
-                    . "    echo \"[Ubiq] Installing Frontend Dependencies...\"\n"
-                    . "    npm install\n"
-                    . "    if [ -f resources/js/app.js ] && [ ! -f resources/js/bootstrap.js ]; then\n"
-                    . "        echo \"[Ubiq] Creating default bootstrap.js...\"\n"
-                    . "        printf \"import axios from 'axios';\\nwindow.axios = axios;\\nwindow.axios.defaults.headers.common['X-Requested-With'] = 'XMLHttpRequest';\\n\" > resources/js/bootstrap.js\n"
-                    . "    fi\n"
-                    . "    echo \"[Ubiq] Building Frontend Assets...\"\n"
-                    . "    npm run build\n"
-                    . "fi\n"
-                    . "\n"
-                    . "if [ ! -f .env ]; then\n"
-                    . "    echo \"[Ubiq] Creating .env file...\"\n"
-                    . "    if [ -f .env.example ]; then\n"
-                    . "        cp .env.example .env\n"
-                    . "    else\n"
-                    . "        touch .env 2>/dev/null || true\n"
-                    . "        echo 'APP_KEY=' >> .env 2>/dev/null || true\n"
-                    . "    fi\n"
-                    . "fi\n"
-                    . "\n"
-                    . "if ! grep -q \"^APP_KEY=base64:\" .env; then\n"
-                    . "    echo \"[Ubiq] Generating missing App Key...\"\n"
-                    . "    php artisan key:generate --force\n"
-                    . "fi\n"
-                    . "\n"
-                    // --- PERMISSION BYPASS FOR SQLITE ---
-                    . "if [ ! -f database/database.sqlite ]; then\n"
-                    . "    echo \"[Ubiq] Creating database...\"\n"
-                    . "    mkdir -p database 2>/dev/null || true\n"
-                    . "    touch database/database.sqlite 2>/dev/null || true\n"
-                    . "    chmod 666 database/database.sqlite 2>/dev/null || true\n"
-                    . "fi\n"
-                    . "sed -i 's/DB_CONNECTION=.*/DB_CONNECTION=sqlite/g' .env 2>/dev/null || true\n"
-                    . "sed -i 's/DB_DATABASE=.*/DB_DATABASE=\\/app\\/database\\/database.sqlite/g' .env 2>/dev/null || true\n"
-                    . "\n"
-                    . "echo \"[Ubiq] Running migrations...\"\n"
-                    . "php artisan migrate --force\n"
-                    . "MIGRATE_EXIT=\$?\n"
-                    . "if [ \$MIGRATE_EXIT -ne 0 ]; then\n"
-                    . "    echo \"[Ubiq] WARNING: migrations failed. Server will still start.\"\n"
-                    . "fi\n"
-                    . "\n"
-                    . "echo \"[Ubiq] Starting Server...\"\n"
-                    . "php artisan serve --host=0.0.0.0 --port=8000\n";
-
-            default:
-                return $header
-                    . "if [ -f \"public/index.html\" ] && [ ! -f \"index.html\" ]; then\n"
-                    . "    echo \"[Ubiq] Promoting public/index.html to root...\"\n"
-                    . "    mv public/index.html .\n"
-                    . "fi\n"
-                    . "echo '[Ubiq] Static site ready.'\n"
-                    . "tail -f /dev/null\n";
+    private function detectFromDisk(string $path): array {
+        $config = [];
+        if (FileSystem::exists($path . '/artisan') || (FileSystem::exists($path . '/composer.json') && str_contains(@file_get_contents($path . '/composer.json') ?: '', '"laravel/framework"'))) {
+            $config['runtime'] = 'php'; $config['framework'] = 'laravel'; $config['port'] = 8000;
+        } elseif (FileSystem::exists($path . '/composer.json') || FileSystem::exists($path . '/index.php')) {
+            $config['runtime'] = 'php'; $config['framework'] = 'raw'; $config['port'] = 8000;
+        } elseif (FileSystem::exists($path . '/package.json')) {
+            $pkg = json_decode(@file_get_contents($path . '/package.json') ?: '{}', true);
+            $deps = array_merge($pkg['dependencies'] ?? [], $pkg['devDependencies'] ?? []);
+            $config['runtime'] = 'node';
+            if (isset($deps['next'])) {
+                $config['framework'] = 'nextjs';
+                $config['port'] = 3000;
+            } elseif (isset($deps['@angular/core'])) {
+                $config['framework'] = 'angular';
+                $config['port'] = 4200;  // Angular CLI serves on 4200, NOT 5173
+            } elseif (isset($deps['react'])) {
+                $config['framework'] = 'react';
+                $config['port'] = 5173;
+            } elseif (isset($deps['vue'])) {
+                $config['framework'] = 'vue';
+                $config['port'] = 5173;
+            } else {
+                $config['framework'] = 'node';
+                $config['port'] = 3000;
+            }
+            if (FileSystem::exists($path . '/pnpm-lock.yaml')) $config['package_manager'] = 'pnpm';
+            elseif (FileSystem::exists($path . '/bun.lockb')) $config['package_manager'] = 'bun';
+            elseif (FileSystem::exists($path . '/yarn.lock')) $config['package_manager'] = 'yarn';
+            else $config['package_manager'] = 'npm';
+        } elseif (FileSystem::exists($path . '/manage.py')) {
+            $config['runtime'] = 'python'; $config['framework'] = 'django'; $config['port'] = 8000;
+        } elseif (FileSystem::exists($path . '/requirements.txt') || FileSystem::exists($path . '/main.py')) {
+            $config['runtime'] = 'python';
+            $req = @file_get_contents($path . '/requirements.txt') ?: '';
+            if (str_contains($req, 'fastapi')) $config['framework'] = 'fastapi';
+            elseif (str_contains($req, 'flask')) $config['framework'] = 'flask';
+            else $config['framework'] = 'python';
+            $config['port'] = 8000;
+        } else {
+            $config['runtime'] = 'static'; $config['framework'] = 'html'; $config['port'] = 80;
         }
+        return $config;
+    }
+
+    private function selectDockerImage(array $config): array {
+        $runtime = $config['runtime'] ?? 'static';
+        $version = $config['version'] ?? null;
+        $major   = $version ? (int)$version : null;
+        $internalPort = $config['port'] ?? ($runtime === 'node' ? 5173 : 8000);
+
+        return match($runtime) {
+            'node' => match(true) {
+                $major >= 22  => ['image' => 'node:22-alpine', 'port' => $internalPort],
+                $major >= 18  => ['image' => 'node:18-alpine', 'port' => $internalPort],
+                default       => ['image' => 'node:20-alpine', 'port' => $internalPort],
+            },
+            // FIX: Always use php:8.3-cli-alpine. The old match(true) always fell through
+            // to composer:2.7 because $version is never set by detectFromDisk(), making
+            // $major null, and null >= 83 is false. composer:2.7 lacks proper Alpine
+            // shell tools and causes php -S / artisan failures. php:8.3-cli-alpine has
+            // PHP 8.3 + Composer available after `apk add` in the startup script.
+            'php'  => ['image' => 'php:8.3-cli-alpine', 'port' => $internalPort],
+            'python' => match(true) {
+                $major >= 312 => ['image' => 'python:3.12-alpine',  'port' => $internalPort],
+                default       => ['image' => 'python:3.11-alpine',  'port' => $internalPort],
+            },
+            default => ['image' => 'nginx:alpine', 'port' => 80], 
+        };
+    }
+
+    /**
+     * Write critical Laravel files directly to disk from PHP before generating
+     * the startup script. This is far more reliable than heredocs inside shell
+     * arrays — PHP string escaping is controlled, heredoc delimiters can't be
+     * corrupted, and the files exist before Docker even starts.
+     */
+    private function writeLaravelProofingFiles(string $workspacePath): void
+    {
+        // ── 1. Create ALL core directories on the HOST side with 0777 ──
+        $dirs = [
+            'app',
+            'bootstrap/cache',
+            'config',
+            'database/migrations',
+            'public',
+            'resources/views',
+            'routes',
+            'storage/framework/sessions',
+            'storage/framework/views',
+            'storage/framework/cache',
+            'storage/logs',
+        ];
+        foreach ($dirs as $dir) {
+            $fullDir = $workspacePath . '/' . $dir;
+            if (!is_dir($fullDir)) {
+                @mkdir($fullDir, 0777, true);
+            }
+            @chmod($fullDir, 0777);
+        }
+
+        // ── 1.5 Force Create SQLite Database on HOST side ──
+        // Directory must be 0777 so the Docker container (which may run as a
+        // different UID) can write. The file needs 0666 (world-writable).
+        $dbDir  = $workspacePath . '/database';
+        $dbPath = $dbDir . '/database.sqlite';
+        if (!is_dir($dbDir)) @mkdir($dbDir, 0777, true);
+        @chmod($dbDir, 0777);
+        if (!file_exists($dbPath)) {
+            @file_put_contents($dbPath, '');
+        }
+        @chmod($dbPath, 0666);
+
+        // ── 2. bootstrap/app.php ────────────────────────────────────────────────
+        $bootstrapPath = $workspacePath . '/bootstrap/app.php';
+        if (!file_exists($bootstrapPath) || trim(file_get_contents($bootstrapPath)) === '') {
+            $bootstrapContent = <<<'PHP'
+<?php
+if (class_exists(\Illuminate\Foundation\Configuration\Middleware::class)) {
+    return \Illuminate\Foundation\Application::configure(basePath: dirname(__DIR__))
+        ->withRouting(
+            web:      __DIR__ . '/../routes/web.php',
+            commands: file_exists(__DIR__ . '/../routes/console.php') ? __DIR__ . '/../routes/console.php' : null,
+            health:   '/up',
+        )
+        ->withMiddleware(function ($middleware) {})
+        ->withExceptions(function ($exceptions) {})
+        ->create();
+} else {
+    $app = new \Illuminate\Foundation\Application(dirname(__DIR__));
+    $app->singleton(\Illuminate\Contracts\Http\Kernel::class, class_exists(\App\Http\Kernel::class) ? \App\Http\Kernel::class : \Illuminate\Foundation\Http\Kernel::class);
+    $app->singleton(\Illuminate\Contracts\Console\Kernel::class, class_exists(\App\Console\Kernel::class) ? \App\Console\Kernel::class : \Illuminate\Foundation\Console\Kernel::class);
+    $app->singleton(\Illuminate\Contracts\Debug\ExceptionHandler::class, class_exists(\App\Exceptions\Handler::class) ? \App\Exceptions\Handler::class : \Illuminate\Foundation\Exceptions\Handler::class);
+    return $app;
+}
+PHP;
+            file_put_contents($bootstrapPath, $bootstrapContent);
+            @chmod($bootstrapPath, 0644);
+        }
+
+        // ── 3. artisan (HYBRID FOR LARAVEL 10 & 11) ───────────────────────────
+        $artisanPath = $workspacePath . '/artisan';
+        if (!file_exists($artisanPath) || trim(file_get_contents($artisanPath)) === '') {
+            $artisanContent = <<<'PHP'
+#!/usr/bin/env php
+<?php
+define('LARAVEL_START', microtime(true));
+if (file_exists(__DIR__ . '/vendor/autoload.php')) {
+    require __DIR__ . '/vendor/autoload.php';
+} else {
+    fwrite(STDERR, "[Ubiq] vendor/autoload.php not found — run composer install first.\n");
+    exit(1);
+}
+$app = require_once __DIR__ . '/bootstrap/app.php';
+if (method_exists($app, 'handleCommand')) {
+    $status = $app->handleCommand(new Symfony\Component\Console\Input\ArgvInput);
+} else {
+    $kernel = $app->make(Illuminate\Contracts\Console\Kernel::class);
+    $status = $kernel->handle(
+        $input = new Symfony\Component\Console\Input\ArgvInput,
+        new Symfony\Component\Console\Output\ConsoleOutput
+    );
+    $kernel->terminate($input, $status);
+}
+exit($status);
+PHP;
+            file_put_contents($artisanPath, $artisanContent);
+            @chmod($artisanPath, 0755);
+        }
+
+        // ── 4. routes/web.php ─────────────────────────────────────────────────
+        $webPhpPath = $workspacePath . '/routes/web.php';
+        if (!file_exists($webPhpPath) || trim(file_get_contents($webPhpPath)) === '') {
+            file_put_contents($webPhpPath, "<?php\nuse Illuminate\\Support\\Facades\\Route;\nRoute::get('/', fn () => response()->json(['status' => 'ok', 'message' => 'Laravel is running']));\n");
+        }
+
+        // ── 4.1 config/app.php (CRITICAL FIX FOR LOAD CONFIG ERROR) ───────────
+        $configAppPath = $workspacePath . '/config/app.php';
+        if (!file_exists($configAppPath) || trim(file_get_contents($configAppPath)) === '') {
+            $configAppContent = <<<'PHP'
+<?php
+return [
+    'name' => env('APP_NAME', 'UbiqApp'),
+    'env' => env('APP_ENV', 'production'),
+    'debug' => (bool) env('APP_DEBUG', false),
+    'url' => env('APP_URL', 'http://localhost'),
+    'timezone' => env('APP_TIMEZONE', 'UTC'),
+    'locale' => env('APP_LOCALE', 'en'),
+    'fallback_locale' => env('APP_FALLBACK_LOCALE', 'en'),
+    'faker_locale' => env('APP_FAKER_LOCALE', 'en_US'),
+    'cipher' => 'AES-256-CBC',
+    'key' => env('APP_KEY'),
+    'previous_keys' => [...array_filter(explode(',', env('APP_PREVIOUS_KEYS', '')))],
+    'providers' => Illuminate\Support\ServiceProvider::defaultProviders()->merge([])->toArray(),
+    'aliases' => Illuminate\Support\Facades\Facade::defaultAliases()->merge([])->toArray(),
+];
+PHP;
+            file_put_contents($configAppPath, $configAppContent);
+            @chmod($configAppPath, 0644);
+        }
+
+        // ── 4.2 config/database.php (CRITICAL FOR SQLITE MIGRATIONS) ──────────
+        $configDbPath = $workspacePath . '/config/database.php';
+        if (!file_exists($configDbPath) || trim(file_get_contents($configDbPath)) === '') {
+            $configDbContent = <<<'PHP'
+<?php
+return [
+    'default' => env('DB_CONNECTION', 'sqlite'),
+    'connections' => [
+        'sqlite' => [
+            'driver' => 'sqlite',
+            'url' => env('DATABASE_URL'),
+            'database' => env('DB_DATABASE', database_path('database.sqlite')),
+            'prefix' => '',
+            'foreign_key_constraints' => env('DB_FOREIGN_KEYS', true),
+        ],
+    ],
+    'migrations' => [
+        'table' => 'migrations',
+        'update_date_on_publish' => true,
+    ],
+];
+PHP;
+            file_put_contents($configDbPath, $configDbContent);
+            @chmod($configDbPath, 0644);
+        }
+
+        // ── 4.5 public/index.php (HYBRID FOR LARAVEL 10 & 11) ─────────────────
+        $indexPhpPath = $workspacePath . '/public/index.php';
+        if (!file_exists($indexPhpPath) || trim(file_get_contents($indexPhpPath)) === '') {
+            $indexContent = <<<'PHP'
+<?php
+define('LARAVEL_START', microtime(true));
+
+if (file_exists(__DIR__.'/../storage/framework/maintenance.php')) {
+    require __DIR__.'/../storage/framework/maintenance.php';
+}
+
+require __DIR__.'/../vendor/autoload.php';
+
+$app = require_once __DIR__.'/../bootstrap/app.php';
+
+if (method_exists($app, 'handleRequest')) {
+    $app->handleRequest(Illuminate\Http\Request::capture());
+} else {
+    $kernel = $app->make(Illuminate\Contracts\Http\Kernel::class);
+    $response = $kernel->handle(
+        $request = Illuminate\Http\Request::capture()
+    );
+    $response->send();
+    $kernel->terminate($request, $response);
+}
+PHP;
+            file_put_contents($indexPhpPath, $indexContent);
+            @chmod($indexPhpPath, 0644);
+        }
+
+        // ── 5. composer.json fallback ─────────────────────────────────────────
+        $composerPath = $workspacePath . '/composer.json';
+        if (!file_exists($composerPath) || trim(file_get_contents($composerPath)) === '') {
+            // FIX: Use Laravel ^10.0 to match the system prompt default. ^11.0 caused
+            // a mismatch: repairLaravelScaffold would detect L11 and write L11 bootstrap,
+            // but AI-generated files expected L10 kernel pattern.
+            $composerJson = json_encode([
+                'name'    => 'ubiq/app',
+                'require' => [
+                    'php'                  => '^8.1',
+                    'laravel/framework'    => '^10.0',
+                    'laravel/tinker'       => '^2.8',
+                ],
+                'autoload' => [
+                    'psr-4' => [
+                        'App\\'                  => 'app/',
+                        'Database\\Factories\\'  => 'database/factories/',
+                        'Database\\Seeders\\'    => 'database/seeders/',
+                    ],
+                ],
+                'config' => [
+                    'optimize-autoloader' => true,
+                    'preferred-install'   => 'dist',
+                ],
+                'minimum-stability' => 'stable',
+                'prefer-stable'     => true,
+            ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+            file_put_contents($composerPath, $composerJson);
+        }
+    }
+
+    private function generateStartupScript(array $config, string $workspacePath = ''): string
+    {
+        $runtime   = $config['runtime'] ?? 'static';
+        $framework = $config['framework'] ?? 'html';
+        $pm        = $config['package_manager'] ?? 'npm';
+        $port      = $config['port'] ?? ($runtime === 'node' ? 5173 : 8000);
+
+        // ── Write critical files to disk NOW (before the container starts) ──
+        if ($framework === 'laravel' && $workspacePath !== '') {
+            $this->writeLaravelProofingFiles($workspacePath);
+        }
+
+        $lines = [
+            '#!/bin/sh',
+            "echo '[Ubiq] Booting {$framework} on internal port {$port}...'",
+            'export TMPDIR=/tmp',
+            'mkdir -p /tmp/.cache',
+        ];
+
+        // ── System packages ──────────────────────────────────────────────────
+        // CRITICAL: Use separate lines with || true for each group.
+        // A single long && chain means any failure silently stops the whole
+        // script — npm install and ng serve never run. Split into resilient steps.
+        $sysPackages = match ($runtime) {
+            'node'   => implode("\n", [
+                // Base tools always needed
+                'apk add --no-cache git curl 2>&1 || true',
+                // Build tools for Angular native addons (esbuild, @angular-devkit)
+                // Non-fatal: React/Vue work fine without them
+                'apk add --no-cache python3 make g++ 2>&1 || true',
+            ]),
+            'php'    => implode("\n", [
+                'apk add --no-cache git zip unzip libzip-dev sqlite-dev nodejs npm curl 2>&1',
+                'curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer',
+            ]),
+            'python' => 'apk add --no-cache git build-base libffi-dev 2>&1 || true',
+            default  => '',
+        };
+        if ($sysPackages !== '') {
+            $lines[] = $sysPackages;
+        }
+
+        // ── Install dependencies (WITH AI INTERCEPTION) ──────────────────────
+        if (!empty($config['install'])) {
+            foreach ((array) $config['install'] as $cmd) {
+                if (str_contains($cmd, 'composer') && (str_contains($cmd, 'install') || str_contains($cmd, 'update'))) {
+                    $lines[] = "composer config platform-check false 2>/dev/null || true";
+                    if (!str_contains($cmd, '--ignore-platform-reqs')) $cmd .= " --ignore-platform-reqs";
+                    if (!str_contains($cmd, '--no-interaction')) $cmd .= " --no-interaction";
+                    if (!str_contains($cmd, '--no-scripts')) $cmd .= " --no-scripts"; 
+                }
+                $lines[] = "echo '[Ubiq] Running: {$cmd}'";
+                $lines[] = $cmd;
+            }
+        } else {
+            $lines = array_merge($lines, $this->defaultInstallCommands($runtime, $pm));
+        }
+
+        // ── Post-Install Laravel AI-Proofing ─────────────────────────────────
+        if ($framework === 'laravel') {
+            $lines[] = "echo '[Ubiq] Applying Post-Install Laravel Fixes...'";
+
+            // FIX: Set permissions INSIDE the container (after Docker mount).
+            // The host creates these dirs as ubuntu:ubuntu but the container runs as root.
+            // storage/ and bootstrap/cache/ need to be writable for Laravel.
+            // database/ and database.sqlite need 0777/0666 so SQLite can write.
+            // Without this, migrations fail with "attempt to write a readonly database".
+            $lines[] = "chmod -R 777 /app/storage /app/bootstrap/cache 2>/dev/null || true";
+            $lines[] = "chmod -R 777 /app/database 2>/dev/null || true";
+            $lines[] = "[ -f /app/database/database.sqlite ] && chmod 666 /app/database/database.sqlite || touch /app/database/database.sqlite && chmod 666 /app/database/database.sqlite";
+
+            // Safely dump autoload
+            $lines[] = "composer dump-autoload --optimize --no-scripts 2>/dev/null || true";
+
+            // Neutralize platform check
+            $lines[] = "echo '<?php // platform check neutralized' > /app/vendor/composer/platform_check.php 2>/dev/null || true";
+        }
+
+        // ── Build step (optional) ────────────────────────────────────────────
+        if (!empty($config['build'])) {
+            foreach ((array) $config['build'] as $cmd) {
+                $lines[] = "echo '[Ubiq] Build: {$cmd}'";
+                $lines[] = $cmd;
+            }
+        }
+
+        // ── Start server ─────────────────────────────────────────────────────
+        if (!empty($config['start'])) {
+            $lines[] = "echo '[Ubiq] Starting (from ubiq.json)...'";
+            $lines[] = $config['start'];
+        } else {
+            $lines = array_merge($lines, $this->defaultStartCommands($runtime, $framework, $pm, $port));
+        }
+
+        return implode("\n", array_filter($lines, fn($l) => $l !== '')) . "\n";
+    }
+
+    private function defaultInstallCommands(string $runtime, string $pm): array {
+        return match($runtime) {
+            'node' => match($pm) {
+                'pnpm'  => [
+                    "echo '[Ubiq] Installing dependencies with pnpm...'",
+                    "npm install -g pnpm 2>&1",
+                    "pnpm install 2>&1",
+                    "echo '[Ubiq] Dependencies installed.'",
+                ],
+                'bun'   => [
+                    "echo '[Ubiq] Installing dependencies with bun...'",
+                    "npm install -g bun 2>&1",
+                    "bun install 2>&1",
+                    "echo '[Ubiq] Dependencies installed.'",
+                ],
+                'yarn'  => [
+                    "echo '[Ubiq] Installing dependencies with yarn...'",
+                    "yarn install 2>&1",
+                    "echo '[Ubiq] Dependencies installed.'",
+                ],
+                default => [
+                    "echo '[Ubiq] Running npm install (this may take 1-2 minutes)...'",
+                    // --no-progress: suppress ANSI progress bars that corrupt log files
+                    // --prefer-offline: use cache if available, skip network when possible
+                    // Remove the | tee pipe — piping buffers output and nothing appears
+                    // in startup.log until npm finishes. Direct stdout flows immediately.
+                    "npm install --prefer-offline --no-audit --no-fund --no-progress 2>&1",
+                    "echo '[Ubiq] npm install complete.'",
+                ],
+            },
+            'php' => [
+                "export COMPOSER_ALLOW_SUPERUSER=1",
+                "export COMPOSER_MEMORY_LIMIT=-1",
+                "composer config platform-check false 2>/dev/null || true",
+                "echo '[Ubiq] Running composer install...'",
+                "composer install --ignore-platform-reqs --no-interaction --no-scripts 2>&1",
+                "echo '[Ubiq] composer install complete.'",
+            ],
+            'python' => [
+                "echo '[Ubiq] Installing Python dependencies...'",
+                "[ -f requirements.txt ] && pip install -r requirements.txt --no-cache-dir 2>&1 || true",
+                "[ -f pyproject.toml ] && pip install -e . --no-cache-dir 2>/dev/null || true",
+                "echo '[Ubiq] Python dependencies installed.'",
+            ],
+            default => [],
+        };
+    }
+
+    private function defaultStartCommands(string $runtime, string $framework, string $pm, int $port): array {
+        $runCmd = match($pm) { 'pnpm' => "pnpm", 'bun' => "bun run", 'yarn' => "yarn", default => "npm run" };
+        return match(true) {
+            $framework === 'nextjs' => [
+                "{$runCmd} dev -- -p {$port} -H 0.0.0.0 2>&1 || {$runCmd} start -- -p {$port} -H 0.0.0.0",
+            ],
+            $framework === 'angular' => [
+                // Angular uses Vite + @analogjs/vite-plugin-angular — no Angular CLI.
+                // Boots in <30s, same as React/Vue.
+                "export VITE_CACHE_DIR=/tmp/.vite-cache",
+                "export NODE_OPTIONS='--max-old-space-size=768'",
+                "echo '[Ubiq] Starting Angular (Vite) dev server on port {$port}...'",
+                "npx vite --host 0.0.0.0 --port {$port} 2>&1",
+            ],
+            $framework === 'react' || $framework === 'vue' => [
+                "export VITE_CACHE_DIR=/tmp/.vite-cache",
+                "if [ -f vite.config.js ] || [ -f vite.config.ts ]; then npx vite --host 0.0.0.0 --port {$port}; else {$runCmd} dev -- --host 0.0.0.0 --port {$port}; fi",
+            ],
+            $framework === 'laravel' => [
+                // .env setup
+                "if [ ! -f .env ]; then",
+                "  if [ -f .env.example ]; then cp .env.example .env; else printf 'APP_KEY=\\nAPP_ENV=local\\nAPP_DEBUG=true\\n' > .env; fi",
+                "fi",
+                // App key
+                "grep -q 'APP_KEY=base64:' .env || php artisan key:generate --force 2>&1 || true",
+                // package:discover (safe now — .env + APP_KEY exist)
+                "php artisan package:discover --ansi 2>/dev/null || echo '[Ubiq] package:discover skipped (non-fatal)'",
+                // Force SQLite — override whatever the AI put in .env or config
+                "sed -i 's|^DB_CONNECTION=.*|DB_CONNECTION=sqlite|' .env 2>/dev/null || true",
+                "sed -i 's|^DB_DATABASE=.*|DB_DATABASE=/app/database/database.sqlite|' .env 2>/dev/null || true",
+                "grep -q '^DB_CONNECTION' .env || printf '\\nDB_CONNECTION=sqlite\\nDB_DATABASE=/app/database/database.sqlite\\n' >> .env",
+                // FIX: Force file-based session + cache so we never need a sessions table.
+                // AI often generates config/session.php with SESSION_DRIVER=database which
+                // requires migrations. File driver works with zero DB setup.
+                "sed -i 's|^SESSION_DRIVER=.*|SESSION_DRIVER=file|' .env 2>/dev/null || true",
+                "grep -q '^SESSION_DRIVER' .env || printf '\\nSESSION_DRIVER=file\\n' >> .env",
+                "sed -i 's|^CACHE_STORE=.*|CACHE_STORE=file|' .env 2>/dev/null || true",
+                "sed -i 's|^CACHE_DRIVER=.*|CACHE_DRIVER=file|' .env 2>/dev/null || true",
+                "grep -q '^CACHE_STORE' .env || printf '\\nCACHE_STORE=file\\n' >> .env",
+                // Re-chmod sqlite in case something changed it
+                "chmod 666 /app/database/database.sqlite 2>/dev/null || true",
+                // Clear config cache so .env overrides take effect
+                "php artisan config:clear 2>&1 || true",
+                // Migrations — non-fatal
+                "echo '[Ubiq] Running migrations...'",
+                "php artisan migrate --force 2>&1 || echo '[Ubiq] Migrations failed (non-fatal), continuing...'",
+                // Start
+                "echo '[Ubiq] Starting Laravel server on port {$port}...'",
+                "php artisan serve --host=0.0.0.0 --port={$port}",
+            ],
+            $framework === 'fastapi' => [
+                "uvicorn main:app --host 0.0.0.0 --port {$port} --reload 2>/dev/null || python main.py",
+            ],
+            $framework === 'django' => [
+                "python manage.py migrate --run-syncdb 2>/dev/null || true",
+                "python manage.py runserver 0.0.0.0:{$port}",
+            ],
+            $framework === 'flask' => [
+                "if [ -f app.py ]; then flask run --host=0.0.0.0 --port={$port} || python app.py; elif [ -f main.py ]; then python main.py; fi",
+            ],
+            $runtime === 'php' => [
+                // Raw PHP — no Laravel
+                "if [ -d public ]; then php -S 0.0.0.0:{$port} -t public; else php -S 0.0.0.0:{$port}; fi",
+            ],
+            $runtime === 'node' => [
+                "if grep -q '\"dev\"' package.json 2>/dev/null; then " .
+                    "{$runCmd} dev -- --host 0.0.0.0 --port {$port} 2>/dev/null || {$runCmd} dev; " .
+                "elif grep -q '\"start\"' package.json 2>/dev/null; then {$runCmd} start; " .
+                "elif [ -f server.js ]; then node server.js; " .
+                "elif [ -f index.js ]; then node index.js; " .
+                "else echo '[Ubiq] No entry point found'; fi",
+            ],
+            default => [
+                "[ -f public/index.html ] && mv public/index.html . 2>/dev/null || true",
+                "echo '[Ubiq] Static site ready.'",
+                "tail -f /dev/null",
+            ],
+        };
     }
 }

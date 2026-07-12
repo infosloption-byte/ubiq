@@ -91,12 +91,14 @@ export const userAPI = {
 };
 
 export const subscriptionApi = {
-    verifySubscription: (subscriptionId: string) =>
-        api.post('/paddle/verify', { subscription_id: subscriptionId }),
+    // Called right after PayPal's onApprove() fires with a subscriptionID —
+    // verifies + persists it server-side against PayPal's own API.
+    confirmSubscription: (subscriptionId: string) =>
+        api.post('/paypal/confirm', { subscription_id: subscriptionId }),
     cancelSubscription: () =>
-        api.post('/paddle/cancel'),
+        api.post('/paypal/cancel'),
     getSubscription: () =>
-        api.get('/paddle/subscription'),
+        api.get('/paypal/subscription'),
 };
 
 export const projectAPI = {

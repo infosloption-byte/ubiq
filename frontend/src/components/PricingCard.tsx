@@ -1,36 +1,49 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { authAPI } from '../services/api';
+import { authAPI, subscriptionApi } from '../services/api';
 import { useAuthStore } from '../stores/authStore';
 import { Check, Sparkles, RefreshCw, UserCheck } from 'lucide-react';
 
-declare const Paddle: any;
+const ACTIVE_STATUSES = ['active', 'past_due'];
 
-const POLL_INTERVAL_MS = 3000;
-const POLL_TIMEOUT_MS  = 120000;
-const WEBHOOK_DELAY_MS = 4000;
+const PAYPAL_SDK_URL = `https://www.paypal.com/sdk/js?client-id=${
+    import.meta.env.VITE_PAYPAL_CLIENT_ID
+}&vault=true&intent=subscription`;
 
-const ACTIVE_STATUSES = ['active', 'past_due', 'trialing'];
+/**
+ * Loads the PayPal JS SDK exactly once, even if multiple components mount it.
+ * The client-id has to be baked into the script URL itself (PayPal's design,
+ * unlike Paddle's separate Initialize() call), so we can't use a static
+ * <script> tag in index.html — it's injected here where Vite env vars exist.
+ */
+function loadPayPalSdk(): Promise<void> {
+    return new Promise((resolve, reject) => {
+        if ((window as any).paypal) {
+            resolve();
+            return;
+        }
+        const existing = document.querySelector(`script[src="${PAYPAL_SDK_URL}"]`);
+        if (existing) {
+            existing.addEventListener('load', () => resolve());
+            return;
+        }
+        const script = document.createElement('script');
+        script.src = PAYPAL_SDK_URL;
+        script.onload = () => resolve();
+        script.onerror = () => reject(new Error('Failed to load PayPal SDK'));
+        document.head.appendChild(script);
+    });
+}
 
 export default function PricingCard() {
     const [loading, setLoading]           = useState(false);
     const [initializing, setInitializing] = useState(true);
-    const [pollStatus, setPollStatus]     = useState<string | null>(null);
+    const [sdkReady, setSdkReady]         = useState(false);
     const navigate = useNavigate();
     const { user, setUser } = useAuthStore();
 
-    const pollingRef  = useRef<ReturnType<typeof setInterval> | null>(null);
-    const timeoutRef  = useRef<ReturnType<typeof setTimeout>  | null>(null);
-    const didSucceed  = useRef(false);
-
-    useEffect(() => { return () => stopPolling(); }, []);
-
-    const stopPolling = () => {
-        if (pollingRef.current) clearInterval(pollingRef.current);
-        if (timeoutRef.current) clearTimeout(timeoutRef.current);
-        pollingRef.current = null;
-        timeoutRef.current = null;
-    };
+    const buttonsContainerRef = useRef<HTMLDivElement>(null);
+    const buttonsRenderedRef  = useRef(false);
 
     const loadUserData = useCallback(async (): Promise<boolean> => {
         try {
@@ -50,75 +63,59 @@ export default function PricingCard() {
         loadUserData().finally(() => setInitializing(false));
     }, [loadUserData]);
 
-    const startPollingForActivation = useCallback(async () => {
-        if (didSucceed.current) return;
-        setLoading(true);
-        setPollStatus("Waiting for payment confirmation...");
-
-        await new Promise(r => setTimeout(r, WEBHOOK_DELAY_MS));
-
-        pollingRef.current = setInterval(async () => {
-            setPollStatus("Verifying subscription...");
-
-            const isActive = await loadUserData();
-
-            if (isActive && !didSucceed.current) {
-                didSucceed.current = true;
-                stopPolling();
-                setLoading(false);
-                setPollStatus(null);
-                alert("Pro Plan Activated Successfully! Your trial starts now.");
-                navigate("/dashboard");
-            }
-        }, POLL_INTERVAL_MS);
-
-        timeoutRef.current = setTimeout(() => {
-            if (!didSucceed.current) {
-                stopPolling();
-                setLoading(false);
-                setPollStatus(null);
-                alert("Payment received! Status is still syncing — please refresh in a moment.");
-            }
-        }, POLL_TIMEOUT_MS);
-    }, [loadUserData]);
-
-    // Keep ref current so Paddle event callback always calls latest version
-    const startPollingRef = useRef(startPollingForActivation);
-    useEffect(() => { startPollingRef.current = startPollingForActivation; }, [startPollingForActivation]);
-
+    // Load the PayPal SDK once on mount.
     useEffect(() => {
-        if (typeof Paddle === 'undefined') return;
-        Paddle.Environment.set('sandbox');
-        Paddle.Initialize({
-            token: import.meta.env.VITE_PADDLE_CLIENT_TOKEN,
-            eventCallback: (event: any) => {
-                console.log("🔔 [Paddle Event]:", event?.name);
-
-                // FIX #3: Only start polling when checkout actually completes.
-                // Previously startPollingForActivation() was also called directly
-                // in handleSubscribe() — before the user had even seen the overlay —
-                // so we were burning 4s + poll intervals on every button click.
-                if (["checkout.completed", "checkout.finished", "transaction.completed"].includes(event?.name)) {
-                    startPollingRef.current();
-                }
-            }
-        });
+        loadPayPalSdk()
+            .then(() => setSdkReady(true))
+            .catch((err) => console.error('❌ [PricingCard] PayPal SDK failed to load:', err));
     }, []);
 
-    const handleSubscribe = () => {
-        if (!user?.email || loading) return;
-        didSucceed.current = false;
+    // Render the PayPal Buttons widget once the SDK is ready. (We still show
+    // the button even for Pro users on this simple card — SettingsPage is
+    // where cancellation lives; this card mainly serves the free→pro path.)
+    useEffect(() => {
+        if (!sdkReady || initializing || buttonsRenderedRef.current) return;
+        if (!buttonsContainerRef.current) return;
 
-        Paddle.Checkout.open({
-            settings:   { displayMode: "overlay", theme: "dark", locale: "en" },
-            items:      [{ priceId: import.meta.env.VITE_PADDLE_PRICE_ID, quantity: 1 }],
-            customer:   { email: user.email },
-            customData: { user_id: user.id.toString() },
-        });
+        const paypal = (window as any).paypal;
+        if (!paypal) return;
 
-        // FIX #3: Polling is now ONLY triggered from the eventCallback above.
-        // Removed the direct startPollingForActivation() call that was here.
-    };
+        buttonsRenderedRef.current = true;
+
+        paypal.Buttons({
+            style: { shape: 'rect', color: 'blue', layout: 'vertical', label: 'subscribe' },
+
+            createSubscription: (_data: any, actions: any) => {
+                return actions.subscription.create({
+                    plan_id: import.meta.env.VITE_PAYPAL_PLAN_ID,
+                });
+            },
+
+            onApprove: async (data: any) => {
+                setLoading(true);
+                try {
+                    // Verify + persist server-side against PayPal's own API —
+                    // don't trust the frontend's approval alone.
+                    const response = await subscriptionApi.confirmSubscription(data.subscriptionID);
+                    if (response.data?.user) {
+                        setUser(response.data.user);
+                    }
+                    alert("Pro Plan Activated Successfully!");
+                    navigate("/dashboard");
+                } catch (err) {
+                    console.error("❌ [PricingCard] Confirmation failed:", err);
+                    alert("Payment approved, but we couldn't confirm it on our end yet. Please refresh in a moment — if it still shows Free, contact support.");
+                } finally {
+                    setLoading(false);
+                }
+            },
+
+            onError: (err: any) => {
+                console.error("❌ [PricingCard] PayPal Buttons error:", err);
+                alert("Something went wrong starting checkout. Please try again.");
+            },
+        }).render(buttonsContainerRef.current);
+    }, [sdkReady, initializing, navigate, setUser]);
 
     if (initializing) {
         return (
@@ -152,22 +149,21 @@ export default function PricingCard() {
                 </div>
 
                 <div className="space-y-4 mb-8">
-                    {["1-Day Free Trial", "Unlimited AI Suggestions", "20GB Cloud Storage", "Full EC2 Instance Access"].map((f, i) => (
+                    {["Unlimited AI Suggestions", "20GB Cloud Storage", "Full EC2 Instance Access"].map((f, i) => (
                         <div key={i} className="flex items-center gap-3 text-sm text-slate-300">
                             <Check className="w-4 h-4 text-indigo-400" /> {f}
                         </div>
                     ))}
                 </div>
 
-                <button
-                    onClick={handleSubscribe}
-                    disabled={loading || !user?.email}
-                    className="w-full py-4 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-800 disabled:text-slate-500 text-white rounded-xl font-bold transition-all flex items-center justify-center gap-2 shadow-lg shadow-indigo-500/20"
-                >
-                    {loading ? (
-                        <><RefreshCw className="animate-spin w-5 h-5" /><span>{pollStatus ?? "Syncing..."}</span></>
-                    ) : 'Start Free Trial'}
-                </button>
+                {loading && (
+                    <div className="flex items-center justify-center gap-2 mb-4 text-slate-300 text-sm">
+                        <RefreshCw className="animate-spin w-4 h-4" /> Confirming subscription...
+                    </div>
+                )}
+
+                {/* PayPal renders its Subscribe button into this container */}
+                <div ref={buttonsContainerRef} className={loading ? 'opacity-40 pointer-events-none' : ''} />
             </div>
         </div>
     );

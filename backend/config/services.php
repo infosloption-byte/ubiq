@@ -47,4 +47,12 @@ return [
         'mode' => env('PADDLE_ENV', 'sandbox'),
     ],
 
+    'paypal' => [
+        'client_id'     => env('PAYPAL_CLIENT_ID'),
+        'client_secret' => env('PAYPAL_CLIENT_SECRET'),
+        'mode'          => env('PAYPAL_MODE', 'sandbox'), // 'sandbox' or 'live'
+        'plan_id'       => env('PAYPAL_PLAN_ID'),          // Pro plan ID from PayPal dashboard
+        'webhook_id'    => env('PAYPAL_WEBHOOK_ID'),       // Webhook ID for signature verification
+    ],
+
 ];

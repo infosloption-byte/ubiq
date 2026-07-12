@@ -50,12 +50,14 @@ class SecurityHeaders
         // - frame-src allows sandbox preview iframes from the same domain only
         $csp = implode('; ', [
             "default-src 'self'",
-            "script-src 'self' https://cdn.paddle.com https://sandbox-cdn.paddle.com",
+            "script-src 'self' https://www.paypal.com https://www.sandbox.paypal.com",
             "style-src 'self' 'unsafe-inline'",
             "img-src 'self' data: blob: https:",
             "font-src 'self' data:",
-            "connect-src 'self' https://api.ubiq-editor.space wss://api.ubiq-editor.space https://api.anthropic.com https://sandbox-api.paddle.com https://api.paddle.com",
-            "frame-src 'self'",
+            "connect-src 'self' https://api.ubiq-editor.space wss://api.ubiq-editor.space https://api.anthropic.com https://www.paypal.com https://www.sandbox.paypal.com",
+            // PayPal's subscription approval flow renders in an iframe/popup
+            // served from paypal.com — needed for the Buttons widget to work.
+            "frame-src 'self' https://www.paypal.com https://www.sandbox.paypal.com",
             "frame-ancestors 'self'",
             "object-src 'none'",
             "base-uri 'self'",

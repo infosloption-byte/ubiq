@@ -5,9 +5,11 @@
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Ubiq - AI Coding Platform</title>
-    
-    <!-- Paddle.js — initialised in App.tsx where Vite env vars are available -->
-    <script src="https://cdn.paddle.com/paddle/v2/paddle.js"></script>
+
+    <!-- PayPal's JS SDK requires the client-id baked into the script URL
+         itself (unlike Paddle's separate init step), so it's loaded
+         dynamically in PricingCard.tsx where the Vite env var is available,
+         rather than as a static tag here. -->
   </head>
   <body>
     <div id="root"></div>

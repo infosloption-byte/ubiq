@@ -6,11 +6,10 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
 use Laravel\Sanctum\HasApiTokens;
-use Laravel\Paddle\Billable;
 
 class User extends Authenticatable
 {
-    use HasApiTokens, HasFactory, Notifiable, Billable;
+    use HasApiTokens, HasFactory, Notifiable;
 
     protected $fillable = [
         'username',
@@ -19,9 +18,11 @@ class User extends Authenticatable
         'google_id',
         'avatar',
         'api_key',
-        'paddle_id',
+        'paypal_subscription_id',
         'subscription_status',
         'subscription_tier',
+        'trial_ends_at',
+        'subscription_ends_at',
     ];
 
     protected $hidden = [
@@ -35,8 +36,9 @@ class User extends Authenticatable
     ];
 
     protected $casts = [
-        'email_verified_at' => 'datetime',
-        'trial_ends_at'     => 'datetime',
+        'email_verified_at'    => 'datetime',
+        'trial_ends_at'        => 'datetime',
+        'subscription_ends_at' => 'datetime',
         'created_at'        => 'datetime',
         'updated_at'        => 'datetime',
         'password'          => 'hashed',

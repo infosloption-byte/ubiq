@@ -2,8 +2,7 @@ import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Layout from '../components/Layout';
 import { useAuthStore } from '../stores/authStore';
-import { userAPI, authAPI } from '../services/api';
-import api from '../services/api';
+import { userAPI, authAPI, subscriptionApi } from '../services/api';
 import PricingCard from '../components/PricingCard';
 import StorageUsage from '../components/StorageUsage';
 import { 
@@ -12,8 +11,6 @@ import {
   Eye, EyeOff, CreditCard, Calendar, Clock,
   ShieldCheck, AlertTriangle, XCircle
 } from 'lucide-react';
-
-declare const Paddle: any;
 
 export default function SettingsPage() {
   const { user, setUser } = useAuthStore();
@@ -78,11 +75,14 @@ export default function SettingsPage() {
     if (!window.confirm("Are you sure? You'll keep Pro access until the end of your current billing period.")) return;
     setSaving(true);
     try {
-      const response = await api.get('/user/subscription/portal');
-      // Redirect user to Paddle's self-serve portal for cancellation
-      window.open(response.data.url, '_blank');
+      // PayPal has no self-serve customer portal like Paddle — cancellation
+      // goes straight through our own API, which calls PayPal's Subscriptions
+      // API server-side.
+      const response = await subscriptionApi.cancelSubscription();
+      if (response.data?.user) setUser(response.data.user);
+      showSuccess("Subscription canceled. You'll keep Pro access until the end of your current billing period.");
     } catch (error) {
-      alert("Failed to open billing portal. Please contact support.");
+      alert("Failed to cancel subscription. Please contact support.");
     } finally {
       setSaving(false);
     }
@@ -346,7 +346,7 @@ export default function SettingsPage() {
                       {isPastDue && (
                         <div className="mt-3 p-3 rounded-lg bg-yellow-500/10 border border-yellow-500/20">
                           <p className="text-yellow-300 text-xs font-bold mb-1">⚠️ Payment Failed</p>
-                          <p className="text-slate-400 text-xs">Paddle will retry automatically. Update your payment method to avoid interruption.</p>
+                          <p className="text-slate-400 text-xs">PayPal will retry the payment automatically. Update your payment method on PayPal to avoid interruption.</p>
                         </div>
                       )}
 

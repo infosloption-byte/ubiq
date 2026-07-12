@@ -134,7 +134,23 @@ class CompletionController extends Controller
     }
 
     /**
-     * GENERATE PROJECT (Used by AI Architect)
+     * GENERATE PROJECT (Boilerplate-First Approach)
+     *
+     * ARCHITECTURE:
+     *   Step 1 — Detect framework from user prompt (BoilerplateManager::detectFromPrompt)
+     *   Step 2 — Write the canonical boilerplate scaffold to disk (BoilerplateManager::write)
+     *            This guarantees correct bootstrap/app.php, kernel files, package.json,
+     *            vite.config.js, etc. before the AI is even called.
+     *   Step 3 — Sync boilerplate files into the DB so the editor shows them.
+     *   Step 4 — Call AI with a focused prompt asking ONLY for app-specific files
+     *            (controllers, models, views, routes, components, etc.)
+     *   Step 5 — Merge AI response ON TOP of the boilerplate. AI files overwrite
+     *            boilerplate placeholders (e.g. routes/web.php, src/App.jsx).
+     *            Protected scaffold files are never overwritten by AI.
+     *   Step 6 — Sync merged files into DB.
+     *
+     * This eliminates the entire class of bugs where AI outputs empty scaffold
+     * files, uses wrong Laravel API versions, or forgets Kernel classes.
      */
     public function generate(Request $request)
     {
@@ -163,82 +179,85 @@ class CompletionController extends Controller
             return response()->json(['error' => "Configuration failed for model: {$model}. Please check your API keys."], 400);
         }
 
-        $systemPrompt = "You are an Expert Full Stack Architect.
-        TASK: Generate a complete, production-ready web application workspace.
+        $workspacePath  = storage_path("app/workspaces/{$project->user_id}/{$project->id}");
+        $userPrompt     = $request->prompt;
 
-        TECHNOLOGY STACK SELECTION:
-        - If the user specifies a framework or language (e.g., Angular, Laravel, React, Vue, Express, Django, CodeIgniter), you MUST strictly use that technology stack.
-        - If the user does not specify a stack, you MUST analyze their requirements and independently choose the OPTIMUM modern stack (e.g., Vite+React+Node) for their specific use case.
+        // ── STEP 1: Detect framework ─────────────────────────────────────────
+        $boilerplateKey = \App\Services\BoilerplateManager::detectFromPrompt($userPrompt);
+        Log::info("[Ubiq] generate() — detected boilerplate: {$boilerplateKey} for project {$project->id}");
 
-        CRITICAL RULES:
-        1. Return ONLY valid JSON where keys are file paths and values are code: {\"filename.ext\": \"content\"}. No markdown blocks outside the JSON.
-        2. You MUST include a 'ubiq.json' file to configure the server. It MUST contain:
-           - \"title\": A short, catchy name for this project based on the prompt.
-           - \"runtime\": You MUST map your chosen stack to EXACTLY ONE of these sandbox environments:
-                -> \"static\": For pure Vanilla HTML/CSS/JS without build steps.
-                -> \"node\": For ANY JavaScript/TypeScript framework (React, Angular, Vue, Next.js, Express, Svelte, etc.).
-                -> \"php\": For ANY PHP framework or pure PHP (Laravel, CodeIgniter, Symfony, etc.).
-                -> \"python\": For ANY Python framework (Django, Flask, FastAPI, etc.).
-           - \"entry\": The primary file to execute or serve.
+        // ── STEP 2 & 3: Write hardcoded scaffold files to disk + sync to DB ────
+        // write() generates all scaffold files from the in-memory template
+        // definition and calls the sync callback once per file, so we don't
+        // need a separate directory-scan loop afterward. No zip files required.
+        $boilerplateMeta = \App\Services\BoilerplateManager::write(
+            $boilerplateKey,
+            $workspacePath,
+            function (string $relativePath, string $content) use ($project) {
+                $project->files()->updateOrCreate(
+                    ['path' => $relativePath],
+                    [
+                        'name'       => basename($relativePath),
+                        'content'    => $content,
+                        'language'   => $this->detectLanguage($relativePath),
+                        'size_bytes' => strlen($content),
+                        'is_deleted' => false,
+                    ]
+                );
+            }
+        );
 
-        3. FRAMEWORK STANDARDS (STRICT):
-           - React/Vue/Vite: You MUST place 'index.html' in the ROOT directory. Do NOT put it in 'public/'. The 'public/' folder is only for static assets like images.
-           - Laravel: Follow standard Laravel structure (index.php in public/).
-           - Next.js: Use the 'app/' directory router structure.
+        // ── STEP 4: Build AI prompt ──────────────────────────────────────────
+        $frameworkPrompt = \App\Services\BoilerplateManager::getAiPrompt($boilerplateKey);
 
-        4. DEPENDENCY ENFORCEMENT & PORT STANDARDIZATION:
-           - If runtime is \"node\", you MUST generate a valid 'package.json' with a \"dev\" script.
-           - CRITICAL: You MUST configure the \"dev\" script to run on port 5173 and bind to 0.0.0.0.
-             (Examples: \"vite --port 5173 --host 0.0.0.0\", \"next dev -p 5173 -H 0.0.0.0\", \"ng serve --port 5173 --host 0.0.0.0\").
-           - If runtime is \"php\", generate 'composer.json'. CRITICAL: If building Laravel, you MUST include the 'artisan', 'public/index.php', AND 'bootstrap/app.php'.
-           - If runtime is \"python\", generate a 'requirements.txt'.
+        $systemPrompt = <<<'SYSTEMPROMPT'
+You are an Expert Full Stack Developer. Your job is to implement the APPLICATION-SPECIFIC logic for a project whose scaffold is already set up.
 
-        5. Provide ALL necessary code to make the app actually run. Do not leave placeholders.";
+OUTPUT FORMAT (MANDATORY):
+Return ONLY a single valid JSON object. Keys are relative file paths, values are complete file contents.
+Example: {"routes/web.php": "<?php use Illuminate\\Support\\Facades\\Route; Route::get('/', fn() => 'Hello');"}
+NO markdown fences, NO explanation, NO comments outside JSON. Response MUST start with { and end with }.
 
-        $userPrompt = "Create this app: " . $request->prompt;
+CRITICAL RULES:
+- NEVER output an empty string "" as a file value. Every file must have real, complete content.
+- NEVER output scaffold/infrastructure files that already exist (listed in framework instructions below).
+- DO output all application logic files: controllers, models, views, routes, components, migrations, etc.
+- All code must be production-quality and complete — no TODO comments, no placeholder functions.
+SYSTEMPROMPT;
 
-        $isNode   = preg_match('/react|vue|angular|svelte|next|nuxt|node|express|nest/i', $request->prompt);
-        $isPhp    = preg_match('/php|laravel|symfony|codeigniter|yii/i', $request->prompt);
-        $isPython = preg_match('/python|django|flask|fastapi/i', $request->prompt);
+        $fullPrompt = "Build this application: {$userPrompt}\n\n" .
+                      "=== FRAMEWORK INSTRUCTIONS ===\n{$frameworkPrompt}";
 
-        if ($isNode) {
-            $userPrompt .= "\n\nCRITICAL ENFORCEMENT: You MUST use '\"runtime\": \"node\"' and generate a full 'package.json' with dependencies. Do NOT output a static HTML fallback.";
-        } elseif ($isPhp) {
-            $userPrompt .= "\n\nCRITICAL ENFORCEMENT: You MUST use '\"runtime\": \"php\"' and generate the correct PHP framework structure (including composer.json if applicable). Do NOT output a static HTML fallback.";
-        } elseif ($isPython) {
-            $userPrompt .= "\n\nCRITICAL ENFORCEMENT: You MUST use '\"runtime\": \"python\"' and generate a 'requirements.txt'. Do NOT output a static HTML fallback.";
-        } else {
-            $userPrompt .= "\n\nCRITICAL ENFORCEMENT: Choose the best tech stack. If your chosen stack requires a server or build step (Node/PHP/Python), you MUST set the correct 'runtime' in ubiq.json and generate the required dependency files (package.json, composer.json, etc.). Do NOT default to static HTML unless it is a very simple request.";
-        }
-
+        // ── STEP 5: Call AI ──────────────────────────────────────────────────
         try {
             $payload = [];
 
             if ($config['provider'] === 'gemini') {
                 $payload = [
                     'systemInstruction' => ['parts' => [['text' => $systemPrompt]]],
-                    'contents'          => [['role' => 'user', 'parts' => [['text' => $userPrompt]]]]
+                    'contents'          => [['role' => 'user', 'parts' => [['text' => $fullPrompt]]]],
+                    'generationConfig'  => ['temperature' => 0.2, 'maxOutputTokens' => 8192],
                 ];
             } elseif ($config['provider'] === 'ollama') {
                 $payload = [
                     'model'    => $config['model_name'],
                     'messages' => [
                         ['role' => 'system', 'content' => $systemPrompt],
-                        ['role' => 'user',   'content' => $userPrompt]
+                        ['role' => 'user',   'content' => $fullPrompt],
                     ],
                     'stream'  => false,
-                    'options' => ['num_predict' => 8000, 'temperature' => 0.1]
+                    'options' => ['num_predict' => 8000, 'temperature' => 0.1],
                 ];
             } else {
                 $payload = [
                     'model'       => $config['model_name'],
                     'messages'    => [
                         ['role' => 'system', 'content' => $systemPrompt],
-                        ['role' => 'user',   'content' => $userPrompt]
+                        ['role' => 'user',   'content' => $fullPrompt],
                     ],
                     'temperature' => 0.2,
                     'max_tokens'  => 8000,
-                    'stream'      => false
+                    'stream'      => false,
                 ];
             }
 
@@ -249,61 +268,179 @@ class CompletionController extends Controller
             }
 
             $data    = $response->json();
-            $content = '';
+            $content = $config['provider'] === 'gemini'
+                ? ($data['candidates'][0]['content']['parts'][0]['text'] ?? '')
+                : ($data['choices'][0]['message']['content'] ?? $data['message']['content'] ?? '');
 
-            if ($config['provider'] === 'gemini') {
-                $content = $data['candidates'][0]['content']['parts'][0]['text'] ?? '';
-            } else {
-                $content = $data['choices'][0]['message']['content'] ?? $data['message']['content'] ?? '';
+            // Strip markdown fences if AI wrapped the JSON
+            $content = preg_replace('/^```(?:json)?\s*/m', '', $content);
+            $content = preg_replace('/\s*```$/m', '', $content);
+            $content = trim($content);
+
+            // Extract JSON object if there's leading text
+            if (!str_starts_with($content, '{')) {
+                preg_match('/\{[\s\S]*\}/s', $content, $matches);
+                $content = $matches[0] ?? $content;
             }
 
-            $content = preg_replace('/^```json/', '', $content);
-            $content = preg_replace('/```$/', '', $content);
+            $aiFiles = json_decode($content, true);
 
-            if (strpos($content, '{') !== 0) {
-                preg_match('/\{[\s\S]*\}/', $content, $matches);
-                if (!empty($matches[0])) $content = $matches[0];
+            if (json_last_error() !== JSON_ERROR_NONE || empty($aiFiles)) {
+                throw new \Exception("AI response was not valid JSON. Raw: " . substr($content, 0, 150) . "...");
             }
 
-            $files = json_decode($content, true);
+            // ── STEP 6: Merge AI files ON TOP of boilerplate ─────────────────
+            // Protected files cannot be overwritten by AI — these are the scaffold
+            // files we wrote in Step 2 that must remain exactly as written.
+            $protected = $this->getProtectedPaths($boilerplateKey);
 
-            if (json_last_error() !== JSON_ERROR_NONE || empty($files)) {
-                throw new \Exception("AI response was not valid JSON. Response: " . substr($content, 0, 100) . "...");
-            }
+            $aiSavedCount = 0;
 
-            $savedCount = 0;
-            foreach ($files as $path => $code) {
-                $project->files()->updateOrCreate(
-                    ['path' => $path],
-                    ['name' => basename($path), 'content' => $code, 'language' => $this->detectLanguage($path), 'is_deleted' => false]
-                );
+            foreach ($aiFiles as $filePath => $code) {
+                // Sanitize path
+                $filePath = ltrim(str_replace(['../', '..\\', '\\'], ['', '', '/'], $filePath), '/');
 
-                $fullPath = storage_path("app/workspaces/{$project->user_id}/{$project->id}/{$path}");
-                if (!file_exists(dirname($fullPath))) mkdir(dirname($fullPath), 0755, true);
+                if (trim((string)$code) === '') {
+                    Log::warning("[Ubiq] AI generated empty file: {$filePath} — skipping");
+                    continue;
+                }
+
+                if (in_array($filePath, $protected, true)) {
+                    Log::info("[Ubiq] AI tried to overwrite protected scaffold file: {$filePath} — skipping");
+                    continue;
+                }
+
+                // Write to disk
+                $fullPath = $workspacePath . '/' . $filePath;
+                if (!is_dir(dirname($fullPath))) mkdir(dirname($fullPath), 0755, true);
                 file_put_contents($fullPath, $code);
 
-                $savedCount++;
+                // Sync to DB
+                $project->files()->updateOrCreate(
+                    ['path' => $filePath],
+                    [
+                        'name'       => basename($filePath),
+                        'content'    => $code,
+                        'language'   => $this->detectLanguage($filePath),
+                        'size_bytes' => strlen($code),
+                        'is_deleted' => false,
+                    ]
+                );
+
+                $aiSavedCount++;
             }
 
-            return response()->json(['message' => "Generated $savedCount files", 'model_used' => $model]);
+            Log::info("[Ubiq] generate() complete — boilerplate: {$boilerplateKey}, ai files: {$aiSavedCount}, project: {$project->id}");
+
+            // FIX: Return the full project file list so the frontend can refresh
+            // the editor tree. Previously only a message string was returned, so
+            // the UI had no way to know which files were saved and never updated.
+            $allFiles = $project->files()
+                ->where('is_deleted', false)
+                ->get(['id', 'path', 'name', 'language', 'size_bytes'])
+                ->toArray();
+
+            return response()->json([
+                'message'     => "Generated {$aiSavedCount} application files on {$boilerplateKey} scaffold",
+                'boilerplate' => $boilerplateKey,
+                'model_used'  => $model,
+                'files_saved' => $aiSavedCount,
+                'files'       => $allFiles,
+            ]);
 
         } catch (\Exception $e) {
+            Log::error("[Ubiq] generate() failed: " . $e->getMessage(), ['project_id' => $project->id]);
             return response()->json(['error' => 'Generation failed: ' . $e->getMessage()], 500);
         }
+    }
+
+    /**
+     * Returns file paths that must NOT be overwritten by AI output.
+     * Delegates to BoilerplateManager which is the single source of truth.
+     */
+    private function getProtectedPaths(string $boilerplateKey): array
+    {
+        // Common to all
+        $common = ['ubiq.json'];
+
+        return match(true) {
+            str_starts_with($boilerplateKey, 'laravel@11') => array_merge($common, [
+                'bootstrap/app.php',
+                'bootstrap/providers.php',
+                'public/index.php',
+                'artisan',
+                'composer.json',
+                '.env.example',
+                'config/app.php',
+                'config/database.php',
+                'config/cache.php',
+                'config/session.php',
+                'app/Providers/AppServiceProvider.php',
+                'app/Models/User.php',
+                'routes/console.php',
+            ]),
+            str_starts_with($boilerplateKey, 'laravel@10') => array_merge($common, [
+                'bootstrap/app.php',
+                'public/index.php',
+                'artisan',
+                'composer.json',
+                '.env.example',
+                'config/app.php',
+                'config/database.php',
+                'config/cache.php',
+                'config/session.php',
+                'app/Http/Kernel.php',
+                'app/Console/Kernel.php',
+                'app/Exceptions/Handler.php',
+                'app/Providers/AppServiceProvider.php',
+                'app/Models/User.php',
+                'routes/console.php',
+            ]),
+            in_array($boilerplateKey, ['react', 'vue']) => array_merge($common, [
+                'package.json',
+                'vite.config.js',
+                'index.html',
+                'src/main.jsx',
+                'src/main.js',
+            ]),
+            $boilerplateKey === 'nextjs' => array_merge($common, [
+                'package.json',
+                'next.config.mjs',
+                'app/layout.jsx',
+            ]),
+            $boilerplateKey === 'node' => array_merge($common, ['package.json']),
+            $boilerplateKey === 'angular' => array_merge($common, [
+                'package.json',
+                'angular.json',
+                'src/main.ts',
+                'src/index.html',
+            ]),
+            in_array($boilerplateKey, ['flask', 'fastapi']) => array_merge($common, ['requirements.txt']),
+            $boilerplateKey === 'django' => array_merge($common, [
+                'manage.py',
+                'requirements.txt',
+                'config/settings.py',
+            ]),
+            default => $common,
+        };
     }
 
     private function detectLanguage($filename)
     {
         $ext = pathinfo($filename, PATHINFO_EXTENSION);
         return match ($ext) {
-            'js', 'jsx' => 'javascript',
-            'ts', 'tsx' => 'typescript',
-            'html'      => 'html',
-            'css'       => 'css',
-            'json'      => 'json',
-            'php'       => 'php',
-            'py'        => 'python',
-            default     => 'plaintext'
+            'js', 'jsx'  => 'javascript',
+            'ts', 'tsx'  => 'typescript',
+            'html'       => 'html',
+            'css', 'scss' => 'css',
+            'json'       => 'json',
+            'php'        => 'php',
+            'py'         => 'python',
+            'sh'         => 'shell',
+            'md'         => 'markdown',
+            'sql'        => 'sql',
+            'vue'        => 'vue',
+            default      => 'plaintext',
         };
     }
 

@@ -5,9 +5,6 @@ namespace App\Providers;
 use Illuminate\Support\ServiceProvider;
 use Illuminate\Support\Facades\URL;
 use Illuminate\Support\Facades\Schema;
-use Illuminate\Support\Facades\Event;
-use Laravel\Paddle\Events\WebhookReceived;
-use App\Listeners\PaddleWebhookListener;
 
 class AppServiceProvider extends ServiceProvider
 {
@@ -21,17 +18,12 @@ class AppServiceProvider extends ServiceProvider
         // ── Default string length for older MySQL ──────────────────────────
         Schema::defaultStringLength(191);
 
-        // ── Paddle Webhook Listener ────────────────────────────────────────
-        // Handles subscription upgrades, cancellations, payment events, etc.
-        // Removing this means Paddle events fire but nothing acts on them —
-        // subscriptions will never update in your DB.
-        Event::listen(
-            WebhookReceived::class,
-            PaddleWebhookListener::class
-        );
+        // NOTE: PayPal webhook handling now lives in PayPalController@webhook
+        // directly (routes/api.php) — PayPal has no Cashier-style event
+        // system, so there's no equivalent Event::listen() registration here.
 
         // ── Force HTTPS in production ──────────────────────────────────────
-        // Ensures all generated URLs (signed preview URLs, Paddle redirects,
+        // Ensures all generated URLs (signed preview URLs,
         // password reset links) always use https:// — never http://.
         if ($this->app->environment('production')) {
             URL::forceScheme('https');
