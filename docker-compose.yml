@@ -103,7 +103,22 @@ services:
       - proxy-net   # must be on proxy-net to reach socket-proxy
       - shared_net  # must be on shared_net to reach mysql_shared by name
 
-  # ── Nginx ─────────────────────────────────────────────────────────────────
+  # ── Frontend (Vite build -> its own nginx) ─────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: ${VITE_API_URL}
+        VITE_PAYPAL_CLIENT_ID: ${VITE_PAYPAL_CLIENT_ID}
+        VITE_PAYPAL_PLAN_ID: ${VITE_PAYPAL_PLAN_ID}
+        VITE_SENTRY_DSN: ${VITE_SENTRY_DSN}
+    container_name: ubiq_frontend
+    restart: always
+    networks:
+      - ubiq-net
+
+  # ── Nginx (reverse proxy: routes to frontend container + fastcgi to api) ──
   nginx:
     image: nginx:alpine
     container_name: ubiq_nginx
@@ -112,10 +127,10 @@ services:
       - "127.0.0.1:8082:80"
     volumes:
       - ./backend:/var/www/html
-      - ./frontend/dist:/var/www/frontend
       - ./nginx.conf:/etc/nginx/conf.d/default.conf
     depends_on:
       - api
+      - frontend
     networks:
       - ubiq-net
 
