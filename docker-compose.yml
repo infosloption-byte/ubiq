@@ -85,11 +85,11 @@ services:
       APP_ENV:     production
       # Tell Laravel/Process::run() to talk to the socket proxy instead of the daemon.
       DOCKER_HOST: tcp://socket-proxy:2375
-      # Shared MySQL (same instance used by Voxora), reached via the Docker
-      # bridge gateway IP rather than a container name, since shared_mysql
-      # lives on a different compose project's network.
+      # Shared MySQL (same instance used by Voxora). Reached by container name
+      # now that this service is attached to shared_net directly, instead of
+      # the previous (broken) bridge-gateway-IP approach.
       DB_CONNECTION: mysql
-      DB_HOST: 172.17.0.1
+      DB_HOST: mysql_shared
       DB_PORT: 3306
       DB_DATABASE: ubiq
       DB_USERNAME: ${DB_USERNAME:-root}
@@ -101,6 +101,7 @@ services:
     networks:
       - ubiq-net
       - proxy-net   # must be on proxy-net to reach socket-proxy
+      - shared_net  # must be on shared_net to reach mysql_shared by name
 
   # ── Nginx ─────────────────────────────────────────────────────────────────
   nginx:
@@ -128,3 +129,6 @@ networks:
   proxy-net:
     driver: bridge
     internal: true    # no external internet access on this network
+
+  shared_net:
+    external: true    # pre-existing network that mysql_shared/pma_shared live on
