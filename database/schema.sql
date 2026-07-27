@@ -31,6 +31,8 @@ CREATE TABLE users (
     email VARCHAR(191) NOT NULL,
     username VARCHAR(100) NOT NULL,
     password VARCHAR(255) NOT NULL,
+    google_id VARCHAR(255) DEFAULT NULL,
+    avatar VARCHAR(500) DEFAULT NULL,
     subscription_tier ENUM('free', 'pro') DEFAULT 'free' NOT NULL,
     api_key VARCHAR(100) DEFAULT NULL,
     email_verified_at TIMESTAMP NULL DEFAULT NULL,
@@ -41,6 +43,7 @@ CREATE TABLE users (
     UNIQUE KEY unique_email (email),
     UNIQUE KEY unique_username (username),
     UNIQUE KEY unique_api_key (api_key),
+    UNIQUE KEY unique_google_id (google_id),
     KEY idx_email (email),
     KEY idx_username (username),
     KEY idx_subscription (subscription_tier)
