@@ -9,26 +9,62 @@ use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\Log;
 use App\Models\Project;
 use App\Models\UsageLog;
-use App\Models\RateLimit;
+use App\Services\PlanGuard;
+use App\Exceptions\PlanLimitExceededException;
 use Carbon\Carbon;
 
 class CompletionController extends Controller
 {
+    public function __construct(private PlanGuard $planGuard)
+    {
+    }
+
     /**
-     * FIX B: Rate limit keys must match the subscription_tier values written by
-     * PaddleWebhookListener ('pro'), not the old migration value ('premium').
+     * Guards every AI-calling endpoint below through PlanGuard's 'ai.request'
+     * action (hourly + daily limits read live from plan_features — see
+     * PLAN_SYSTEM_TASKS.md Phase B3a). Replaces the old hardcoded
+     * $rateLimits array + RateLimit model, which had already caused one
+     * production bug (subscription_tier key mismatch after the
+     * Paddle→PayPal migration — pro users silently fell through to the
+     * free limit). Centralizing here means that class of bug can't recur:
+     * there's exactly one place limits are read from, and it's the
+     * database, not a hardcoded array in this file.
      *
-     * Before: ['free' => 30, 'premium' => 100]
-     * After:  ['free' => 30, 'pro'     => 100]
-     *
-     * With 'premium' as the key, pro subscribers always fell through to the
-     * default of 30 req/hour — same as free users. This gives them the correct
-     * 100 req/hour limit.
+     * @throws never — denials are converted to a 429 response, not thrown
+     *         out of this helper, so every call site stays a simple
+     *         try/catch around the one authorize() call.
      */
-    protected $rateLimits = [
-        'free' => 30,   // 30 requests per hour
-        'pro'  => 100,  // 100 requests per hour  ← was 'premium'
-    ];
+    private function guardAiRequest($user): ?\Illuminate\Http\JsonResponse
+    {
+        try {
+            $this->planGuard->authorize($user, 'ai.request');
+            return null;
+        } catch (PlanLimitExceededException $e) {
+            return $this->planLimitResponse($e);
+        }
+    }
+
+    private function planLimitResponse(PlanLimitExceededException $e): \Illuminate\Http\JsonResponse
+    {
+        $retryAfter = match ($e->reason) {
+            'hourly_limit_exceeded' => (int) Carbon::now()->diffInSeconds(Carbon::now()->copy()->addHour()->startOfHour()),
+            'daily_limit_exceeded' => (int) Carbon::now()->diffInSeconds(Carbon::now()->copy()->addDay()->startOfDay()),
+            default => null,
+        };
+
+        return response()->json([
+            'error' => 'Rate limit exceeded',
+            'reason' => $e->reason,
+            'limit' => $e->limitValue,
+            'usage' => $e->currentUsage,
+            'retry_after' => $retryAfter,
+        ], 429);
+    }
+
+    private function remainingAiRequests($user): ?int
+    {
+        return $this->planGuard->remaining($user, 'ai.request')['hour_remaining'] ?? null;
+    }
 
     /**
      * Helper: Map model ID to API Endpoint & Key
@@ -106,31 +142,11 @@ class CompletionController extends Controller
 
     protected function checkRateLimit($user)
     {
-        // Uses subscription_tier as key — now correctly maps 'pro' → 100
-        $limit = $this->rateLimits[$user->subscription_tier ?? 'free'] ?? 30;
-        $now = Carbon::now();
-        $rateLimit = RateLimit::where('user_id', $user->id)->where('window_end', '>', $now)->first();
-
-        if (!$rateLimit) {
-            RateLimit::create([
-                'user_id'       => $user->id,
-                'request_count' => 1,
-                'window_start'  => $now,
-                'window_end'    => $now->copy()->addHour(),
-            ]);
-            return ['allowed' => true, 'remaining' => $limit - 1];
-        }
-
-        if ($rateLimit->request_count >= $limit) {
-            return [
-                'allowed'     => false,
-                'remaining'   => 0,
-                'retry_after' => $rateLimit->window_end->diffInSeconds($now),
-            ];
-        }
-
-        $rateLimit->increment('request_count');
-        return ['allowed' => true, 'remaining' => $limit - $rateLimit->request_count];
+        // Deprecated — removed. See guardAiRequest() above, backed by
+        // PlanGuard::authorize($user, 'ai.request'). Kept as a stub only if
+        // something outside this file still calls it directly; if you hit
+        // this comment, that call site needs migrating too.
+        throw new \RuntimeException('checkRateLimit() is deprecated — use guardAiRequest() via PlanGuard instead.');
     }
 
     /**
@@ -166,9 +182,8 @@ class CompletionController extends Controller
             return response()->json(['error' => 'Unauthorized'], 403);
         }
 
-        $rateLimitCheck = $this->checkRateLimit($request->user());
-        if (!$rateLimitCheck['allowed']) {
-            return response()->json(['error' => 'Rate limit exceeded'], 429);
+        if ($guardResponse = $this->guardAiRequest($request->user())) {
+            return $guardResponse;
         }
 
         $model   = $request->model;
@@ -460,10 +475,9 @@ SYSTEMPROMPT;
             return response()->json(['error' => 'Validation failed', 'messages' => $validator->errors()], 422);
         }
 
-        $user             = $request->user();
-        $rateLimitCheck   = $this->checkRateLimit($user);
-        if (!$rateLimitCheck['allowed']) {
-            return response()->json(['error' => 'Rate limit exceeded', 'retry_after' => $rateLimitCheck['retry_after']], 429);
+        $user = $request->user();
+        if ($guardResponse = $this->guardAiRequest($user)) {
+            return $guardResponse;
         }
 
         $model   = $request->model ?? ($user->preferences->preferred_model ?? 'codellama:7b');
@@ -521,7 +535,7 @@ SYSTEMPROMPT;
                 'completion'        => $content,
                 'model'             => $model,
                 'cached'            => false,
-                'remaining_requests' => $rateLimitCheck['remaining']
+                'remaining_requests' => $this->remainingAiRequests($user)
             ]);
 
         } catch (\Exception $e) {
@@ -541,6 +555,12 @@ SYSTEMPROMPT;
         ]);
 
         $user    = $request->user();
+        // chat() had no rate limiting at all before this — every other
+        // AI-calling endpoint in this controller did. Closing that gap here.
+        if ($guardResponse = $this->guardAiRequest($user)) {
+            return $guardResponse;
+        }
+
         $model   = $request->model ?? 'gpt-3.5-turbo';
         $apiKeys = $request->input('api_keys', []);
 
@@ -623,9 +643,8 @@ SYSTEMPROMPT;
         ]);
 
         $user           = $request->user();
-        $rateLimitCheck = $this->checkRateLimit($user);
-        if (!$rateLimitCheck['allowed']) {
-            return response()->json(['error' => 'Rate limit exceeded'], 429);
+        if ($guardResponse = $this->guardAiRequest($user)) {
+            return $guardResponse;
         }
 
         $model       = $request->model ?? 'gpt-4o';
@@ -662,7 +681,7 @@ SYSTEMPROMPT;
             return response()->json([
                 'review'             => $content,
                 'model'              => $model,
-                'remaining_requests' => $rateLimitCheck['remaining']
+                'remaining_requests' => $this->remainingAiRequests($user)
             ]);
 
         } catch (\Exception $e) {
@@ -684,8 +703,9 @@ SYSTEMPROMPT;
         ]);
 
         $user           = $request->user();
-        $rateLimitCheck = $this->checkRateLimit($user);
-        if (!$rateLimitCheck['allowed']) return response()->json(['error' => 'Rate limit exceeded'], 429);
+        if ($guardResponse = $this->guardAiRequest($user)) {
+            return $guardResponse;
+        }
 
         $model   = $request->model ?? 'gpt-4o';
         $apiKeys = $request->input('api_keys', []);
@@ -720,7 +740,7 @@ SYSTEMPROMPT;
             return response()->json([
                 'solution'           => $content,
                 'model'              => $model,
-                'remaining_requests' => $rateLimitCheck['remaining']
+                'remaining_requests' => $this->remainingAiRequests($user)
             ]);
 
         } catch (\Exception $e) {
@@ -741,8 +761,9 @@ SYSTEMPROMPT;
         ]);
 
         $user           = $request->user();
-        $rateLimitCheck = $this->checkRateLimit($user);
-        if (!$rateLimitCheck['allowed']) return response()->json(['error' => 'Rate limit exceeded'], 429);
+        if ($guardResponse = $this->guardAiRequest($user)) {
+            return $guardResponse;
+        }
 
         $model   = $request->model ?? 'gpt-4o';
         $apiKeys = $request->input('api_keys', []);
@@ -777,7 +798,7 @@ SYSTEMPROMPT;
             return response()->json([
                 'explanation'        => $content,
                 'model'              => $model,
-                'remaining_requests' => $rateLimitCheck['remaining']
+                'remaining_requests' => $this->remainingAiRequests($user)
             ]);
 
         } catch (\Exception $e) {

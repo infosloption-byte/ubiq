@@ -322,6 +322,65 @@ class PlanGuard
     }
 
     /**
+     * Live remaining-usage snapshot for a rate/concurrent action, without
+     * consuming any of it. Used by controllers that want to surface
+     * "X requests remaining" in a response, and by the Phase C1 usage
+     * widget (GET /me/usage) — one implementation, two consumers.
+     *
+     * @return array{hour_limit?: int, hour_remaining?: ?int, day_limit?: int, day_remaining?: ?int, limit?: int, remaining?: ?int}|null
+     */
+    public function remaining(User $user, string $actionKey): ?array
+    {
+        $rule = self::ACTIONS[$actionKey] ?? null;
+
+        if ($rule === null) {
+            return null;
+        }
+
+        try {
+            $limits = $this->planService->limitsFor($user);
+        } catch (\Throwable $e) {
+            return null;
+        }
+
+        if (empty($limits)) {
+            return null;
+        }
+
+        return match ($rule['type']) {
+            'rate' => $this->remainingRate($user, $rule, $limits),
+            'concurrent' => $this->remainingConcurrent($user, $rule, $limits),
+            default => null,
+        };
+    }
+
+    private function remainingRate(User $user, array $rule, array $limits): array
+    {
+        $hourLimit = $limits[$rule['feature_keys']['hour']] ?? 0;
+        $hourUsage = $this->currentWindowCount($user, $rule['counter_key'], 'hour', Carbon::now()->startOfHour());
+        $dayLimit = $limits[$rule['feature_keys']['day']] ?? 0;
+        $dayUsage = $this->currentWindowCount($user, $rule['counter_key'], 'day', Carbon::now()->startOfDay());
+
+        return [
+            'hour_limit' => $hourLimit,
+            'hour_remaining' => $this->isUnlimited($hourLimit) ? null : max(0, $hourLimit - $hourUsage),
+            'day_limit' => $dayLimit,
+            'day_remaining' => $this->isUnlimited($dayLimit) ? null : max(0, $dayLimit - $dayUsage),
+        ];
+    }
+
+    private function remainingConcurrent(User $user, array $rule, array $limits): array
+    {
+        $limit = $limits[$rule['feature_key']] ?? 0;
+        $current = $this->currentConcurrent($user, $rule['counter_key']);
+
+        return [
+            'limit' => $limit,
+            'remaining' => $this->isUnlimited($limit) ? null : max(0, $limit - $current),
+        ];
+    }
+
+    /**
      * Logging must never break the guarded action itself — a failed insert
      * here is swallowed (and warned to the app log) rather than thrown.
      */

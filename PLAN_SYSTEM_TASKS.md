@@ -20,7 +20,7 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 
 - [x] B1 — `PlanService`: load + cache plan limits, resolve overrides
 - [x] B2 — `PlanGuard`: central check/authorize chokepoint, fail-closed, writes to `plan_action_logs`
-- [ ] B3a — Wire `PlanGuard` into `ai.request` (CompletionController/AiController) — first action, lowest risk
+- [x] B3a — Wire `PlanGuard` into `ai.request` (CompletionController/AiController) — first action, lowest risk
 - [ ] B3b — Wire `PlanGuard` into `sandbox.start` (ProjectController::runProject) + release on stop/cleanup
 - [ ] B3c — Wire `PlanGuard` into `project.create`
 - [ ] B3d — Wire `PlanGuard` into `sharing.enabled` / model tier access
@@ -63,3 +63,18 @@ feature_key gets renamed, a limit default changes, a phase gets reordered.)
   acceptable v1 tradeoff, upgrade to `lockForUpdate()` if it becomes a real
   issue. `project.create` counts live `projects` rows rather than an
   incrementing counter, so it self-corrects on deletion.
+
+- 2026-07-28 — B3a complete. `CompletionController`'s old `$rateLimits`
+  array + `checkRateLimit()` (the method that already caused the
+  Paddle→PayPal 'premium'/'pro' key-mismatch bug) is now fully replaced by
+  `PlanGuard::authorize($user, 'ai.request')` across all 5 AI-calling
+  endpoints (`generate`, `complete`, `review`, `debug`, `explain`).
+  `chat()` had NO rate limiting at all before this — added the guard there
+  too, closing a real gap rather than just migrating existing behavior.
+  `checkRateLimit()` left in place as a throwing stub (not deleted) so any
+  external caller surfaces loudly instead of silently no-op'ing; confirmed
+  no other file calls it. Added `PlanGuard::remaining()` as a small reusable
+  addition — used here for the `remaining_requests` response field, and
+  will be reused by Phase C1's `GET /me/usage` endpoint. The old
+  `rate_limits` DB table/model is now unused but not dropped yet — safe to
+  drop once B4 does the full old-logic retirement pass.
