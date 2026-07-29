@@ -18,8 +18,8 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 
 ## Phase B — Backend
 
-- [ ] B1 — `PlanService`: load + cache plan limits, resolve overrides
-- [ ] B2 — `PlanGuard`: central check/authorize chokepoint, fail-closed, writes to `plan_action_logs`
+- [x] B1 — `PlanService`: load + cache plan limits, resolve overrides
+- [x] B2 — `PlanGuard`: central check/authorize chokepoint, fail-closed, writes to `plan_action_logs`
 - [ ] B3a — Wire `PlanGuard` into `ai.request` (CompletionController/AiController) — first action, lowest risk
 - [ ] B3b — Wire `PlanGuard` into `sandbox.start` (ProjectController::runProject) + release on stop/cleanup
 - [ ] B3c — Wire `PlanGuard` into `project.create`
@@ -49,3 +49,17 @@ feature_key gets renamed, a limit default changes, a phase gets reordered.)
   `users.subscription_tier` kept (deprecated, not dropped) until B4 — every
   controller still reads it until PlanGuard replaces those checks action by
   action.
+
+- 2026-07-28 — B1/B2 complete. Found `.env.example` sets `CACHE_STORE=database`
+  but no `cache`/`cache_locks` tables have ever existed in this project —
+  added migration `2026_07_28_000005_create_cache_tables.php` as a
+  prerequisite fix, since `PlanService` needed a working cache and this
+  would otherwise have surfaced as a silent production outage.
+  `PlanGuard::check()` is read-only and does NOT write to `plan_action_logs`
+  (used for UI pre-flight checks); only `authorize()` is audited — this
+  narrows the original architecture note slightly to avoid flooding the log
+  with polling reads. `evaluateRate()`'s check-then-increment is not
+  transaction-locked (minor race window under burst traffic) — noted as an
+  acceptable v1 tradeoff, upgrade to `lockForUpdate()` if it becomes a real
+  issue. `project.create` counts live `projects` rows rather than an
+  incrementing counter, so it self-corrects on deletion.

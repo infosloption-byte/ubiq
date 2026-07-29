@@ -21,6 +21,7 @@ class User extends Authenticatable
         'paypal_subscription_id',
         'subscription_status',
         'subscription_tier',
+        'plan_id',
         'trial_ends_at',
         'subscription_ends_at',
     ];
@@ -52,6 +53,8 @@ class User extends Authenticatable
     public function chatSessions(){ return $this->hasMany(ChatSession::class); }
     public function usageLogs()   { return $this->hasMany(UsageLog::class); }
     public function rateLimits()  { return $this->hasMany(RateLimit::class); }
+    public function planOverrides() { return $this->hasMany(\App\Models\UserPlanOverride::class); }
+    public function plan()        { return $this->belongsTo(\App\Models\Plan::class); }
 
     // Files belong to Projects, not directly to Users — use hasManyThrough
     public function files()
