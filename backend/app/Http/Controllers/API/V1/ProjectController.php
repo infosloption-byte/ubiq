@@ -6,6 +6,9 @@ use App\Http\Controllers\Controller;
 use App\Models\Project;
 use App\Models\File;
 use App\Models\SandboxRun;
+use App\Services\PlanGuard;
+use App\Services\PlanService;
+use App\Exceptions\PlanLimitExceededException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\Storage;
@@ -15,6 +18,10 @@ use Illuminate\Support\Facades\Log;
 
 class ProjectController extends Controller
 {
+    public function __construct(private PlanGuard $planGuard, private PlanService $planService)
+    {
+    }
+
     /**
      * Helper: Get the physical workspace path for a project
      * Structure: storage/app/workspaces/{user_id}/{project_id}
@@ -372,6 +379,8 @@ class ProjectController extends Controller
             ->latest('started_at')
             ->first()
             ?->update(['stopped_at' => now()]);
+
+        $this->planGuard->release($request->user(), 'active_sandboxes');
 
         return response()->json(['message' => 'Container stopped.']);
     }
@@ -888,8 +897,26 @@ class ProjectController extends Controller
         if ($project->user_id !== $request->user()->id) {
             return response()->json(['error' => 'Unauthorized'], 403);
         }
- 
+
+        // Check BEFORE any file writes / docker stop-rm / docker run — no
+        // point doing expensive work for a request we're about to deny.
+        // This increments the 'active_sandboxes' concurrent counter on
+        // success; every failure path below that aborts the actual
+        // container start must call planGuard->release() to avoid the
+        // counter drifting upward for sandboxes that never really started.
+        try {
+            $this->planGuard->authorize($request->user(), 'sandbox.start');
+        } catch (PlanLimitExceededException $e) {
+            return response()->json([
+                'error' => 'Sandbox limit reached',
+                'reason' => $e->reason,
+                'limit' => $e->limitValue,
+                'usage' => $e->currentUsage,
+            ], 429);
+        }
+
         $workspacePath = $this->getProjectPath($project);
+        $user          = $request->user();
         $baseHostPath  = env('HOST_WORKSPACE_PATH', '/home/ubuntu/ubiq/backend/storage/app/workspaces');
         $hostMountPath = $baseHostPath . "/{$project->user_id}/{$project->id}";
  
@@ -955,13 +982,29 @@ class ProjectController extends Controller
             try {
                 $port = $this->findFreePort(8100, 8899);
             } catch (\RuntimeException $e) {
+                $this->planGuard->release($request->user(), 'active_sandboxes');
                 return response()->json(['error' => 'No free ports available. Try again later.'], 503);
             }
  
             // Angular CLI + esbuild needs ~700-900MB RAM during build.
             // Node containers get 1GB; PHP/Python stay at 512MB.
-            $memoryLimit = ($runtime === 'node') ? '1g' : '512m';
-            $memorySwap  = ($runtime === 'node') ? '1g' : '512m';
+            // Tier-aware sizing from plan_features (was hardcoded before —
+            // sandbox.cpu/sandbox.memory_mb were seeded in Phase A but
+            // never actually read anywhere until now). Memory uses
+            // max(tier, runtime-minimum) rather than a hard tier cap: the
+            // tier value is the baseline every plan gets, but a Node/Angular
+            // build genuinely needs ~700-900MB to not OOM regardless of
+            // tier — silently failing free-tier Node builds isn't a
+            // deliberate product decision we've made, so we bump up rather
+            // than cap down. If you want tier to be a hard ceiling instead
+            // (e.g. "heavy JS builds require Creator+"), swap max() for
+            // min() here — one-line change.
+            $tierCpu       = (string) ($this->planService->limitFor($user, 'sandbox.cpu') ?? '0.75');
+            $tierMemoryMb  = (int) ($this->planService->limitFor($user, 'sandbox.memory_mb') ?? 512);
+            $runtimeFloorMb = ($runtime === 'node') ? 1024 : 512;
+            $memoryMb      = max($tierMemoryMb, $runtimeFloorMb);
+            $memoryLimit   = "{$memoryMb}m";
+            $memorySwap    = "{$memoryMb}m";
             // Angular also spawns more processes (tsc, esbuild workers)
             $pidsLimit   = ($runtime === 'node') ? 200 : 100;
 
@@ -974,7 +1017,7 @@ class ProjectController extends Controller
                 '-w',       '/app',
                 "--memory={$memoryLimit}",
                 "--memory-swap={$memorySwap}",
-                '--cpus=0.75',
+                "--cpus={$tierCpu}",
                 "--pids-limit={$pidsLimit}",
                 '--ulimit', 'nofile=1024:1024',
                 '--ulimit', 'nproc=100:100',
@@ -1004,6 +1047,7 @@ class ProjectController extends Controller
         }
  
         if (!$result->successful()) {
+            $this->planGuard->release($request->user(), 'active_sandboxes');
             return response()->json(['error' => 'Docker failed to start the sandbox.', 'details' => $lastError], 500);
         }
  

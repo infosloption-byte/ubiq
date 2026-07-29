@@ -21,7 +21,7 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 - [x] B1 — `PlanService`: load + cache plan limits, resolve overrides
 - [x] B2 — `PlanGuard`: central check/authorize chokepoint, fail-closed, writes to `plan_action_logs`
 - [x] B3a — Wire `PlanGuard` into `ai.request` (CompletionController/AiController) — first action, lowest risk
-- [ ] B3b — Wire `PlanGuard` into `sandbox.start` (ProjectController::runProject) + release on stop/cleanup
+- [x] B3b — Wire `PlanGuard` into `sandbox.start` (ProjectController::runProject) + release on stop/cleanup
 - [ ] B3c — Wire `PlanGuard` into `project.create`
 - [ ] B3d — Wire `PlanGuard` into `sharing.enabled` / model tier access
 - [ ] B3e — Global concurrency ceiling check (total active sandboxes vs. box capacity)
@@ -78,3 +78,27 @@ feature_key gets renamed, a limit default changes, a phase gets reordered.)
   will be reused by Phase C1's `GET /me/usage` endpoint. The old
   `rate_limits` DB table/model is now unused but not dropped yet — safe to
   drop once B4 does the full old-logic retirement pass.
+
+- 2026-07-28 — B3b complete. `ProjectController::runProject` now checks
+  `PlanGuard::authorize($user, 'sandbox.start')` before any file writes or
+  docker calls; released on both docker-run failure paths (no free ports,
+  docker start failure), on explicit `stopProject()`, and on
+  `CleanupSandboxes` auto-stop. Also closed a gap while here: `sandbox.cpu`
+  and `sandbox.memory_mb` were seeded per-tier in Phase A but never actually
+  read anywhere — `docker run` was hardcoded to `--cpus=0.75` and
+  runtime-based memory regardless of plan. Now reads tier values from
+  `PlanService`; memory uses `max(tier_value, runtime_minimum)` rather than
+  a hard cap, since a Node/Angular build genuinely needs ~700-900MB to not
+  OOM and silently failing free-tier builds wasn't a deliberate call — swap
+  to `min()` if a hard tier ceiling is wanted instead. Similarly,
+  `sandbox.idle_timeout_minutes` was seeded but unused — `CleanupSandboxes`
+  used one flat `--hours=2` for everyone; now checks each open sandbox
+  against its owner's plan-specific timeout (kept `--hours` as an explicit
+  manual override for emergency sweeps, removed it from the hourly
+  schedule in `routes/console.php`). Known limitation: cleanup still runs
+  hourly, so a Free-tier sandbox nominally capped at 20min idle can
+  actually hold resources up to ~80min worst-case before the cron catches
+  it — tighten the schedule frequency if that gap matters in practice.
+  Also noted: the frontend's own idle-warning threshold (ProjectRunner) is
+  a separate hardcoded 2h value, now out of sync with the per-tier backend
+  timeout — flagged for Phase C, not fixed here (backend-only phase).
