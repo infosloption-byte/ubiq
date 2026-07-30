@@ -39,6 +39,7 @@ class PlanSeeder extends Seeder
                     'ai.max_model_tier' => ['free', 'string'],
                     'projects.max_count' => ['3', 'int'],
                     'sharing.enabled' => ['false', 'bool'],
+                    'storage.max_mb' => ['512', 'int'],
                 ],
             ],
             [
@@ -56,6 +57,7 @@ class PlanSeeder extends Seeder
                     'ai.max_model_tier' => ['starter', 'string'],
                     'projects.max_count' => ['10', 'int'],
                     'sharing.enabled' => ['false', 'bool'],
+                    'storage.max_mb' => ['1024', 'int'],
                 ],
             ],
             [
@@ -73,6 +75,7 @@ class PlanSeeder extends Seeder
                     'ai.max_model_tier' => ['creator', 'string'],
                     'projects.max_count' => ['30', 'int'],
                     'sharing.enabled' => ['true', 'bool'],
+                    'storage.max_mb' => ['5120', 'int'],
                 ],
             ],
             [
@@ -90,6 +93,7 @@ class PlanSeeder extends Seeder
                     'ai.max_model_tier' => ['pro', 'string'],
                     'projects.max_count' => ['-1', 'int'],
                     'sharing.enabled' => ['true', 'bool'],
+                    'storage.max_mb' => ['10240', 'int'],
                 ],
             ],
         ];

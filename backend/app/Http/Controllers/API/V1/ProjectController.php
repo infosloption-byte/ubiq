@@ -37,25 +37,24 @@ class ProjectController extends Controller
         return $path;
     }
 
-    // ── Storage constants — must stay in sync with User::STORAGE_LIMIT_* ─
-    const STORAGE_LIMIT_FREE = 536870912;   // 512 MB
-    const STORAGE_LIMIT_PRO  = 5368709120;  // 5 GB
+    // ── DEPRECATED — replaced by plan_features.storage.max_mb (Phase B3c) ─
+    // These constants required manually staying in sync with an identical
+    // copy in User.php (per the old comment above) — exactly the drift
+    // pattern PlanGuard exists to eliminate. Kept only so old references
+    // don't silently fall back to something else; nothing in this file
+    // calls getStorageLimitBytes() anymore.
+    const STORAGE_LIMIT_FREE = 536870912;   // 512 MB — unused, see above
+    const STORAGE_LIMIT_PRO  = 5368709120;  // 5 GB — unused, see above
 
     private function getStorageLimitBytes($user): int
     {
-        return ($user->subscription_tier === 'pro')
-            ? self::STORAGE_LIMIT_PRO
-            : self::STORAGE_LIMIT_FREE;
+        throw new \RuntimeException('getStorageLimitBytes() is deprecated — use PlanGuard::authorize($user, \'storage.check\', [\'current_bytes\' => ...]) or PlanService::limitFor($user, \'storage.max_mb\') instead.');
     }
 
-    /** Live DB sum — never reads the stale storage_used column */
+    /** Delegates to the canonical implementation on User — was duplicated verbatim here before. */
     private function getUserUsedBytes($user): int
     {
-        return (int) \Illuminate\Support\Facades\DB::table('files')
-            ->join('projects', 'files.project_id', '=', 'projects.id')
-            ->where('projects.user_id', $user->id)
-            ->where('files.is_deleted', false)
-            ->sum('files.size_bytes');
+        return $user->getUsedStorageBytes();
     }
 
     /**
@@ -66,14 +65,17 @@ class ProjectController extends Controller
     {
         $user       = $request->user();
         $usedBytes  = $this->getUserUsedBytes($user);
-        $limitBytes = $this->getStorageLimitBytes($user);
+        $limitMb    = $this->planService->limitFor($user, 'storage.max_mb') ?? 512;
+        $unlimited  = is_int($limitMb) && $limitMb === -1;
+        $limitBytes = $unlimited ? null : ((int) $limitMb * 1048576);
 
         return response()->json([
             'used_bytes'  => $usedBytes,
             'used_mb'     => round($usedBytes / 1048576, 2),
             'limit_bytes' => $limitBytes,
-            'limit_mb'    => round($limitBytes / 1048576, 2),
-            'percent'     => $limitBytes > 0 ? round(($usedBytes / $limitBytes) * 100, 1) : 0,
+            'limit_mb'    => $unlimited ? null : round($limitBytes / 1048576, 2),
+            'unlimited'   => $unlimited,
+            'percent'     => (!$unlimited && $limitBytes > 0) ? round(($usedBytes / $limitBytes) * 100, 1) : 0,
         ]);
     }
     
@@ -263,13 +265,21 @@ class ProjectController extends Controller
             return response()->json(['error' => 'Validation failed', 'messages' => $validator->errors()], 422);
         }
 
-        // ── Storage quota check (byte-based) ──────────────────────────────
-        $usedBytes  = $this->getUserUsedBytes($request->user());
-        $limitBytes = $this->getStorageLimitBytes($request->user());
-        if ($usedBytes >= $limitBytes) {
-            $limitMb = round($limitBytes / 1048576);
+        $user = $request->user();
+
+        try {
+            $this->planGuard->authorize($user, 'project.create');
+            $this->planGuard->authorize($user, 'storage.check', [
+                'current_bytes' => $this->getUserUsedBytes($user),
+            ]);
+        } catch (PlanLimitExceededException $e) {
             return response()->json([
-                'error' => "Storage limit reached ({$limitMb} MB). Delete unused projects or upgrade your plan."
+                'error' => $e->actionKey === 'storage.check'
+                    ? 'Storage limit reached. Delete unused projects or upgrade your plan.'
+                    : 'Project limit reached for your plan. Delete a project or upgrade your plan.',
+                'reason' => $e->reason,
+                'limit' => $e->limitValue,
+                'usage' => $e->currentUsage,
             ], 403);
         }
         
@@ -434,13 +444,21 @@ class ProjectController extends Controller
 
     public function import(Request $request)
     {
-        // ── Byte-based storage quota check ────────────────────────────────
-        $usedBytes  = $this->getUserUsedBytes($request->user());
-        $limitBytes = $this->getStorageLimitBytes($request->user());
-        if ($usedBytes >= $limitBytes) {
-            $limitMb = round($limitBytes / 1048576);
+        $user = $request->user();
+
+        try {
+            $this->planGuard->authorize($user, 'project.create');
+            $this->planGuard->authorize($user, 'storage.check', [
+                'current_bytes' => $this->getUserUsedBytes($user),
+            ]);
+        } catch (PlanLimitExceededException $e) {
             return response()->json([
-                'error' => "Storage limit reached ({$limitMb} MB). Delete unused projects or upgrade your plan."
+                'error' => $e->actionKey === 'storage.check'
+                    ? 'Storage limit reached. Delete unused projects or upgrade your plan.'
+                    : 'Project limit reached for your plan. Delete a project or upgrade your plan.',
+                'reason' => $e->reason,
+                'limit' => $e->limitValue,
+                'usage' => $e->currentUsage,
             ], 403);
         }
 

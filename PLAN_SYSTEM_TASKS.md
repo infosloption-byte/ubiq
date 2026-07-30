@@ -22,7 +22,7 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 - [x] B2 — `PlanGuard`: central check/authorize chokepoint, fail-closed, writes to `plan_action_logs`
 - [x] B3a — Wire `PlanGuard` into `ai.request` (CompletionController/AiController) — first action, lowest risk
 - [x] B3b — Wire `PlanGuard` into `sandbox.start` (ProjectController::runProject) + release on stop/cleanup
-- [ ] B3c — Wire `PlanGuard` into `project.create`
+- [x] B3c — Wire `PlanGuard` into `project.create`
 - [ ] B3d — Wire `PlanGuard` into `sharing.enabled` / model tier access
 - [ ] B3e — Global concurrency ceiling check (total active sandboxes vs. box capacity)
 - [ ] B4 — Retire old scattered logic: `CompletionController::$rateLimits` array, `available_models.tier_required` direct checks, `subscription_tier` column
@@ -102,3 +102,28 @@ feature_key gets renamed, a limit default changes, a phase gets reordered.)
   Also noted: the frontend's own idle-warning threshold (ProjectRunner) is
   a separate hardcoded 2h value, now out of sync with the per-tier backend
   timeout — flagged for Phase C, not fixed here (backend-only phase).
+
+- 2026-07-29 — B3c complete. Wired `PlanGuard::authorize('project.create')`
+  into `ProjectController::store()` and `import()` — the latter had NO
+  project-count check before at all (only a storage check), a real gap
+  closed here, same pattern as `chat()` in B3a. While in this file, found
+  the exact same hardcoded-constant drift bug a third time: `STORAGE_LIMIT_
+  FREE`/`STORAGE_LIMIT_PRO` were duplicated verbatim in both `User.php` and
+  `ProjectController.php` with a comment literally saying "must stay in
+  sync" — plus a third consumer in `FileController::upload()` via
+  `User::isOverStorageLimit()`. Added a new `storage.check` PlanGuard
+  action (type='bytes') backed by a new `storage.max_mb` plan_features key
+  (seeded: free=512, starter=1024, creator=5120, pro=10240 — same
+  "-1 = unlimited" sentinel convention). All three call sites now route
+  through PlanGuard, giving storage limit checks an audit trail for the
+  first time. `getStorageLimitBytes()` in ProjectController is now a
+  throwing stub (confirmed zero remaining callers); `User::
+  getTotalStorageLimitInBytes()`/`isOverStorageLimit()` were left as
+  functional delegating wrappers instead of stubs, since they're public
+  model methods a private controller method isn't — safer to keep them
+  correct than to risk an unseen caller. `getUserUsedBytes()` in
+  ProjectController now delegates to `User::getUsedStorageBytes()` instead
+  of duplicating the same DB query verbatim (found as a second copy of the
+  identical query). `storageStats()` (the read-only usage endpoint) now
+  returns `unlimited: true` with null limit fields for Pro — frontend
+  isn't updated yet to handle that shape (Phase C).

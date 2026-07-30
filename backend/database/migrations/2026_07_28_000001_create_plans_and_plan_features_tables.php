@@ -21,6 +21,7 @@ use Illuminate\Support\Facades\Schema;
  *   ai.max_model_tier           (string, matches available_models.tier_required)
  *   projects.max_count          (int)
  *   sharing.enabled             (bool)
+ *   storage.max_mb              (int) — added Phase B3c, alongside projects.max_count
  */
 return new class extends Migration
 {

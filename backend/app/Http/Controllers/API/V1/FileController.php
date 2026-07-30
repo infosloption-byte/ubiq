@@ -5,6 +5,8 @@ namespace App\Http\Controllers\API\V1;
 use App\Http\Controllers\Controller;
 use App\Models\File;
 use App\Models\Project;
+use App\Services\PlanGuard;
+use App\Exceptions\PlanLimitExceededException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\File as FileSystem; 
@@ -12,6 +14,10 @@ use Illuminate\Support\Facades\URL;
 
 class FileController extends Controller
 {
+    public function __construct(private PlanGuard $planGuard)
+    {
+    }
+
     /**
      * SECURITY: Resolve a user-supplied relative path to an absolute path
      * and verify it stays within the project's workspace directory.
@@ -190,7 +196,11 @@ class FileController extends Controller
             return response()->json(['error' => 'Unauthorized'], 403);
         }
 
-        if ($request->user()->isOverStorageLimit()) {
+        try {
+            $this->planGuard->authorize($request->user(), 'storage.check', [
+                'current_bytes' => $request->user()->getUsedStorageBytes(),
+            ]);
+        } catch (PlanLimitExceededException $e) {
             return response()->json([
                 'error' => 'Storage limit reached. Delete unused projects or upgrade your plan to continue.'
             ], 403);

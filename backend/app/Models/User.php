@@ -64,17 +64,27 @@ class User extends Authenticatable
 
     // --- STORAGE LOGIC ---
 
-    // Limits must match ProjectController constants:
-    // Free = 512 MB (536,870,912 bytes)
-    // Pro  = 5 GB  (5,368,709,120 bytes)
+    // DEPRECATED — replaced by plan_features.storage.max_mb (Phase B3c).
+    // Kept only because these are public model methods that could have
+    // callers outside app/Http/Controllers (grep found none, but a model
+    // method is riskier to fully remove than a private controller method
+    // — delegating keeps them correct rather than throwing).
     const STORAGE_LIMIT_FREE = 536870912;
     const STORAGE_LIMIT_PRO  = 5368709120;
 
     public function getTotalStorageLimitInBytes(): int
     {
-        return $this->subscription_tier === 'pro'
-            ? self::STORAGE_LIMIT_PRO
-            : self::STORAGE_LIMIT_FREE;
+        $limitMb = app(\App\Services\PlanService::class)->limitFor($this, 'storage.max_mb');
+
+        if ($limitMb === null) {
+            // Fallback for the (unexpected) case where plan resolution
+            // itself failed — old hardcoded behavior, not a real limit.
+            return $this->subscription_tier === 'pro' ? self::STORAGE_LIMIT_PRO : self::STORAGE_LIMIT_FREE;
+        }
+
+        return is_int($limitMb) && $limitMb === -1
+            ? PHP_INT_MAX // unlimited sentinel — never trips isOverStorageLimit()
+            : $limitMb * 1048576;
     }
 
     /**

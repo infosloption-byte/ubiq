@@ -58,6 +58,10 @@ class PlanGuard
             'type' => 'count',
             'feature_key' => 'projects.max_count',
         ],
+        'storage.check' => [
+            'type' => 'bytes',
+            'feature_key' => 'storage.max_mb',
+        ],
         'sharing.enable' => [
             'type' => 'boolean',
             'feature_key' => 'sharing.enabled',
@@ -151,6 +155,7 @@ class PlanGuard
             'concurrent' => $this->evaluateConcurrent($user, $rule, $limits, $increment),
             'rate' => $this->evaluateRate($user, $rule, $limits, $increment),
             'count' => $this->evaluateCount($user, $rule, $limits, $context),
+            'bytes' => $this->evaluateBytes($rule, $limits, $context),
             'boolean' => $this->evaluateBoolean($rule, $limits),
             'tier_compare' => $this->evaluateTierCompare($rule, $limits, $context),
             default => ['allowed' => false, 'reason' => 'unhandled_rule_type'],
@@ -292,6 +297,32 @@ class PlanGuard
         }
 
         return ['allowed' => true, 'limit' => $limit, 'usage' => $current];
+    }
+
+    /**
+     * Storage, like projects, is persistent state, not a time window —
+     * caller must pass context['current_bytes'] (a live DB sum, e.g.
+     * User::getUsedStorageBytes()), no query happens in here. Limit is
+     * stored in plan_features as MB (human-readable in the DB, matching
+     * sandbox.memory_mb's convention) and converted to bytes for the
+     * comparison, which is what actually needs byte precision.
+     */
+    private function evaluateBytes(array $rule, array $limits, array $context): array
+    {
+        $limitMb = $limits[$rule['feature_key']] ?? 0;
+
+        if ($this->isUnlimited($limitMb)) {
+            return ['allowed' => true];
+        }
+
+        $limitBytes = $limitMb * 1048576;
+        $currentBytes = $context['current_bytes'] ?? 0;
+
+        if ($currentBytes >= $limitBytes) {
+            return ['allowed' => false, 'reason' => 'storage_limit_exceeded', 'limit' => $limitBytes, 'usage' => $currentBytes];
+        }
+
+        return ['allowed' => true, 'limit' => $limitBytes, 'usage' => $currentBytes];
     }
 
     private function evaluateBoolean(array $rule, array $limits): array
