@@ -24,7 +24,7 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 - [x] B3b — Wire `PlanGuard` into `sandbox.start` (ProjectController::runProject) + release on stop/cleanup
 - [x] B3c — Wire `PlanGuard` into `project.create`
 - [ ] B3d — Wire `PlanGuard` into `sharing.enabled` / model tier access
-- [ ] B3e — Global concurrency ceiling check (total active sandboxes vs. box capacity)
+- [x] B3e — Global concurrency ceiling check (total active sandboxes vs. box capacity)
 - [ ] B4 — Retire old scattered logic: `CompletionController::$rateLimits` array, `available_models.tier_required` direct checks, `subscription_tier` column
 - [ ] B5 — Admin CRUD endpoints: `GET/POST/PUT /admin/plans`, `/admin/plans/{id}/features`
 - [ ] B6 — Reporting helpers against `plan_action_logs` (denial rate by tier/action, usage percentiles)
@@ -127,3 +127,23 @@ feature_key gets renamed, a limit default changes, a phase gets reordered.)
   identical query). `storageStats()` (the read-only usage endpoint) now
   returns `unlimited: true` with null limit fields for Pro — frontend
   isn't updated yet to handle that shape (Phase C).
+
+- 2026-07-30 — B3e complete, done ahead of B3d (reordered per the cost
+  report's finding that capacity, not model-tier policy, was the live risk).
+  Added a box-wide ceiling to `sandbox.start` via a new `SANDBOX_GLOBAL_
+  CONCURRENT_LIMIT` env var (default 3), checked in `PlanGuard::
+  evaluateConcurrent()` after the per-user check so per-user denials still
+  report the more specific reason (`concurrent_limit_exceeded` vs the
+  fallback `global_capacity_reached`). IMPORTANT BUG CAUGHT BEFORE SHIP:
+  `ACTIONS` was a `private const` array — PHP does not allow function calls
+  (`env()`) inside const expressions, which would have been a fatal error
+  the moment this class loaded. Converted `ACTIONS` to a `private function
+  actions(): array` method instead (rebuilt per call — cheap, and
+  `PlanService`'s caching is what matters for perf, not this). Also
+  tightened `CleanupSandboxes`'s schedule from `->hourly()` to
+  `->everyFifteenMinutes()`, closing the B3b-flagged gap where Free tier's
+  nominal 20min idle timeout could actually hold resources up to ~80min
+  worst-case. B3d (model tier gating) remains open pending a policy
+  decision: should `ai.max_model_tier` restrict BYO-key models like Gemini
+  (which cost nothing to serve) the same way it restricts self-hosted
+  Ollama models, or only the latter?

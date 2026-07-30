@@ -43,11 +43,28 @@ class PlanGuard
      */
     private const CONCURRENT_WINDOW_START = '1970-01-01 00:00:00';
 
-    private const ACTIONS = [
+    /**
+     * Not a const: env() calls (needed for the sandbox.start global ceiling
+     * below) aren't allowed in compile-time const expressions — this would
+     * be a fatal error as a const array. Cheap enough to rebuild per call;
+     * PlanService's own caching is what matters for performance, not this.
+     */
+    private function actions(): array
+    {
+        return [
         'sandbox.start' => [
             'type' => 'concurrent',
             'feature_key' => 'sandbox.max_concurrent',
             'counter_key' => 'active_sandboxes',
+            // B3e — box-wide ceiling, independent of any single user's own
+            // limit. Same SANDBOX_GLOBAL_CONCURRENT_LIMIT convention as
+            // HOST_WORKSPACE_PATH elsewhere in this codebase (env() read
+            // directly rather than through a dedicated config file, kept
+            // consistent with existing style rather than introduced fresh).
+            // Default of 3 matches the capacity analysis: ~2.5 vCPU
+            // burstable headroom shared with Voxora, ~0.75-1.0 vCPU per
+            // sandbox.
+            'global_limit' => (int) env('SANDBOX_GLOBAL_CONCURRENT_LIMIT', 3),
         ],
         'ai.request' => [
             'type' => 'rate',
@@ -70,7 +87,8 @@ class PlanGuard
             'type' => 'tier_compare',
             'feature_key' => 'ai.max_model_tier',
         ],
-    ];
+        ];
+    }
 
     public function __construct(private PlanService $planService)
     {
@@ -133,7 +151,7 @@ class PlanGuard
 
     private function evaluate(User $user, string $actionKey, array $context, bool $increment): array
     {
-        $rule = self::ACTIONS[$actionKey] ?? null;
+        $rule = $this->actions()[$actionKey] ?? null;
 
         if ($rule === null) {
             return ['allowed' => false, 'reason' => 'unknown_action'];
@@ -174,6 +192,23 @@ class PlanGuard
 
         if (!$this->isUnlimited($limit) && $current >= $limit) {
             return ['allowed' => false, 'reason' => 'concurrent_limit_exceeded', 'limit' => $limit, 'usage' => $current];
+        }
+
+        // B3e — box-wide ceiling, independent of any single user's own
+        // limit. Checked after the per-user check so a per-user denial
+        // still reports the more specific/actionable reason; the global
+        // ceiling is the fallback reason once every individual user's own
+        // limit would otherwise allow the request.
+        if (isset($rule['global_limit'])) {
+            $globalCurrent = $this->globalActiveCount($rule['counter_key']);
+            if ($globalCurrent >= $rule['global_limit']) {
+                return [
+                    'allowed' => false,
+                    'reason' => 'global_capacity_reached',
+                    'limit' => $rule['global_limit'],
+                    'usage' => $globalCurrent,
+                ];
+            }
         }
 
         if ($increment) {
@@ -362,7 +397,7 @@ class PlanGuard
      */
     public function remaining(User $user, string $actionKey): ?array
     {
-        $rule = self::ACTIONS[$actionKey] ?? null;
+        $rule = $this->actions()[$actionKey] ?? null;
 
         if ($rule === null) {
             return null;
