@@ -9,6 +9,7 @@ namespace App\Http\Controllers\API\V1;
 use Laravel\Socialite\Facades\Socialite;
 use App\Models\User;
 use App\Models\UserPreference;
+use App\Models\Plan;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Validator;
@@ -39,6 +40,11 @@ class AuthController extends Controller
                 'email' => $request->email,
                 'password' => Hash::make($request->password),
                 'api_key' => 'ak_' . Str::random(32),
+                // B4 — set explicitly rather than relying solely on the
+                // column default + PlanService's subscription_tier
+                // fallback. Every new user gets a resolvable plan_id from
+                // day one; existing users are backfilled separately.
+                'plan_id' => Plan::where('key', 'free')->value('id'),
             ]);
 
             // Default preferences setup...
@@ -271,6 +277,7 @@ class AuthController extends Controller
                     'google_id' => $googleUser->getId(),
                     'avatar' => $googleUser->getAvatar(),
                     'subscription_tier' => 'free',
+                    'plan_id' => Plan::where('key', 'free')->value('id'),
                     'api_key' => 'ak_' . Str::random(32)
                 ]);
             } else {

@@ -25,7 +25,7 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 - [x] B3c — Wire `PlanGuard` into `project.create`
 - [x] B3d — Wire `PlanGuard` into `sharing.enabled` / model tier access
 - [x] B3e — Global concurrency ceiling check (total active sandboxes vs. box capacity)
-- [ ] B4 — Retire old scattered logic: `CompletionController::$rateLimits` array, `available_models.tier_required` direct checks, `subscription_tier` column
+- [x] B4 — Retire old scattered logic: `CompletionController::$rateLimits` array, `available_models.tier_required` direct checks, `subscription_tier` column
 - [ ] B5 — Admin CRUD endpoints: `GET/POST/PUT /admin/plans`, `/admin/plans/{id}/features`
 - [ ] B6 — Reporting helpers against `plan_action_logs` (denial rate by tier/action, usage percentiles)
 
@@ -180,3 +180,28 @@ feature_key gets renamed, a limit default changes, a phase gets reordered.)
   if the plan doesn't allow it (creation shouldn't fail over a secondary
   field) — worth reconciling to one behavior later if the asymmetry proves
   confusing in practice.
+
+- 2026-07-31 — B4 complete, functionally — but deliberately did NOT drop
+  the `subscription_tier` column itself, unlike the tracker's original
+  wording implied. Found the single most consequential piece of "old
+  scattered logic" left, more impactful than the already-neutralized
+  `checkRateLimit()` stub: `CheckSubscription` middleware required
+  `tier==='pro' && status==='active'` for EVERY route it guards, meaning
+  Free/Starter/Creator users got a 402 before ever reaching PlanGuard —
+  the entire four-tier system was unreachable for 3 of 4 tiers. Fixed:
+  middleware now only enforces real billing for Pro (the only tier with an
+  actual subscription lifecycle right now — Starter/Creator have no
+  PayPal plan wired up yet, Phase C4), everyone else passes through to
+  PlanGuard's actual per-tier limits. Also: backfilled `plan_id` for every
+  existing user via a one-time migration (matches by `subscription_tier`,
+  falls back to Free for any unmapped legacy value); both `AuthController`
+  signup paths and the `PayPalController` webhook now dual-write `plan_id`
+  alongside `subscription_tier` going forward. `subscription_tier` itself
+  is NOT dropped — 5 read-only display endpoints (AuthController,
+  AdminController, UsageController, UserController×2) still read it
+  directly for informational responses; low-risk to leave since it stays
+  correctly populated via the dual-write, and dropping it now for no
+  functional gain isn't worth the risk. `rate_limits` table/model are
+  fully unused but also left in place (harmless dead schema, same
+  reasoning). Revisit dropping both once this has been live long enough
+  to trust — not before.

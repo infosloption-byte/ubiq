@@ -4,6 +4,7 @@ namespace App\Http\Controllers\API\V1;
 
 use App\Http\Controllers\Controller;
 use App\Services\PayPalService;
+use App\Models\Plan;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\DB;
@@ -185,6 +186,13 @@ class PayPalController extends Controller
             'paypal_subscription_id' => $subscriptionId,
             'subscription_status'    => $newStatus,
             'subscription_tier'      => $newTier,
+            // B4 — dual-write during the subscription_tier → plan_id
+            // migration. This is the only webhook write site for tier
+            // changes, so it's the critical one to keep in sync; the
+            // starter/creator tiers have no PayPal plan wired up yet
+            // (Phase C4), so this webhook can currently only ever resolve
+            // to 'free' or 'pro' — that's fine, plan_id still gets it right.
+            'plan_id'                 => Plan::where('key', $newTier)->value('id'),
             'subscription_ends_at'   => $subscriptionEndsAt,
         ]);
 
