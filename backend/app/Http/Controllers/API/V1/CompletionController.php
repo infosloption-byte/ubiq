@@ -9,6 +9,7 @@ use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\Log;
 use App\Models\Project;
 use App\Models\UsageLog;
+use App\Models\AvailableModel;
 use App\Services\PlanGuard;
 use App\Exceptions\PlanLimitExceededException;
 use Carbon\Carbon;
@@ -64,6 +65,56 @@ class CompletionController extends Controller
     private function remainingAiRequests($user): ?int
     {
         return $this->planGuard->remaining($user, 'ai.request')['hour_remaining'] ?? null;
+    }
+
+    /**
+     * B3d — Looks up the requested model's required tier: exact catalog
+     * match first (available_models.tier_required), falling back to the
+     * SAME provider-family pattern-matching getProviderConfig() already
+     * uses below, so an unlisted model still resolves to a sensible tier
+     * instead of silently bypassing gating. Unmatched/unknown model
+     * strings default to 'pro' — the conservative choice, since an unknown
+     * string could otherwise be used to dodge the catalog entirely.
+     */
+    private function resolveModelTier(string $modelId): string
+    {
+        $catalogTier = AvailableModel::query()
+            ->where('name', $modelId)
+            ->where('is_active', true)
+            ->value('tier_required');
+
+        if ($catalogTier !== null) {
+            return $catalogTier;
+        }
+
+        return match (true) {
+            str_contains($modelId, 'gemini')                      => 'creator',
+            str_starts_with($modelId, 'gpt-')                     => 'pro',
+            str_starts_with($modelId, 'openrouter/')               => 'creator',
+            str_contains($modelId, 'mistral') || str_contains($modelId, 'codestral') => 'starter',
+            str_starts_with($modelId, 'ollama/') || !str_contains($modelId, '/') => 'free', // bare model names default to the Ollama family
+            default => 'pro',
+        };
+    }
+
+    /**
+     * Returns a 403 JsonResponse if denied, null if allowed — same calling
+     * convention as guardAiRequest() so call sites stay a simple
+     * `if ($r = $this->guardModelAccess(...)) return $r;` one-liner.
+     */
+    private function guardModelAccess($user, string $modelId): ?\Illuminate\Http\JsonResponse
+    {
+        try {
+            $this->planGuard->authorize($user, 'model.access', ['model_tier' => $this->resolveModelTier($modelId)]);
+            return null;
+        } catch (PlanLimitExceededException $e) {
+            return response()->json([
+                'error' => 'This model requires a higher plan tier.',
+                'reason' => $e->reason,
+                'your_plan_allows' => $e->limitValue,
+                'model_requires' => $e->currentUsage,
+            ], 403);
+        }
     }
 
     /**
@@ -187,6 +238,9 @@ class CompletionController extends Controller
         }
 
         $model   = $request->model;
+        if ($guardResponse = $this->guardModelAccess($request->user(), $model)) {
+            return $guardResponse;
+        }
         $apiKeys = $request->input('api_keys', []);
         $config  = $this->getProviderConfig($model, $apiKeys);
 
@@ -481,6 +535,9 @@ SYSTEMPROMPT;
         }
 
         $model   = $request->model ?? ($user->preferences->preferred_model ?? 'codellama:7b');
+        if ($guardResponse = $this->guardModelAccess($user, $model)) {
+            return $guardResponse;
+        }
         $apiKeys = $request->input('api_keys', []);
         $config  = $this->getProviderConfig($model, $apiKeys);
 
@@ -562,6 +619,9 @@ SYSTEMPROMPT;
         }
 
         $model   = $request->model ?? 'gpt-3.5-turbo';
+        if ($guardResponse = $this->guardModelAccess($user, $model)) {
+            return $guardResponse;
+        }
         $apiKeys = $request->input('api_keys', []);
 
         $config = $this->getProviderConfig($model, $apiKeys);
@@ -648,6 +708,9 @@ SYSTEMPROMPT;
         }
 
         $model       = $request->model ?? 'gpt-4o';
+        if ($guardResponse = $this->guardModelAccess($user, $model)) {
+            return $guardResponse;
+        }
         $apiKeys     = $request->input('api_keys', []);
         $reviewTypes = $request->review_type ?? ['security', 'performance', 'best_practices'];
         $prompt      = "Review the following {$request->language} code for " . implode(', ', $reviewTypes) . ":\n\n{$request->code}\n\nProvide a detailed review with specific suggestions.";
@@ -708,6 +771,9 @@ SYSTEMPROMPT;
         }
 
         $model   = $request->model ?? 'gpt-4o';
+        if ($guardResponse = $this->guardModelAccess($user, $model)) {
+            return $guardResponse;
+        }
         $apiKeys = $request->input('api_keys', []);
         $prompt  = "Debug this {$request->language} code that produces the following error:\n\nError: {$request->error_message}\n\nCode:\n{$request->code}\n\nExplain the issue and provide a fix.";
 
@@ -766,6 +832,9 @@ SYSTEMPROMPT;
         }
 
         $model   = $request->model ?? 'gpt-4o';
+        if ($guardResponse = $this->guardModelAccess($user, $model)) {
+            return $guardResponse;
+        }
         $apiKeys = $request->input('api_keys', []);
         $prompt  = "Explain this {$request->language} code in detail:\n\n{$request->code}";
 

@@ -283,12 +283,21 @@ class ProjectController extends Controller
             ], 403);
         }
         
+        // Same sharing.enable gate as update() — if a caller requests
+        // public visibility at creation time but their plan doesn't allow
+        // it, silently fall back to private rather than blocking project
+        // creation entirely over a secondary field.
+        $visibility = $request->visibility ?? 'private';
+        if ($visibility === 'public' && !$this->planGuard->check($user, 'sharing.enable')) {
+            $visibility = 'private';
+        }
+
         $project = Project::create([
             'user_id' => $request->user()->id,
             'name' => $request->name,
             'description' => $request->description,
             'language' => 'mixed',
-            'visibility' => $request->visibility ?? 'private',
+            'visibility' => $visibility,
             'source' => $request->source ?? 'manual',
             'repository_url' => $request->repository_url,
         ]);
@@ -786,8 +795,39 @@ class ProjectController extends Controller
     public function update(Request $request, Project $project) 
     { 
         if ($project->user_id !== $request->user()->id) abort(403);
-        $project->update($request->all()); 
-        return response()->json(['project'=>$project]); 
+
+        // Was $project->update($request->all()) — a raw mass-assignment of
+        // the ENTIRE request body onto the model with zero validation.
+        // Project::$fillable includes user_id and storage_path, so this
+        // let an owner silently reassign/corrupt fields that were never
+        // meant to be editable via this endpoint. Whitelisted explicitly
+        // below; github_token/repository_url/branch/source belong to the
+        // dedicated GitHub-import flow, not generic edits — add a separate
+        // endpoint for those if genuinely needed here later.
+        $validated = $request->validate([
+            'name'        => 'sometimes|string|max:191',
+            'description' => 'sometimes|nullable|string',
+            'language'    => 'sometimes|string|max:50',
+            'visibility'  => 'sometimes|in:private,public',
+        ]);
+
+        // B3d — going public is the only part of this endpoint with a real
+        // plan-gated cost/value (public sharing is a paid-tier feature per
+        // §5 of the pricing analysis); everything else above is a free
+        // edit regardless of tier.
+        if (($validated['visibility'] ?? null) === 'public') {
+            try {
+                $this->planGuard->authorize($request->user(), 'sharing.enable');
+            } catch (PlanLimitExceededException $e) {
+                return response()->json([
+                    'error' => 'Public sharing requires a Creator plan or higher.',
+                    'reason' => $e->reason,
+                ], 403);
+            }
+        }
+
+        $project->update($validated);
+        return response()->json(['project' => $project]); 
     }
 
     public function destroy(Request $request, Project $project) 

@@ -23,7 +23,7 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 - [x] B3a — Wire `PlanGuard` into `ai.request` (CompletionController/AiController) — first action, lowest risk
 - [x] B3b — Wire `PlanGuard` into `sandbox.start` (ProjectController::runProject) + release on stop/cleanup
 - [x] B3c — Wire `PlanGuard` into `project.create`
-- [ ] B3d — Wire `PlanGuard` into `sharing.enabled` / model tier access
+- [x] B3d — Wire `PlanGuard` into `sharing.enabled` / model tier access
 - [x] B3e — Global concurrency ceiling check (total active sandboxes vs. box capacity)
 - [ ] B4 — Retire old scattered logic: `CompletionController::$rateLimits` array, `available_models.tier_required` direct checks, `subscription_tier` column
 - [ ] B5 — Admin CRUD endpoints: `GET/POST/PUT /admin/plans`, `/admin/plans/{id}/features`
@@ -147,3 +147,36 @@ feature_key gets renamed, a limit default changes, a phase gets reordered.)
   decision: should `ai.max_model_tier` restrict BYO-key models like Gemini
   (which cost nothing to serve) the same way it restricts self-hosted
   Ollama models, or only the latter?
+
+- 2026-07-30 — B3d complete — all of Phase B3 (a-e) is now done. Policy
+  question above was asked via elicitation but the reply ("continue")
+  didn't map to either option; proceeded with the DEFAULT assumption that
+  ai.max_model_tier restricts ALL models by tier, BYO keys included — the
+  simpler, more standard SaaS convention (model access as a product
+  feature, not just a cost-recovery mechanism). Flagged clearly; easy to
+  special-case BYO keys later if that assumption turns out wrong — the
+  branch point is `resolveModelTier()` in CompletionController.
+  Implementation: expanded `available_models.tier_required` from a
+  2-value to 4-value enum (raw ALTER, same approach as
+  fix_subscription_tier_enum); added `AvailableModelSeeder` with an
+  initial catalog mapped by provider-family economics (ollama→free,
+  mistral/codestral→starter, gemini/openrouter→creator, openai→pro).
+  `resolveModelTier()` checks the catalog first, falls back to the SAME
+  family pattern-matching `getProviderConfig()` already uses for
+  unlisted models, defaulting genuinely unknown strings to 'pro' (the
+  conservative choice — an unrecognized model string shouldn't be a way to
+  dodge gating). Wired into all 6 CompletionController AI endpoints.
+  Also wired `sharing.enable` into `ProjectController::store()` and
+  `update()` — and while touching `update()`, found and fixed a real
+  mass-assignment bug: it was doing `$project->update($request->all())`
+  with zero validation, and `Project::$fillable` includes `user_id` and
+  `storage_path` — meaning any owner could silently overwrite either via
+  this endpoint. Replaced with an explicit validated whitelist
+  (name/description/language/visibility only); github_token/
+  repository_url/branch/source were already excluded from this endpoint's
+  intended surface and stay that way. Public-visibility attempts are
+  asymmetric by design: `update()` returns an explicit 403 (deliberate,
+  single-purpose action), while `store()` silently downgrades to private
+  if the plan doesn't allow it (creation shouldn't fail over a secondary
+  field) — worth reconciling to one behavior later if the asymmetry proves
+  confusing in practice.
