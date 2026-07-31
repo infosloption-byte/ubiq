@@ -10,6 +10,7 @@ use App\Http\Controllers\API\V1\CompletionController;
 use App\Http\Controllers\API\V1\UsageController;
 use App\Http\Controllers\API\V1\AiController;
 use App\Http\Controllers\API\V1\AdminController;
+use App\Http\Controllers\API\V1\AdminPlanController;
 use App\Http\Controllers\API\V1\GitController;
 use App\Http\Controllers\API\V1\TerminalController;
 use App\Http\Controllers\API\V1\PayPalController;
@@ -76,6 +77,15 @@ Route::prefix('v1')->group(function () {
             Route::get('/stats',          [AdminController::class, 'stats']);
             Route::get('/users',          [AdminController::class, 'getUsers']);
             Route::delete('/users/{id}',  [AdminController::class, 'deleteUser']);
+
+            // B5 — plan/plan_features management, no SSH+tinker needed
+            Route::get('/plans',                          [AdminPlanController::class, 'index']);
+            Route::post('/plans',                         [AdminPlanController::class, 'store']);
+            Route::get('/plans/{plan}',                   [AdminPlanController::class, 'show']);
+            Route::put('/plans/{plan}',                   [AdminPlanController::class, 'update']);
+            Route::get('/plans/{plan}/features',          [AdminPlanController::class, 'features']);
+            Route::put('/plans/{plan}/features',          [AdminPlanController::class, 'updateFeatures']);
+            Route::delete('/plans/{plan}/features/{featureKey}', [AdminPlanController::class, 'destroyFeature']);
         });
 
         Route::post('/auth/logout', [AuthController::class, 'logout']);

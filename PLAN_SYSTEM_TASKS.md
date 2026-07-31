@@ -26,7 +26,7 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 - [x] B3d — Wire `PlanGuard` into `sharing.enabled` / model tier access
 - [x] B3e — Global concurrency ceiling check (total active sandboxes vs. box capacity)
 - [x] B4 — Retire old scattered logic: `CompletionController::$rateLimits` array, `available_models.tier_required` direct checks, `subscription_tier` column
-- [ ] B5 — Admin CRUD endpoints: `GET/POST/PUT /admin/plans`, `/admin/plans/{id}/features`
+- [x] B5 — Admin CRUD endpoints: `GET/POST/PUT /admin/plans`, `/admin/plans/{id}/features`
 - [ ] B6 — Reporting helpers against `plan_action_logs` (denial rate by tier/action, usage percentiles)
 
 ## Phase C — Frontend
@@ -205,3 +205,21 @@ feature_key gets renamed, a limit default changes, a phase gets reordered.)
   fully unused but also left in place (harmless dead schema, same
   reasoning). Revisit dropping both once this has been live long enough
   to trust — not before.
+
+- 2026-07-31 — B5 complete. New `AdminPlanController` under the existing
+  `admin` route middleware group (auth covered entirely at the route
+  level, matching AdminController's own convention — no duplicate
+  is_admin check inside the controller). Endpoints: `GET/POST /admin/
+  plans`, `GET/PUT /admin/plans/{plan}`, `GET/PUT /admin/plans/{plan}/
+  features` (bulk upsert), `DELETE /admin/plans/{plan}/features/
+  {featureKey}`. `plans.key` is intentionally NOT editable via `update()`
+  — PlanGuard, PlanSeeder, and CheckSubscription all match plans by `key`
+  elsewhere, so renaming it here would silently break those lookups with
+  no error at write time; delete-and-recreate if a key genuinely needs to
+  change. `updateFeatures()` soft-warns (doesn't block) if
+  `sandbox.max_concurrent` is set above `SANDBOX_GLOBAL_CONCURRENT_LIMIT`
+  — B3e's global ceiling still applies regardless, so this is just
+  telling the admin their new per-plan number is unreachable in practice,
+  not a hard rule enforced against itself. Every write calls
+  `PlanService::forgetPlan()` so changes are visible immediately instead
+  of waiting out the 60s cache TTL.
