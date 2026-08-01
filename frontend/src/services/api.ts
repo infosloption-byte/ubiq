@@ -88,6 +88,7 @@ export const userAPI = {
     getUsage: (days?: number) => api.get('/user/usage', { params: { days } }),
     getStats: () => api.get('/user/stats'),
     getStorageStats: () => api.get('/user/storage'),
+    getPlanUsage: () => api.get('/user/plan-usage'),
 };
 
 export const subscriptionApi = {

@@ -31,7 +31,7 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 
 ## Phase C — Frontend
 
-- [ ] C1 — Usage widget: `GET /me/usage`, live counts vs. limits in admin/user dashboard
+- [x] C1 — Usage widget: `GET /me/usage`, live counts vs. limits in admin/user dashboard
 - [ ] C2 — Structured limit-hit handling: denial payload → friendly upgrade prompt (not generic 429 toast)
 - [ ] C3 — Public pricing page sourced live from `GET /plans`
 - [ ] C4 — Upgrade/downgrade flow via PayPal, webhook updates `users.plan_id`, downgrade-over-limit policy (grandfather existing, block new)
@@ -238,3 +238,27 @@ feature_key gets renamed, a limit default changes, a phase gets reordered.)
   for JSON. Registered the `/plans/report` route BEFORE `/plans/{plan}` in
   routes/api.php — implicit route-model-binding would otherwise try (and
   fail) to resolve "report" as a Plan id.
+
+- 2026-08-01 — C1 complete, first frontend work this session (React/TS/
+  Vite/Tailwind, confirmed via package.json). New `GET /user/plan-usage`
+  endpoint (distinct from the existing `/user/usage`, which is historical
+  time-series for charts, not live limit data) — reuses `PlanGuard::
+  remaining()` rather than duplicating counter logic. New
+  `PlanUsageWidget.tsx` shows AI/sandbox/projects usage, added to
+  SettingsPage alongside the existing StorageUsage component.
+  IMPORTANT: found and fixed a real bug in `StorageUsage.tsx` — it hardcoded
+  `user?.subscription_tier === 'pro'` (the old 2-tier assumption) for
+  display text, AND did `storage.limit_mb - storage.used_mb` math that
+  would have produced NaN now that B3c's `storageStats()` can return
+  `limit_mb: null` for unlimited plans. Fixed to read the `unlimited` flag
+  from the API directly instead of deriving tier assumptions client-side.
+  Verified with real tooling, not just brace-counting: `npm install` (npm
+  registry is on the allowed network list), `npx tsc --noEmit` (zero
+  errors), and a full `npm run build` (succeeded) — first time this
+  session's frontend edits got actual compiler/build verification rather
+  than manual bracket-balance checks.
+  NOT fixed here, flagged for C2/C3: the same `isPro`-style hardcoded
+  2-tier check appears in 5 more files (SubscriptionGuard.tsx,
+  PricingCard.tsx, TerminalPanel.tsx, AdminPage.tsx, DashboardPage.tsx) —
+  out of scope for "usage widget," but those are exactly the files C2
+  (limit-hit prompts) and C3 (pricing page) will need to touch anyway.

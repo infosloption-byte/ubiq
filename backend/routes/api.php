@@ -158,6 +158,7 @@ Route::prefix('v1')->group(function () {
             Route::put('/user/preferences',  [AuthController::class, 'updatePreferences']);
             Route::get('/user/stats',        [UsageController::class, 'stats']);
             Route::get('/user/usage',        [UsageController::class, 'index']);
+            Route::get('/user/plan-usage',   [UsageController::class, 'planUsage']);
         });
     });
 });

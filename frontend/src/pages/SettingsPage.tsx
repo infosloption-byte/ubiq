@@ -5,6 +5,7 @@ import { useAuthStore } from '../stores/authStore';
 import { userAPI, authAPI, subscriptionApi } from '../services/api';
 import PricingCard from '../components/PricingCard';
 import StorageUsage from '../components/StorageUsage';
+import PlanUsageWidget from '../components/PlanUsageWidget';
 import { 
   User, Key, Monitor, Save, 
   CheckCircle2, Loader2,
@@ -362,6 +363,9 @@ export default function SettingsPage() {
                     </div>
 
                     <StorageUsage />
+                    <div className="mt-4">
+                      <PlanUsageWidget />
+                    </div>
                   </div>
 
                   {/* ── Upgrade Card — only show when NOT pro ── */}

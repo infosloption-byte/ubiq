@@ -5,11 +5,54 @@ namespace App\Http\Controllers\API\V1;
 use App\Http\Controllers\Controller;
 use App\Models\SiteVisit; 
 use App\Models\UsageLog;
+use App\Services\PlanGuard;
+use App\Services\PlanService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
 class UsageController extends Controller
 {
+    /**
+     * GET /user/plan-usage — C1's usage widget data. Distinct from the
+     * existing /user/usage (historical time-series for charts) — this is
+     * live "how much of my CURRENT limit have I used right now" data,
+     * reusing PlanGuard::remaining() rather than duplicating its counter
+     * logic here.
+     */
+    public function planUsage(Request $request, PlanGuard $planGuard, PlanService $planService)
+    {
+        $user = $request->user();
+        $plan = $planService->planFor($user);
+
+        $storageLimitMb = $planService->limitFor($user, 'storage.max_mb') ?? 512;
+        $storageUnlimited = is_int($storageLimitMb) && $storageLimitMb === -1;
+        $usedBytes = $user->getUsedStorageBytes();
+        $limitBytes = $storageUnlimited ? null : ((int) $storageLimitMb * 1048576);
+
+        $projectsLimit = $planService->limitFor($user, 'projects.max_count') ?? 3;
+        $projectsUnlimited = is_int($projectsLimit) && $projectsLimit === -1;
+
+        return response()->json([
+            'plan' => [
+                'key' => $plan?->key ?? 'free',
+                'name' => $plan?->name ?? 'Free',
+            ],
+            'ai' => $planGuard->remaining($user, 'ai.request'),
+            'sandbox' => $planGuard->remaining($user, 'sandbox.start'),
+            'storage' => [
+                'used_mb' => round($usedBytes / 1048576, 2),
+                'limit_mb' => $storageUnlimited ? null : (int) $storageLimitMb,
+                'unlimited' => $storageUnlimited,
+                'percent' => (!$storageUnlimited && $limitBytes > 0) ? round(($usedBytes / $limitBytes) * 100, 1) : 0,
+            ],
+            'projects' => [
+                'count' => $user->projects()->count(),
+                'limit' => $projectsUnlimited ? null : (int) $projectsLimit,
+                'unlimited' => $projectsUnlimited,
+            ],
+        ]);
+    }
+
     /**
      * GET /user/stats
      * Returns aggregate stats for the dashboard stat cards.
