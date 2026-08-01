@@ -3,6 +3,7 @@ import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-d
 import { useAuthStore } from './stores/authStore';
 
 import { SubscriptionGuard } from './components/SubscriptionGuard';
+import PlanLimitModal from './components/PlanLimitModal';
 
 import LandingPage from './pages/LandingPage';
 import LoginPage from './pages/LoginPage';
@@ -96,6 +97,7 @@ function App() {
                     <Route path="*" element={<Navigate to="/" />} />
                 </Routes>
             </Suspense>
+            <PlanLimitModal />
         </Router>
     );
 }

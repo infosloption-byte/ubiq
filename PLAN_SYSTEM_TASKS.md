@@ -32,7 +32,7 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 ## Phase C — Frontend
 
 - [x] C1 — Usage widget: `GET /me/usage`, live counts vs. limits in admin/user dashboard
-- [ ] C2 — Structured limit-hit handling: denial payload → friendly upgrade prompt (not generic 429 toast)
+- [x] C2 — Structured limit-hit handling: denial payload → friendly upgrade prompt (not generic 429 toast)
 - [ ] C3 — Public pricing page sourced live from `GET /plans`
 - [ ] C4 — Upgrade/downgrade flow via PayPal, webhook updates `users.plan_id`, downgrade-over-limit policy (grandfather existing, block new)
 - [ ] C5 — Internal admin UI to edit `plan_features` values directly
@@ -262,3 +262,30 @@ feature_key gets renamed, a limit default changes, a phase gets reordered.)
   PricingCard.tsx, TerminalPanel.tsx, AdminPage.tsx, DashboardPage.tsx) —
   out of scope for "usage widget," but those are exactly the files C2
   (limit-hit prompts) and C3 (pricing page) will need to touch anyway.
+
+- 2026-08-01 — C2 complete. Handled centrally rather than per-call-site:
+  every PlanGuard denial already returns a consistent `reason` field
+  (PlanLimitExceededException::toResponseArray + every catch block that
+  surfaces it), so detection happens ONCE in api.ts's axios response
+  interceptor (403/429 + `reason` present → trigger the modal) instead of
+  wrapping every AI/sandbox/project call site individually. New
+  `planLimitStore.ts` (zustand, no persist — transient UI trigger) maps
+  each reason to friendly copy; `global_capacity_reached`/
+  `plan_lookup_failed`/`no_plan_resolved` deliberately don't show an
+  upgrade CTA since they're infra/system issues, not real plan limits —
+  upgrading wouldn't help. New `PlanLimitModal.tsx` mounted once in
+  App.tsx, matching ConfirmDialog's visual style.
+  IMPORTANT: `streamChat()`'s raw `fetch()` call bypasses the axios
+  interceptor entirely (chat() is PlanGuard-guarded same as every other AI
+  endpoint), so it needed its own explicit hook. While fixing that, found
+  a real pre-existing bug: the non-ok handler did
+  `try { throw new Error(errorData.error) } catch { throw new Error(generic) }`
+  — the specific backend error message was thrown INSIDE its own catch
+  block and immediately overwritten with a generic one, every single
+  time. No caller has ever seen a real backend error message from this
+  streaming path. Fixed as part of the same edit.
+  Also caught during placement: `PlanLimitModal` uses `useNavigate()`,
+  which requires Router context — first attempt mounted it as a sibling
+  to `<Router>` rather than inside it, which would have thrown at runtime.
+  Caught before shipping by actually re-running `tsc --noEmit` + full
+  build after the fix, not just re-reading the diff.

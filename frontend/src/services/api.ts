@@ -1,4 +1,5 @@
 import axios, { AxiosError } from 'axios';
+import { usePlanLimitStore } from '../stores/planLimitStore';
 
 const API_URL = import.meta.env.VITE_API_URL;
 
@@ -65,7 +66,24 @@ api.interceptors.response.use(
             localStorage.removeItem('auth_token');
             localStorage.removeItem('auth-storage');
             window.location.href = '/login';
+            return Promise.reject(error);
         }
+
+        // C2 — every PlanGuard denial (403/429) carries a `reason` field in
+        // a consistent shape (see PlanLimitExceededException::toResponseArray
+        // and every catch block that surfaces it). Detecting on that field
+        // rather than status code alone avoids misfiring on unrelated 403s
+        // (e.g. plain project-ownership checks, which return {error:
+        // 'Unauthorized'} with no `reason` key) or 422 validation errors.
+        const data = error.response?.data as { reason?: string; limit?: any; usage?: any; error?: string } | undefined;
+        if ((error.response?.status === 403 || error.response?.status === 429) && data?.reason) {
+            usePlanLimitStore.getState().show(data.reason, {
+                limit: data.limit,
+                usage: data.usage,
+                fallbackMessage: data.error,
+            });
+        }
+
         return Promise.reject(error);
     }
 );
@@ -220,12 +238,33 @@ export const streamChat = async (
 
         if (response.status === 401) throw new Error("Session expired.");
         if (!response.ok) {
+            // Was: throw new Error(errorData.error || ...) INSIDE the same
+            // try whose catch immediately overwrote it with a generic
+            // "Server Error" message — the specific backend message never
+            // actually reached the caller. Restructured so a real JSON
+            // parse failure (not JSON at all) is the only thing that falls
+            // through to the generic message now.
+            let errorData: any = null;
             try {
-                const errorData = await response.json();
-                throw new Error(errorData.error || `Server Error: ${response.statusText}`);
-            } catch (e) {
-                throw new Error(`Server Error: ${response.statusText}`);
+                errorData = await response.json();
+            } catch (_) {
+                // not JSON — errorData stays null, generic message below
             }
+
+            // This streaming path uses raw fetch(), not the axios `api`
+            // instance, so it never passes through api.ts's response
+            // interceptor — chat() is PlanGuard-guarded same as every
+            // other AI endpoint, so this needs its own explicit hook
+            // rather than relying on the centralized one.
+            if ((response.status === 403 || response.status === 429) && errorData?.reason) {
+                usePlanLimitStore.getState().show(errorData.reason, {
+                    limit: errorData.limit,
+                    usage: errorData.usage,
+                    fallbackMessage: errorData.error,
+                });
+            }
+
+            throw new Error(errorData?.error || `Server Error: ${response.statusText}`);
         }
 
         if (!response.body) throw new Error('No response body');
