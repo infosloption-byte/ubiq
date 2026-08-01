@@ -79,6 +79,7 @@ Route::prefix('v1')->group(function () {
             Route::delete('/users/{id}',  [AdminController::class, 'deleteUser']);
 
             // B5 — plan/plan_features management, no SSH+tinker needed
+            Route::get('/plans/report',                   [AdminPlanController::class, 'report']); // B6, before {plan} wildcard
             Route::get('/plans',                          [AdminPlanController::class, 'index']);
             Route::post('/plans',                         [AdminPlanController::class, 'store']);
             Route::get('/plans/{plan}',                   [AdminPlanController::class, 'show']);

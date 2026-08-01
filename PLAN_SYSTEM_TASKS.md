@@ -27,7 +27,7 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 - [x] B3e — Global concurrency ceiling check (total active sandboxes vs. box capacity)
 - [x] B4 — Retire old scattered logic: `CompletionController::$rateLimits` array, `available_models.tier_required` direct checks, `subscription_tier` column
 - [x] B5 — Admin CRUD endpoints: `GET/POST/PUT /admin/plans`, `/admin/plans/{id}/features`
-- [ ] B6 — Reporting helpers against `plan_action_logs` (denial rate by tier/action, usage percentiles)
+- [x] B6 — Reporting helpers against `plan_action_logs` (denial rate by tier/action, usage percentiles)
 
 ## Phase C — Frontend
 
@@ -223,3 +223,18 @@ feature_key gets renamed, a limit default changes, a phase gets reordered.)
   not a hard rule enforced against itself. Every write calls
   `PlanService::forgetPlan()` so changes are visible immediately instead
   of waiting out the 60s cache TTL.
+
+- 2026-07-31 — B6 complete — Phase B (B1-B6) is fully done. New
+  `PlanReportService` with three canned queries: denial rates by plan+
+  action, top denial reasons by plan (what to loosen first), and usage-
+  vs-limit stats (how close to the ceiling typical usage runs). "Usage
+  percentile" from the original phase description is approximated as avg/
+  max %-of-limit rather than a true percentile — MySQL has no native
+  PERCENTILE_CONT before 8.0.2, and avg/max already answers the actionable
+  question without a window-function query; revisit with real percentiles
+  once there's enough traffic volume to make the distinction matter.
+  Exposed two ways from one implementation: `php artisan ubiq:plan-report
+  --days=30` for a quick CLI table, and `GET /admin/plans/report?days=30`
+  for JSON. Registered the `/plans/report` route BEFORE `/plans/{plan}` in
+  routes/api.php — implicit route-model-binding would otherwise try (and
+  fail) to resolve "report" as a Plan id.

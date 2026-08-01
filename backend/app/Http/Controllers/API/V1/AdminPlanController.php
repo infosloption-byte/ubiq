@@ -7,6 +7,7 @@ use App\Models\Plan;
 use App\Models\PlanFeature;
 use App\Services\PlanGuard;
 use App\Services\PlanService;
+use App\Services\PlanReportService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Validator;
 
@@ -23,6 +24,18 @@ class AdminPlanController extends Controller
 {
     public function __construct(private PlanService $planService)
     {
+    }
+
+    /**
+     * GET /admin/plans/report — B6, exposed alongside plan CRUD since it's
+     * the same "manage plans without SSH" theme. Same PlanReportService
+     * also backs the `ubiq:plan-report` Artisan command — one
+     * implementation, two consumers.
+     */
+    public function report(Request $request, PlanReportService $report)
+    {
+        $days = (int) $request->query('days', 30);
+        return response()->json($report->fullReport($days));
     }
 
     /** GET /admin/plans — every plan (active + inactive), features nested. */
