@@ -63,6 +63,11 @@ const REASON_COPY: Record<string, { title: string; message: string; showUpgrade:
         message: "We couldn't find an active plan on your account. Please contact support if this continues.",
         showUpgrade: false,
     },
+    subscription_expired: {
+        title: 'Subscription expired',
+        message: 'Your Pro subscription has expired. Renew to keep your Pro features.',
+        showUpgrade: true,
+    },
 };
 
 export interface PlanLimitInfo {

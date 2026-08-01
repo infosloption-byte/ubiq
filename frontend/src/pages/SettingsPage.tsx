@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import Layout from '../components/Layout';
 import { useAuthStore } from '../stores/authStore';
 import { userAPI, authAPI, subscriptionApi } from '../services/api';
-import PricingCard from '../components/PricingCard';
+import PricingGrid from '../components/PricingGrid';
 import StorageUsage from '../components/StorageUsage';
 import PlanUsageWidget from '../components/PlanUsageWidget';
 import { 
@@ -307,7 +307,7 @@ export default function SettingsPage() {
                       <p className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-2">Current Plan</p>
                       <div className="flex items-center gap-3 mb-3">
                         <h3 className="text-2xl font-black text-white capitalize">
-                          {isPro ? 'Pro' : 'Free'}
+                          {user?.subscription_tier || 'free'}
                         </h3>
                         <ProStatusBadge />
                       </div>
@@ -368,16 +368,14 @@ export default function SettingsPage() {
                     </div>
                   </div>
 
-                  {/* ── Upgrade Card — only show when NOT pro ── */}
+                  {/* ── Upgrade — show all plans unless already on the top tier ── */}
                   {!isPro && !isCanceled && (
                     <div className="mt-4">
                       <div className="mb-4">
-                        <h3 className="text-lg font-bold text-white">Upgrade to Pro</h3>
-                        <p className="text-sm text-slate-400">Start your 1-day free trial, then $9/month.</p>
+                        <h3 className="text-lg font-bold text-white">Plans</h3>
+                        <p className="text-sm text-slate-400">Pick the plan that fits how you're building.</p>
                       </div>
-                      <div className="max-w-md">
-                        <PricingCard />
-                      </div>
+                      <PricingGrid />
                     </div>
                   )}
 

@@ -11,6 +11,7 @@ use App\Http\Controllers\API\V1\UsageController;
 use App\Http\Controllers\API\V1\AiController;
 use App\Http\Controllers\API\V1\AdminController;
 use App\Http\Controllers\API\V1\AdminPlanController;
+use App\Http\Controllers\API\V1\PlanController;
 use App\Http\Controllers\API\V1\GitController;
 use App\Http\Controllers\API\V1\TerminalController;
 use App\Http\Controllers\API\V1\PayPalController;
@@ -29,6 +30,13 @@ Route::prefix('v1')->group(function () {
     // ── Fully public ──────────────────────────────────────────────────────
 
     Route::post('/visit', [UsageController::class, 'recordVisit']);
+
+    // C3 — public pricing page data, no auth needed. Distinct from the
+    // admin /admin/plans endpoints (B5) — this is read-only and excludes
+    // nothing sensitive (paypal_plan_id isn't a secret, same as any
+    // publishable checkout ID, and the frontend needs it to build the
+    // right subscription per plan in Phase C4).
+    Route::get('/plans', [PlanController::class, 'index']);
 
     // Auth: strict rate limits — 10 attempts per minute per IP
     Route::middleware('throttle:10,1')->group(function () {

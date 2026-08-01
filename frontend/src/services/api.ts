@@ -69,14 +69,14 @@ api.interceptors.response.use(
             return Promise.reject(error);
         }
 
-        // C2 — every PlanGuard denial (403/429) carries a `reason` field in
-        // a consistent shape (see PlanLimitExceededException::toResponseArray
-        // and every catch block that surfaces it). Detecting on that field
-        // rather than status code alone avoids misfiring on unrelated 403s
-        // (e.g. plain project-ownership checks, which return {error:
-        // 'Unauthorized'} with no `reason` key) or 422 validation errors.
+        // C2/C3 — every PlanGuard denial (403/429) AND CheckSubscription's
+        // lapsed-Pro block (402) carry a `reason` field in a consistent
+        // shape. Detecting on that field rather than status code alone
+        // avoids misfiring on unrelated errors (e.g. plain project-
+        // ownership 403s, which have no `reason` key, or 422 validation
+        // errors).
         const data = error.response?.data as { reason?: string; limit?: any; usage?: any; error?: string } | undefined;
-        if ((error.response?.status === 403 || error.response?.status === 429) && data?.reason) {
+        if ([402, 403, 429].includes(error.response?.status ?? 0) && data?.reason) {
             usePlanLimitStore.getState().show(data.reason, {
                 limit: data.limit,
                 usage: data.usage,
@@ -256,7 +256,7 @@ export const streamChat = async (
             // interceptor — chat() is PlanGuard-guarded same as every
             // other AI endpoint, so this needs its own explicit hook
             // rather than relying on the centralized one.
-            if ((response.status === 403 || response.status === 429) && errorData?.reason) {
+            if ([402, 403, 429].includes(response.status) && errorData?.reason) {
                 usePlanLimitStore.getState().show(errorData.reason, {
                     limit: errorData.limit,
                     usage: errorData.usage,

@@ -33,7 +33,7 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 
 - [x] C1 — Usage widget: `GET /me/usage`, live counts vs. limits in admin/user dashboard
 - [x] C2 — Structured limit-hit handling: denial payload → friendly upgrade prompt (not generic 429 toast)
-- [ ] C3 — Public pricing page sourced live from `GET /plans`
+- [x] C3 — Public pricing page sourced live from `GET /plans`
 - [ ] C4 — Upgrade/downgrade flow via PayPal, webhook updates `users.plan_id`, downgrade-over-limit policy (grandfather existing, block new)
 - [ ] C5 — Internal admin UI to edit `plan_features` values directly
 
@@ -289,3 +289,43 @@ feature_key gets renamed, a limit default changes, a phase gets reordered.)
   to `<Router>` rather than inside it, which would have thrown at runtime.
   Caught before shipping by actually re-running `tsc --noEmit` + full
   build after the fix, not just re-reading the diff.
+
+- 2026-08-01 — C3 complete, and grew significantly beyond "add a pricing
+  page" once the actual blast radius became clear. New public `GET
+  /plans` endpoint (deliberately a separate `PlanController`, not an
+  extra method on `AdminPlanController` — that route has no auth at all,
+  and mixing it into the Admin* namespace risked a future reader assuming
+  every method there is admin-gated).
+  MAJOR FINDING: `SubscriptionGuard.tsx` was still enforcing the OLD
+  2-tier model at the FRONTEND level — `canAccess` required
+  `subscription_tier === 'pro'` to reach `/chat`, `/projects`, or
+  `/editor` AT ALL, showing a hardcoded "$9/month, Pro only" wall to
+  every Free/Starter/Creator user. This is the exact frontend mirror of
+  the CheckSubscription bug fixed in B4 — even after all that backend
+  work, non-Pro users still couldn't reach those pages. Neutered the
+  gate entirely; PlanGuard (not a page-level block) is now the sole
+  source of truth for what each tier can do, surfaced via the C2 modal
+  when a real limit is hit.
+  That fix created a new gap: a genuinely lapsed Pro user (still blocked
+  server-side by CheckSubscription's 402) would now hit a raw unhandled
+  error with no friendly UI, since the old frontend gate was incidentally
+  catching that case too. Closed by giving CheckSubscription's 402 the
+  same `reason` shape (`subscription_expired`) PlanGuard denials use, and
+  extending both the axios interceptor AND streamChat()'s separate fetch()
+  error handling to catch 402 alongside 403/429.
+  New `PricingGrid.tsx` replaces the single hardcoded Pro-only
+  `PricingCard.tsx` (left in place, unused — same "harmless dead code"
+  pattern as elsewhere this session). Renders all active plans from `GET
+  /plans` with curated marketing labels for a subset of plan_features
+  (raw DB values stay the source of truth; label phrasing is a frontend
+  display concern). Only Pro has a real `paypal_plan_id` right now —
+  Starter/Creator render a "Coming Soon" button rather than a fake
+  checkout flow, honestly reflecting that Phase C4 hasn't wired their
+  billing yet. Also fixed a smaller, adjacent display bug in
+  SettingsPage.tsx: the "Current Plan" badge hardcoded `isPro ? 'Pro' :
+  'Free'`, which would show "Free" for Starter/Creator users — now shows
+  the real `subscription_tier` value.
+  Caught during implementation, not after: `api.ts` exports `api` as a
+  DEFAULT export, not named — first draft of PricingGrid's import would
+  have been a runtime error. Verified with `tsc --noEmit` + full build
+  before considering this done, same discipline as C1/C2.

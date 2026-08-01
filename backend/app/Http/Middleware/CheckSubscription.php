@@ -67,7 +67,12 @@ class CheckSubscription
             'error'   => 'Subscription Required',
             'message' => 'Your Pro subscription has expired. Please renew to continue using Pro features.',
             'status'  => 'inactive',
-            'action'  => 'payment_required'
+            'action'  => 'payment_required',
+            // C3 — same `reason` shape PlanGuard denials use, so this gets
+            // picked up by the same frontend interceptor/modal (C2)
+            // instead of surfacing as a raw unhandled error now that
+            // SubscriptionGuard no longer pre-emptively blocks the page.
+            'reason'  => 'subscription_expired',
         ], 402);
     }
 }
