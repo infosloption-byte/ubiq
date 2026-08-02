@@ -35,7 +35,7 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 - [x] C2 — Structured limit-hit handling: denial payload → friendly upgrade prompt (not generic 429 toast)
 - [x] C3 — Public pricing page sourced live from `GET /plans`
 - [x] C4 — Upgrade/downgrade flow via PayPal, webhook updates `users.plan_id`, downgrade-over-limit policy (grandfather existing, block new)
-- [ ] C5 — Internal admin UI to edit `plan_features` values directly
+- [x] C5 — Internal admin UI to edit `plan_features` values directly
 
 ---
 
@@ -371,3 +371,20 @@ feature_key gets renamed, a limit default changes, a phase gets reordered.)
   `PUT /admin/plans/{id}` (B5). PricingGrid (C3) already shows a live
   PayPal button the instant paypal_plan_id is set — no further frontend
   or backend work required once those two plan IDs exist.
+
+- 2026-08-02 — C5 complete. This finishes the entire tracker (A1-A5,
+  B1-B6, C1-C5). New `AdminPlansPanel.tsx`, added as a third "Plans" tab
+  on the existing AdminPage (alongside Overview/Users) rather than a
+  separate route — matches the existing tab pattern there. Editable core
+  fields (name, price_cents, paypal_plan_id, is_active) plus an inline
+  features table (key/value/type, add/remove rows) per plan, calling the
+  B5 endpoints directly — this is what makes "manage it over the
+  database" literally true day-to-day instead of curl/Postman. Surfaces
+  `updateFeatures()`'s soft warnings (e.g. sandbox.max_concurrent
+  exceeding the global ceiling) inline rather than silently swallowing
+  them. Also embeds the B6 report (denial rates, top denial reasons,
+  usage-vs-limit) as a collapsible section in the same panel, reusing
+  `GET /admin/plans/report` — one more consumer of that same service,
+  no new backend work needed. Verified with `tsc --noEmit` + full build,
+  same discipline as every other frontend phase this session — zero
+  errors both times.

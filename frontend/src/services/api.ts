@@ -197,6 +197,11 @@ export const adminAPI = {
     getStats: () => api.get('/admin/stats'),
     getUsers: (page = 1) => api.get(`/admin/users?page=${page}`),
     deleteUser: (id: number) => api.delete(`/admin/users/${id}`),
+    getPlans: () => api.get('/admin/plans'),
+    updatePlan: (id: number, data: any) => api.put(`/admin/plans/${id}`, data),
+    updatePlanFeatures: (id: number, features: any[]) => api.put(`/admin/plans/${id}/features`, { features }),
+    deletePlanFeature: (id: number, featureKey: string) => api.delete(`/admin/plans/${id}/features/${featureKey}`),
+    getPlanReport: (days = 30) => api.get(`/admin/plans/report?days=${days}`),
 };
 
 export const gitAPI = {

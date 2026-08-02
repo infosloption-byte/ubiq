@@ -1,18 +1,20 @@
 import { useState, useEffect } from 'react';
 import Layout from '../components/Layout'; // <--- Using the App Layout (Sidebar)
 import { adminAPI } from '../services/api';
+import AdminPlansPanel from '../components/AdminPlansPanel';
 import { 
   Users, LayoutGrid, Activity, 
   Trash2, ShieldCheck, Cpu,
   Zap, AlertTriangle, Clock, Coins,
-  CheckCircle2, TrendingUp, Eye, MousePointerClick
+  CheckCircle2, TrendingUp, Eye, MousePointerClick,
+  Package
 } from 'lucide-react';
 
 export default function AdminPage() {
   const [stats, setStats] = useState<any>(null);
   const [users, setUsers] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'users'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'users' | 'plans'>('dashboard');
 
   useEffect(() => {
     loadData();
@@ -79,6 +81,12 @@ export default function AdminPage() {
                 className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all flex items-center gap-2 ${activeTab === 'users' ? 'bg-indigo-600 text-white shadow-lg' : 'text-slate-400 hover:text-white'}`}
               >
                 <Users className="w-3.5 h-3.5" /> Users
+              </button>
+              <button 
+                onClick={() => setActiveTab('plans')} 
+                className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all flex items-center gap-2 ${activeTab === 'plans' ? 'bg-indigo-600 text-white shadow-lg' : 'text-slate-400 hover:text-white'}`}
+              >
+                <Package className="w-3.5 h-3.5" /> Plans
               </button>
            </div>
         </div>
@@ -299,6 +307,12 @@ export default function AdminPage() {
                     </tbody>
                   </table>
                 </div>
+              </div>
+            )}
+
+            {activeTab === 'plans' && (
+              <div className="animate-fade-in">
+                <AdminPlansPanel />
               </div>
             )}
 
