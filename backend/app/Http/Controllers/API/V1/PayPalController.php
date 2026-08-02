@@ -36,12 +36,19 @@ class PayPalController extends Controller
             return response()->json(['error' => 'Could not verify subscription with PayPal.'], 422);
         }
 
-        // Confirm this subscription is actually for the expected plan.
-        if ($subscription['plan_id'] !== config('services.paypal.plan_id')) {
-            Log::warning('[PayPal] Plan ID mismatch on confirm', [
-                'expected' => config('services.paypal.plan_id'),
-                'got'      => $subscription['plan_id'] ?? null,
-                'user_id'  => $user->id,
+        // C4 — was checking against a SINGLE hardcoded config('services.
+        // paypal.plan_id') (Pro only). Now matches against ANY active
+        // plan's paypal_plan_id, so this works once Starter/Creator get
+        // real PayPal plans wired up too — no code change needed then,
+        // just an admin PUT to set that plan's paypal_plan_id (B5).
+        $matchedPlan = Plan::where('paypal_plan_id', $subscription['plan_id'] ?? null)
+            ->where('is_active', true)
+            ->first();
+
+        if (!$matchedPlan) {
+            Log::warning('[PayPal] No matching active plan for subscription plan_id', [
+                'got'     => $subscription['plan_id'] ?? null,
+                'user_id' => $user->id,
             ]);
             return response()->json(['error' => 'Subscription plan mismatch.'], 422);
         }
@@ -172,8 +179,19 @@ class PayPalController extends Controller
         ];
         $newStatus = $statusMap[$status] ?? 'free';
 
-        // Grace period same as before: pro while active, past_due (payment retrying)
-        $newTier = in_array($newStatus, ['active', 'past_due']) ? 'pro' : 'free';
+        // C4 — was `$newTier = in_array($newStatus, ['active','past_due'])
+        // ? 'pro' : 'free'`, a hardcoded binary that ignored which plan the
+        // subscription was actually FOR. That happened to be harmless
+        // while Pro was the only plan with a paypal_plan_id at all, but
+        // would have silently mis-tiered anyone on a real Starter/Creator
+        // subscription the moment those went live. Now resolves the real
+        // plan via paypal_plan_id, falling back to Free if the status
+        // isn't active-like OR the plan_id doesn't match anything active.
+        $matchedPlan = Plan::where('paypal_plan_id', $subscription['plan_id'] ?? null)
+            ->where('is_active', true)
+            ->first();
+        $isActiveLike = in_array($newStatus, ['active', 'past_due']);
+        $targetPlan = ($isActiveLike && $matchedPlan) ? $matchedPlan : Plan::where('key', 'free')->first();
 
         $subscriptionEndsAt = null;
         if (!empty($subscription['billing_info']['next_billing_time'])) {
@@ -185,17 +203,11 @@ class PayPalController extends Controller
         $user->update([
             'paypal_subscription_id' => $subscriptionId,
             'subscription_status'    => $newStatus,
-            'subscription_tier'      => $newTier,
-            // B4 — dual-write during the subscription_tier → plan_id
-            // migration. This is the only webhook write site for tier
-            // changes, so it's the critical one to keep in sync; the
-            // starter/creator tiers have no PayPal plan wired up yet
-            // (Phase C4), so this webhook can currently only ever resolve
-            // to 'free' or 'pro' — that's fine, plan_id still gets it right.
-            'plan_id'                 => Plan::where('key', $newTier)->value('id'),
+            'subscription_tier'      => $targetPlan->key,
+            'plan_id'                 => $targetPlan->id,
             'subscription_ends_at'   => $subscriptionEndsAt,
         ]);
 
-        Log::info("[PayPal] User {$user->id} updated → status={$newStatus}, tier={$newTier}");
+        Log::info("[PayPal] User {$user->id} updated → status={$newStatus}, plan={$targetPlan->key}");
     }
 }

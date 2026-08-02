@@ -34,7 +34,7 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 - [x] C1 — Usage widget: `GET /me/usage`, live counts vs. limits in admin/user dashboard
 - [x] C2 — Structured limit-hit handling: denial payload → friendly upgrade prompt (not generic 429 toast)
 - [x] C3 — Public pricing page sourced live from `GET /plans`
-- [ ] C4 — Upgrade/downgrade flow via PayPal, webhook updates `users.plan_id`, downgrade-over-limit policy (grandfather existing, block new)
+- [x] C4 — Upgrade/downgrade flow via PayPal, webhook updates `users.plan_id`, downgrade-over-limit policy (grandfather existing, block new)
 - [ ] C5 — Internal admin UI to edit `plan_features` values directly
 
 ---
@@ -329,3 +329,45 @@ feature_key gets renamed, a limit default changes, a phase gets reordered.)
   DEFAULT export, not named — first draft of PricingGrid's import would
   have been a runtime error. Verified with `tsc --noEmit` + full build
   before considering this done, same discipline as C1/C2.
+
+- 2026-08-01 — C4 complete for what's actually buildable without live
+  PayPal dashboard access (which Claude doesn't have — creating the real
+  Starter/Creator PayPal Products/Plans is a manual step, see below).
+  MAJOR FINDING #1: `PayPalController::applySubscriptionState()` hardcoded
+  `$newTier = in_array($newStatus,['active','past_due']) ? 'pro' : 'free'`
+  — a binary that completely ignored WHICH plan the subscription was
+  actually for. Harmless while Pro was the only plan with a
+  paypal_plan_id, but would have silently mis-tiered any real Starter/
+  Creator subscriber the moment those went live (a Creator subscriber
+  would've been written as 'pro'). Same issue in `confirm()`, which
+  checked against a single hardcoded `config('services.paypal.plan_id')`.
+  Both now resolve the actual Plan by matching `paypal_plan_id` in the DB
+  — works for any future paid tier with zero further code changes, just
+  an admin PUT (B5) once that plan's real PayPal plan_id exists.
+  MAJOR FINDING #2: confirmed via grep that the scheduled downgrade task
+  referenced in `cancel()`'s own code comment ("a scheduled task... should
+  downgrade once subscription_ends_at has passed") never actually existed
+  anywhere. PayPal's cancel API is terminal — no further EXPIRED webhook
+  fires after a manual cancellation the way one does for a naturally-
+  lapsing subscription — so a canceled user's paid tier/plan_id would
+  have stayed put forever. Built the missing
+  `ubiq:downgrade-expired-subscriptions` command, scheduled hourly.
+  Downgrade-over-limit policy needed NO new code: PlanGuard's
+  project.create/storage.check already check LIVE counts against
+  whatever plan is currently active at request time — a downgrade
+  naturally grandfathers existing resources (nothing deletes them) while
+  blocking new creation until back under the new limit. This fell out of
+  B3c's design for free.
+  NOT built: true paid-tier-to-paid-tier downgrade while staying
+  subscribed (e.g. Creator → Starter without lapsing to Free first) needs
+  PayPal's subscription "revise" API, a materially different flow from
+  cancel+resubscribe — flagged as a known gap, not attempted here.
+  Documented all 5 PayPal env vars in .env.example (previously zero of
+  them were, despite config/services.php expecting all five).
+  MANUAL STEP STILL NEEDED (outside Claude's reach — no PayPal dashboard
+  access): create real PayPal Products+Plans for Starter ($5/mo) and
+  Creator ($12/mo) via the PayPal Developer Dashboard, then PUT the
+  resulting plan IDs onto plans.paypal_plan_id via
+  `PUT /admin/plans/{id}` (B5). PricingGrid (C3) already shows a live
+  PayPal button the instant paypal_plan_id is set — no further frontend
+  or backend work required once those two plan IDs exist.

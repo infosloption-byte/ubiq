@@ -37,3 +37,15 @@ Schedule::command('ubiq:cleanup-sandboxes')
     ->withoutOverlapping()   // skip if a previous run is still going
     ->runInBackground()
     ->appendOutputTo(storage_path('logs/sandbox-cleanup.log'));
+
+// C4 — this genuinely did not exist before (confirmed via grep): a
+// canceled PayPal subscription's grace period (subscription_ends_at)
+// would end with nobody ever actually downgrading the user's
+// subscription_tier/plan_id back to Free. Hourly is frequent enough that
+// nobody sits with stale paid-tier access for long after their grace
+// period ends, without needing per-minute precision for a billing check.
+Schedule::command('ubiq:downgrade-expired-subscriptions')
+    ->hourly()
+    ->withoutOverlapping()
+    ->runInBackground()
+    ->appendOutputTo(storage_path('logs/subscription-downgrade.log'));
