@@ -23,8 +23,13 @@ import { getAuthToken } from '../services/api';
  *
  *   3. User walks away / laptop sleeps / network drops
  *      → Neither handler fires.
- *      → The backend cron (ubiq:cleanup-sandboxes) catches these after
- *        the configured idle threshold (default 2 hours).
+ *      → The backend cron (ubiq:cleanup-sandboxes) catches these once the
+ *        sandbox's plan-specific idle timeout is exceeded (20min-180min
+ *        depending on tier — see plan_features.sandbox.idle_timeout_minutes),
+ *        checked every 15 minutes. Was previously documented here as a
+ *        flat "2 hours" — that was true before the B3b/B3e plan system
+ *        work made this per-tier; updated to avoid stale docs drifting
+ *        from what the backend actually does.
  *
  * The hook only fires stop requests when isRunning is true — it does
  * nothing if the sandbox was never started or was already stopped.

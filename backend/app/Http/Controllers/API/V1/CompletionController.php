@@ -98,12 +98,38 @@ class CompletionController extends Controller
     }
 
     /**
+     * Win-win policy, settled after initially defaulting to "restrict
+     * everything" without a real answer: self-hosted models (Ollama) stay
+     * tier-gated — that's the one place THIS platform incurs a real cost.
+     * BYO-key models (the user supplies their own Gemini/OpenAI/OpenRouter/
+     * Mistral key) are allowed on ANY tier — blocking a model the user is
+     * paying for themselves is a pure paywall with no cost justification.
+     * AI request rate limits (guardAiRequest, above) still apply
+     * regardless of provider, so the upgrade incentive doesn't disappear —
+     * it just shifts to throughput/concurrency rather than model choice.
+     */
+    private function hasByoKeyFor(string $modelId, array $apiKeys): bool
+    {
+        return match (true) {
+            str_contains($modelId, 'gemini')                                        => !empty($apiKeys['google']),
+            str_starts_with($modelId, 'gpt-')                                       => !empty($apiKeys['openai']),
+            str_starts_with($modelId, 'openrouter/')                                 => !empty($apiKeys['openrouter']),
+            str_contains($modelId, 'mistral') || str_contains($modelId, 'codestral') => !empty($apiKeys['mistral']),
+            default => false, // bare/ollama-style model names have no BYO concept
+        };
+    }
+
+    /**
      * Returns a 403 JsonResponse if denied, null if allowed — same calling
      * convention as guardAiRequest() so call sites stay a simple
      * `if ($r = $this->guardModelAccess(...)) return $r;` one-liner.
      */
-    private function guardModelAccess($user, string $modelId): ?\Illuminate\Http\JsonResponse
+    private function guardModelAccess($user, string $modelId, array $apiKeys = []): ?\Illuminate\Http\JsonResponse
     {
+        if ($this->hasByoKeyFor($modelId, $apiKeys)) {
+            return null;
+        }
+
         try {
             $this->planGuard->authorize($user, 'model.access', ['model_tier' => $this->resolveModelTier($modelId)]);
             return null;
@@ -238,10 +264,10 @@ class CompletionController extends Controller
         }
 
         $model   = $request->model;
-        if ($guardResponse = $this->guardModelAccess($request->user(), $model)) {
+        $apiKeys = $request->input('api_keys', []);
+        if ($guardResponse = $this->guardModelAccess($request->user(), $model, $apiKeys)) {
             return $guardResponse;
         }
-        $apiKeys = $request->input('api_keys', []);
         $config  = $this->getProviderConfig($model, $apiKeys);
 
         if (!$config) {
@@ -535,10 +561,10 @@ SYSTEMPROMPT;
         }
 
         $model   = $request->model ?? ($user->preferences->preferred_model ?? 'codellama:7b');
-        if ($guardResponse = $this->guardModelAccess($user, $model)) {
+        $apiKeys = $request->input('api_keys', []);
+        if ($guardResponse = $this->guardModelAccess($user, $model, $apiKeys)) {
             return $guardResponse;
         }
-        $apiKeys = $request->input('api_keys', []);
         $config  = $this->getProviderConfig($model, $apiKeys);
 
         if (!$config) return response()->json(['error' => 'Missing API Key for selected model'], 400);
@@ -619,10 +645,10 @@ SYSTEMPROMPT;
         }
 
         $model   = $request->model ?? 'gpt-3.5-turbo';
-        if ($guardResponse = $this->guardModelAccess($user, $model)) {
+        $apiKeys = $request->input('api_keys', []);
+        if ($guardResponse = $this->guardModelAccess($user, $model, $apiKeys)) {
             return $guardResponse;
         }
-        $apiKeys = $request->input('api_keys', []);
 
         $config = $this->getProviderConfig($model, $apiKeys);
         if (!$config) {
@@ -708,10 +734,10 @@ SYSTEMPROMPT;
         }
 
         $model       = $request->model ?? 'gpt-4o';
-        if ($guardResponse = $this->guardModelAccess($user, $model)) {
+        $apiKeys     = $request->input('api_keys', []);
+        if ($guardResponse = $this->guardModelAccess($user, $model, $apiKeys)) {
             return $guardResponse;
         }
-        $apiKeys     = $request->input('api_keys', []);
         $reviewTypes = $request->review_type ?? ['security', 'performance', 'best_practices'];
         $prompt      = "Review the following {$request->language} code for " . implode(', ', $reviewTypes) . ":\n\n{$request->code}\n\nProvide a detailed review with specific suggestions.";
 
@@ -771,10 +797,10 @@ SYSTEMPROMPT;
         }
 
         $model   = $request->model ?? 'gpt-4o';
-        if ($guardResponse = $this->guardModelAccess($user, $model)) {
+        $apiKeys = $request->input('api_keys', []);
+        if ($guardResponse = $this->guardModelAccess($user, $model, $apiKeys)) {
             return $guardResponse;
         }
-        $apiKeys = $request->input('api_keys', []);
         $prompt  = "Debug this {$request->language} code that produces the following error:\n\nError: {$request->error_message}\n\nCode:\n{$request->code}\n\nExplain the issue and provide a fix.";
 
         $config = $this->getProviderConfig($model, $apiKeys);
@@ -832,10 +858,10 @@ SYSTEMPROMPT;
         }
 
         $model   = $request->model ?? 'gpt-4o';
-        if ($guardResponse = $this->guardModelAccess($user, $model)) {
+        $apiKeys = $request->input('api_keys', []);
+        if ($guardResponse = $this->guardModelAccess($user, $model, $apiKeys)) {
             return $guardResponse;
         }
-        $apiKeys = $request->input('api_keys', []);
         $prompt  = "Explain this {$request->language} code in detail:\n\n{$request->code}";
 
         $config = $this->getProviderConfig($model, $apiKeys);

@@ -7,19 +7,24 @@ use Illuminate\Support\Facades\DB;
 
 /**
  * B3d — Populates available_models, which was previously empty and
- * unqueried anywhere in the app. Tier assignment follows provider-family
- * economics, not just model size:
- *   - ollama (self-hosted, ~$0 marginal cost)      -> free, unless a
- *     specifically large model is called out below
- *   - mistral / codestral (cheap commercial API)   -> starter
- *   - gemini, openrouter (capable, moderate cost)  -> creator
- *   - openai gpt- (priciest family)                -> pro
+ * unqueried anywhere in the app.
  *
- * This is a starting catalog, not exhaustive — add rows any time via the
- * DB directly (or the Phase B5 admin UI once built). CompletionController's
- * resolveModelTier() falls back to the same family logic for any model
- * NOT in this table, so an unlisted model still gets a sensible tier
- * rather than slipping through ungated.
+ * UPDATE: as of the BYO-key policy decision, tier_required here only
+ * actually gates access for self-hosted (Ollama) models — CompletionController::
+ * hasByoKeyFor() exempts any model the user supplies their own provider
+ * key for, regardless of what's set here. The Gemini/OpenAI/OpenRouter/
+ * Mistral rows below are kept for resolveModelTier()'s fallback path
+ * (used only if somehow no api_key is present for a commercial model,
+ * which getProviderConfig() would reject anyway) and for future display
+ * purposes — not as an active BYO restriction.
+ *
+ * Tier assignment for the Ollama rows follows real cost: larger models
+ * cost more CPU-time on the shared box even at $0 per-token, so bigger
+ * self-hosted models are reserved for higher tiers.
+ *
+ * Starting catalog, not exhaustive — add rows any time via the DB
+ * directly (or the B5 admin UI). CompletionController's resolveModelTier()
+ * falls back to the same family logic for any model NOT in this table.
  *
  * Re-runnable: upserts by `name`.
  */

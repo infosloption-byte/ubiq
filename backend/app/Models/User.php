@@ -52,7 +52,6 @@ class User extends Authenticatable
     public function projects()    { return $this->hasMany(Project::class); }
     public function chatSessions(){ return $this->hasMany(ChatSession::class); }
     public function usageLogs()   { return $this->hasMany(UsageLog::class); }
-    public function rateLimits()  { return $this->hasMany(RateLimit::class); }
     public function planOverrides() { return $this->hasMany(\App\Models\UserPlanOverride::class); }
     public function plan()        { return $this->belongsTo(\App\Models\Plan::class); }
 

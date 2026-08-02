@@ -388,3 +388,34 @@ feature_key gets renamed, a limit default changes, a phase gets reordered.)
   no new backend work needed. Verified with `tsc --noEmit` + full build,
   same discipline as every other frontend phase this session — zero
   errors both times.
+
+- 2026-08-02 — Final revisit pass across the whole tracker. Verified
+  (not just re-read): migration ordering, zero route conflicts, every
+  controller/method referenced in routes actually exists, full brace-
+  balance sweep, fresh `tsc --noEmit` + build. All clean. Corrected one
+  earlier mis-flag: `TerminalPanel.tsx` was never a hardcoded-tier risk —
+  matched `isProcessing`, not a real tier check. Also corrected the
+  ProjectRunner idle-warning claim from B3b — the actual file is
+  `useSandboxAutoStop.ts`, and it was never a user-facing countdown, just
+  a stale docblock comment saying "default 2 hours." Fixed the comment.
+  Then closed out the remaining deferred items:
+  — Dropped `rate_limits` (migration + removed `RateLimit` model + dead
+  `User::rateLimits()` relation) — confirmed zero code references
+  anywhere first. Genuinely safe, unlike subscription_tier.
+  — Added `ubiq:check-tier-consistency` command as the actual gate for
+  eventually dropping `subscription_tier` — run it periodically; zero
+  drift for a couple of weeks is the real evidence needed, not a
+  deadline-based guess.
+  — BYO-key model policy (B3d's original open question) finally settled
+  with an actual win-win rather than a binary pick: self-hosted (Ollama)
+  models stay tier-gated (the one place this platform has a real cost);
+  BYO-key models (Gemini/OpenAI/OpenRouter/Mistral, whenever the user
+  supplies their own key) are now allowed on ANY tier via a new
+  `hasByoKeyFor()` check in CompletionController — blocking a model the
+  user pays for themselves was a pure paywall with no cost
+  justification. AI request rate limits still apply regardless of
+  provider, so the upgrade incentive shifts to throughput/concurrency
+  rather than model choice, not disappears. Required reordering all 6
+  guardModelAccess() call sites, since $apiKeys needs to be resolved
+  BEFORE the guard now (previously resolved after, harmless when the
+  guard didn't need it).
