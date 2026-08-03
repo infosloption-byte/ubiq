@@ -419,3 +419,50 @@ feature_key gets renamed, a limit default changes, a phase gets reordered.)
   guardModelAccess() call sites, since $apiKeys needs to be resolved
   BEFORE the guard now (previously resolved after, harmless when the
   guard didn't need it).
+
+- 2026-08-03 — Production incident: user reported project delete
+  returning 500, and Gemini BYO-key generation failing. Investigation
+  found FOUR separate issues, none related to the plan system itself:
+  (1) `sandbox_runs` table was NEVER migrated, ever — confirmed via grep,
+  zero migrations, zero schema.sql mentions — despite being used
+  throughout ProjectController (runProject/stopProject/destroy) and
+  CleanupSandboxes since before this session started. Broke project
+  delete AND sandbox start/stop in production. Same "model exists, table
+  was never created" pattern as google_id/cache table/storage columns
+  found earlier. Added the missing migration, matching SandboxRun
+  model's own docblock schema exactly.
+  (2) `site_visits` — same bug, same fix. Was spamming Sentry on every
+  unauthenticated page load (recordVisit is fully public).
+  (3) `ProjectController::destroy()` never released the active_sandboxes
+  counter when deleting a project that had a running sandbox — same gap
+  class as B3b, just never caught for this specific path. Fixed.
+  (4) Gemini BYO-key failures: `gemini-2.5-flash` was pulled early by
+  Google for some accounts ahead of its official Oct 16 2026 shutdown —
+  confirmed against Google's own developer forum. Root cause wasn't
+  actually in CompletionController (which just passes through whatever
+  model string it's given) — it was AiController::getModels(), a
+  COMPLETELY SEPARATE, previously-untouched hardcoded model list
+  ($cloudModels) feeding the frontend's ModelSelector dropdown,
+  duplicating (and diverging from) available_models. Also found
+  grok-beta listed there despite CompletionController's
+  getProviderConfig() never supporting xAI at all — that dropdown option
+  never worked, full stop. Consolidated: AiController::getModels() now
+  reads from available_models directly (deriving `provider` display
+  label the same way resolveModelTier() derives tier), removed the dead
+  unrouted chat()/getProviderConfig() duplicate entirely. Updated
+  available_models: gemini-1.5-* (fully shut down) → gemini-2.5-pro/
+  gemini-2.5-flash-lite/gemini-3.5-flash; disabled (is_active=false) the
+  four Ollama entries since Ollama still isn't installed on the server —
+  they were guaranteed-to-fail dropdown options, same failure mode as
+  grok-beta. Flip active via the B5 admin UI the moment Ollama is
+  actually running, no deploy needed.
+  CAUGHT DURING RECHECK, BEFORE SHIPPING: the seeder's
+  `array_merge($model, ['is_active' => true, ...])` had the merge order
+  backwards — the hardcoded true silently overrode every per-model
+  override, including the four just-added Ollama is_active=false values.
+  Fixed the merge order and re-verified before packaging.
+  NOT fixed, flagged only: ModelSelector.tsx's isKeyMissing() keymap has
+  no entry for 'OpenAI' or 'Ollama' — those providers never show the
+  proactive "Setup Key" lock icon, only fail at generation time. Minor
+  pre-existing UX gap, not introduced by this fix, lower priority than
+  the four issues above.

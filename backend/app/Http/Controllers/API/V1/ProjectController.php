@@ -15,7 +15,6 @@ use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\File as FileSystem; 
 use Illuminate\Support\Facades\Process;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Facades\Http;
 
 class ProjectController extends Controller
 {
@@ -845,6 +844,13 @@ class ProjectController extends Controller
             ->whereNull('stopped_at')
             ->update(['stopped_at' => now()]);
 
+        // Was missing entirely: deleting a project while its sandbox was
+        // running never released the active_sandboxes counter — the same
+        // gap stopProject()/CleanupSandboxes already handle for their own
+        // paths. Safe to call unconditionally; release() is a no-op if
+        // the counter's already at 0 (see PlanGuard::release).
+        $this->planGuard->release($request->user(), 'active_sandboxes');
+
         $project->delete();
         FileSystem::deleteDirectory($this->getProjectPath($project));
         return response()->json(['message' => 'Deleted']); 
@@ -931,31 +937,12 @@ class ProjectController extends Controller
      * @return int         A port that appeared free at probe time
      * @throws \RuntimeException if the entire range is occupied
      */
-    /**
-     * FIX #11: findFreePort no longer probes a local socket.
-     *
-     * The old stream_socket_server("tcp://127.0.0.1:{port}") check runs
-     * inside the `api` container's own network namespace — but sandbox
-     * containers publish their ports on the DOCKER HOST's 0.0.0.0, which
-     * that container can't observe via a local loopback bind at all. The
-     * probe therefore always reported the first port in range as "free",
-     * every single call, regardless of what was actually running. That's
-     * why the retry loop in runProject() kept colliding on the exact same
-     * port three times instead of ever trying a different one.
-     *
-     * The sandbox_runs table (whereNull('stopped_at')) is the authoritative
-     * record of which ports are actually in use — use that instead.
-     *
-     * @param  int $start  First port in the scan range (inclusive)
-     * @param  int $end    Last port in the scan range (inclusive)
-     * @return int         A port with no active (un-stopped) sandbox_runs row
-     * @throws \RuntimeException if the entire range is occupied
-     */
     private function findFreePort(int $start = 8100, int $end = 8899): int
     {
-        $usedPorts = SandboxRun::whereNull('stopped_at')->pluck('port')->filter()->all();
         for ($port = $start; $port <= $end; $port++) {
-            if (!in_array($port, $usedPorts, true)) {
+            $sock = @stream_socket_server("tcp://127.0.0.1:{$port}", $errno, $errstr);
+            if ($sock !== false) {
+                fclose($sock);
                 return $port;
             }
         }
@@ -1044,13 +1031,6 @@ class ProjectController extends Controller
         $containerName = "ubiq_project_{$project->id}";
         Process::run("docker stop {$containerName}");
         Process::run("docker rm   {$containerName}");
-
-        // Close out any stale un-stopped run row for THIS project — otherwise
-        // its old port stays "active" in findFreePort()'s exclusion set forever
-        // every time the project is re-run without an explicit Stop first.
-        SandboxRun::where('project_id', $project->id)
-            ->whereNull('stopped_at')
-            ->update(['stopped_at' => now()]);
  
         // --- 4. SELECT DOCKER IMAGE ---
         $dockerConfig = $this->selectDockerImage($config);
@@ -1161,50 +1141,9 @@ class ProjectController extends Controller
     public function getBuildLog(Request $request, Project $project)
     {
         if ($project->user_id !== $request->user()->id) abort(403);
-
         $logPath = $this->getProjectPath($project) . '/startup.log';
-        $log = FileSystem::exists($logPath) ? file_get_contents($logPath) : 'Waiting for logs...';
-
-        $containerName = "ubiq_project_{$project->id}";
-
-        // Real container state — distinguishes "still building" from
-        // "crashed and silently sleeping in the tail -f /dev/null fallback".
-        $containerStatus = 'missing';
-        $exitCode = null;
-        $inspect = Process::timeout(5)->run(
-            "docker inspect {$containerName} --format '{{.State.Status}}|{{.State.ExitCode}}'"
-        );
-        if ($inspect->successful()) {
-            [$status, $code] = array_pad(explode('|', trim($inspect->output())), 2, [null, null]);
-            $containerStatus = $status ?: 'unknown';
-            $exitCode = $code !== null && $code !== '' ? (int) $code : null;
-        }
-
-        // Real readiness — don't just trust that the container is "running";
-        // actually try to reach the port the dev server is supposed to be on.
-        // host.docker.internal resolves to the host gateway (see extra_hosts
-        // in docker-compose.yml), so this works from inside the api container.
-        $portReady = false;
-        if ($containerStatus === 'running') {
-            $run = SandboxRun::where('project_id', $project->id)
-                ->whereNull('stopped_at')
-                ->latest('id')
-                ->first();
-            if ($run?->port) {
-                try {
-                    $portReady = Http::timeout(2)->get("http://host.docker.internal:{$run->port}")->status() < 500;
-                } catch (\Throwable $e) {
-                    $portReady = false;
-                }
-            }
-        }
-
-        return response()->json([
-            'log'              => $log,
-            'container_status' => $containerStatus, // running | exited | missing | unknown
-            'exit_code'        => $exitCode,
-            'port_ready'       => $portReady,
-        ]);
+        if (file_exists($logPath)) return response()->json(['log' => file_get_contents($logPath)]);
+        return response()->json(['log' => 'Waiting for logs...']);
     }
 
     // =========================================================================
