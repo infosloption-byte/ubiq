@@ -931,12 +931,31 @@ class ProjectController extends Controller
      * @return int         A port that appeared free at probe time
      * @throws \RuntimeException if the entire range is occupied
      */
+    /**
+     * FIX #11: findFreePort no longer probes a local socket.
+     *
+     * The old stream_socket_server("tcp://127.0.0.1:{port}") check runs
+     * inside the `api` container's own network namespace — but sandbox
+     * containers publish their ports on the DOCKER HOST's 0.0.0.0, which
+     * that container can't observe via a local loopback bind at all. The
+     * probe therefore always reported the first port in range as "free",
+     * every single call, regardless of what was actually running. That's
+     * why the retry loop in runProject() kept colliding on the exact same
+     * port three times instead of ever trying a different one.
+     *
+     * The sandbox_runs table (whereNull('stopped_at')) is the authoritative
+     * record of which ports are actually in use — use that instead.
+     *
+     * @param  int $start  First port in the scan range (inclusive)
+     * @param  int $end    Last port in the scan range (inclusive)
+     * @return int         A port with no active (un-stopped) sandbox_runs row
+     * @throws \RuntimeException if the entire range is occupied
+     */
     private function findFreePort(int $start = 8100, int $end = 8899): int
     {
+        $usedPorts = SandboxRun::whereNull('stopped_at')->pluck('port')->filter()->all();
         for ($port = $start; $port <= $end; $port++) {
-            $sock = @stream_socket_server("tcp://127.0.0.1:{$port}", $errno, $errstr);
-            if ($sock !== false) {
-                fclose($sock);
+            if (!in_array($port, $usedPorts, true)) {
                 return $port;
             }
         }
@@ -1025,6 +1044,13 @@ class ProjectController extends Controller
         $containerName = "ubiq_project_{$project->id}";
         Process::run("docker stop {$containerName}");
         Process::run("docker rm   {$containerName}");
+
+        // Close out any stale un-stopped run row for THIS project — otherwise
+        // its old port stays "active" in findFreePort()'s exclusion set forever
+        // every time the project is re-run without an explicit Stop first.
+        SandboxRun::where('project_id', $project->id)
+            ->whereNull('stopped_at')
+            ->update(['stopped_at' => now()]);
  
         // --- 4. SELECT DOCKER IMAGE ---
         $dockerConfig = $this->selectDockerImage($config);
