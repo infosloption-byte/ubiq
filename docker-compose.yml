@@ -40,7 +40,7 @@ services:
       CONFIGS:    0
       DISTRIBUTION: 0
       INFO:       0
-      PING:       0
+      PING:       1
       SECRETS:    0
       SESSION:    0
       SWARM:      0
