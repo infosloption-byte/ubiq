@@ -41,7 +41,7 @@ class PlanGuard
      * represent "currently active right now", not a time bucket, so they
      * must never roll over at a day/hour boundary the way rate counters do.
      */
-    private const CONCURRENT_WINDOW_START = '1970-01-01 00:00:00';
+    private const CONCURRENT_WINDOW_START = '2000-01-01 00:00:00';
 
     /**
      * Not a const: env() calls (needed for the sandbox.start global ceiling
