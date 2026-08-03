@@ -31,7 +31,7 @@ services:
       CONTAINERS: 1
       POST:       1
       DELETE:     1
-      IMAGES:     0
+      IMAGES:     1
       NETWORKS:   0
       VOLUMES:    0
       EXEC:       0
