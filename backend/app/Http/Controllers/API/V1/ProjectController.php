@@ -15,6 +15,7 @@ use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\File as FileSystem; 
 use Illuminate\Support\Facades\Process;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Http;
 
 class ProjectController extends Controller
 {
@@ -1134,9 +1135,50 @@ class ProjectController extends Controller
     public function getBuildLog(Request $request, Project $project)
     {
         if ($project->user_id !== $request->user()->id) abort(403);
+
         $logPath = $this->getProjectPath($project) . '/startup.log';
-        if (file_exists($logPath)) return response()->json(['log' => file_get_contents($logPath)]);
-        return response()->json(['log' => 'Waiting for logs...']);
+        $log = FileSystem::exists($logPath) ? file_get_contents($logPath) : 'Waiting for logs...';
+
+        $containerName = "ubiq_project_{$project->id}";
+
+        // Real container state — distinguishes "still building" from
+        // "crashed and silently sleeping in the tail -f /dev/null fallback".
+        $containerStatus = 'missing';
+        $exitCode = null;
+        $inspect = Process::timeout(5)->run(
+            "docker inspect {$containerName} --format '{{.State.Status}}|{{.State.ExitCode}}'"
+        );
+        if ($inspect->successful()) {
+            [$status, $code] = array_pad(explode('|', trim($inspect->output())), 2, [null, null]);
+            $containerStatus = $status ?: 'unknown';
+            $exitCode = $code !== null && $code !== '' ? (int) $code : null;
+        }
+
+        // Real readiness — don't just trust that the container is "running";
+        // actually try to reach the port the dev server is supposed to be on.
+        // host.docker.internal resolves to the host gateway (see extra_hosts
+        // in docker-compose.yml), so this works from inside the api container.
+        $portReady = false;
+        if ($containerStatus === 'running') {
+            $run = SandboxRun::where('project_id', $project->id)
+                ->whereNull('stopped_at')
+                ->latest('id')
+                ->first();
+            if ($run?->port) {
+                try {
+                    $portReady = Http::timeout(2)->get("http://host.docker.internal:{$run->port}")->status() < 500;
+                } catch (\Throwable $e) {
+                    $portReady = false;
+                }
+            }
+        }
+
+        return response()->json([
+            'log'              => $log,
+            'container_status' => $containerStatus, // running | exited | missing | unknown
+            'exit_code'        => $exitCode,
+            'port_ready'       => $portReady,
+        ]);
     }
 
     // =========================================================================

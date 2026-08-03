@@ -38,10 +38,14 @@ export default function ProjectRunner({ projectId, onClose, onContainerStateChan
     const [realLogs, setRealLogs] = useState<string>('');
     const [isPollingActive, setIsPollingActive] = useState(false);
     const [storageInfo, setStorageInfo] = useState<{ used_mb: number; limit_mb: number } | null>(null);
+    const [containerStatus, setContainerStatus] = useState<string | null>(null);
+    const [exitCode, setExitCode] = useState<number | null>(null);
     
     const bottomRef = useRef<HTMLDivElement>(null);
     const stableCountRef = useRef(0);   // consecutive unchanged polls
     const lastLogRef = useRef('');
+    const pollStartRef = useRef<number>(0);
+    const pendingUrlRef = useRef<string | null>(null);
 
     // Auto-scroll
     useEffect(() => {
@@ -60,7 +64,10 @@ export default function ProjectRunner({ projectId, onClose, onContainerStateChan
         }).catch(() => {});
     }, []);
 
-    // Smart log polling — stops when logs stabilize
+    const STALL_TIMEOUT_MS = 90_000;
+
+    // Real-state polling — stops only once the port actually answers,
+    // or reports a concrete failure (crashed / stuck) instead of spinning forever.
     useEffect(() => {
         if (!isPollingActive) return;
 
@@ -73,9 +80,14 @@ export default function ProjectRunner({ projectId, onClose, onContainerStateChan
                 // @ts-ignore
                 const res = await projectAPI.getBuildLog(projectId);
                 const log: string = res.data.log || '';
-                setRealLogs(log);
+                const status: string = res.data.container_status;
+                const code: number | null = res.data.exit_code ?? null;
+                const portReady: boolean = res.data.port_ready;
 
-                // Check stability: same content + ready keyword
+                setRealLogs(log);
+                setContainerStatus(status);
+                setExitCode(code);
+
                 if (log === lastLogRef.current) {
                     stableCountRef.current += 1;
                 } else {
@@ -83,11 +95,30 @@ export default function ProjectRunner({ projectId, onClose, onContainerStateChan
                     lastLogRef.current = log;
                 }
 
-                // Stop polling after 3 stable polls if logs show a ready state
-                // OR after 5 stable polls regardless (server might not print expected keywords)
-                if (isLogStable(log) && stableCountRef.current >= 3) {
+                // Real success: the port actually answers.
+                if (portReady) {
+                    setPreviewUrl(pendingUrlRef.current);
                     setIsPollingActive(false);
-                } else if (stableCountRef.current >= 5) {
+                    onContainerStateChange?.(true);
+                    return;
+                }
+
+                // Real failure: container fell into its dead-end fallback or vanished.
+                if (status === 'exited' || status === 'missing') {
+                    setError(
+                        status === 'exited'
+                            ? `Sandbox stopped unexpectedly${code !== null ? ` (exit code ${code})` : ''}.`
+                            : 'Sandbox container disappeared before it became reachable.'
+                    );
+                    setIsPollingActive(false);
+                    return;
+                }
+
+                // Stuck: container's alive, log stopped changing, port never came up,
+                // and we've been at it too long — stop pretending it's still booting.
+                const elapsed = Date.now() - pollStartRef.current;
+                if (elapsed > STALL_TIMEOUT_MS && !isLogStable(log) && stableCountRef.current >= 5) {
+                    setError('Build appears stuck — no progress for 90s.');
                     setIsPollingActive(false);
                 }
             } catch (e) {
@@ -106,18 +137,18 @@ export default function ProjectRunner({ projectId, onClose, onContainerStateChan
         setRealLogs('Initializing build request...');
         setPreviewUrl(null);
         setIsPollingActive(false);
+        setContainerStatus(null);
+        setExitCode(null);
         lastLogRef.current = '';
-        
+        stableCountRef.current = 0;
+        pollStartRef.current = Date.now();
+
         try {
             const res = await projectAPI.runProject(projectId);
+            pendingUrlRef.current = res.data.url;
             setRealLogs(prev => prev + '\n[System] Container allocated. Executing startup script...\n');
-            setIsPollingActive(true);
-
-            setTimeout(() => {
-                setPreviewUrl(res.data.url);
-                setIsRunning(false);
-                onContainerStateChange?.(true);
-            }, 5000);
+            setIsRunning(false);       // hand off from "booting" spinner to log-polling view
+            setIsPollingActive(true);  // readiness is now decided by the poller, not a timer
         } catch (err: any) {
             const errorMsg = err.response?.data?.error || 'Failed to start sandbox.';
             const details = err.response?.data?.details || err.message;
@@ -269,10 +300,24 @@ export default function ProjectRunner({ projectId, onClose, onContainerStateChan
                 {/* 2. ERROR STATE */}
                 {error && !isRunning && (
                     <div className="absolute inset-0 flex flex-col p-6 bg-ubiq-950 overflow-y-auto custom-scrollbar">
-                        <div className="flex items-center gap-2 text-red-400 mb-4">
+                        <div className="flex items-center gap-2 text-red-400 mb-2">
                             <ExclamationTriangleIcon className="w-6 h-6" />
                             <h3 className="text-lg font-bold">{error}</h3>
                         </div>
+                        {(containerStatus || exitCode !== null) && (
+                            <div className="flex items-center gap-3 mb-4 text-[11px] font-mono text-red-300/80">
+                                {containerStatus && (
+                                    <span className="px-2 py-0.5 bg-red-500/10 border border-red-500/20 rounded">
+                                        container: {containerStatus}
+                                    </span>
+                                )}
+                                {exitCode !== null && (
+                                    <span className="px-2 py-0.5 bg-red-500/10 border border-red-500/20 rounded">
+                                        exit code: {exitCode}
+                                    </span>
+                                )}
+                            </div>
+                        )}
                         <div className="bg-black/80 border border-red-500/30 rounded-lg p-4 font-mono text-[10px] text-red-300 overflow-x-auto whitespace-pre-wrap">
                             {realLogs}
                         </div>
