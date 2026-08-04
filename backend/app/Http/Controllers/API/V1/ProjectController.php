@@ -15,6 +15,7 @@ use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\File as FileSystem; 
 use Illuminate\Support\Facades\Process;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Cache;
 
 class ProjectController extends Controller
 {
@@ -389,8 +390,9 @@ class ProjectController extends Controller
         }
 
         $containerName = "ubiq_project_{$project->id}";
-        Process::run("docker stop {$containerName}");
-        Process::run("docker rm {$containerName}");
+        // -f so this can never hang behind a graceful-stop timeout and
+        // leave the port held — same reasoning as in runProject().
+        Process::run("docker rm -f {$containerName} 2>/dev/null || true");
 
         // Stamp the most recent open audit run for this project
         SandboxRun::where('project_id', $project->id)
@@ -402,6 +404,34 @@ class ProjectController extends Controller
         $this->planGuard->release($request->user(), 'active_sandboxes');
 
         return response()->json(['message' => 'Container stopped.']);
+    }
+
+    /**
+     * FIX #11: Lightweight heartbeat, pinged periodically by the frontend
+     * while a sandbox's preview is actually open (see useSandboxAutoStop.ts).
+     *
+     * The existing beforeunload/unmount hooks only fire on a clean tab
+     * close or in-app navigation — a laptop sleep or dropped connection
+     * skips both, leaving the sandbox (and its port) alive until the
+     * cron's idle timeout, which can be tens of minutes to hours depending
+     * on plan tier. Recording a heartbeat lets CleanupSandboxes treat
+     * "no heartbeat for ~2 minutes" as abandoned, independent of the
+     * longer tier-based idle timeout used for genuinely-idle-but-open
+     * sandboxes.
+     */
+    public function heartbeat(Request $request, Project $project)
+    {
+        if ($project->user_id !== $request->user()->id) {
+            return response()->json(['error' => 'Unauthorized'], 403);
+        }
+
+        $updated = SandboxRun::where('project_id', $project->id)
+            ->whereNull('stopped_at')
+            ->latest('started_at')
+            ->first()
+            ?->update(['heartbeat_at' => now()]);
+
+        return response()->json(['ok' => (bool) $updated]);
     }
 
     private function setupGitConfig($path)
@@ -914,48 +944,113 @@ class ProjectController extends Controller
     }
 
     /**
-     * FIX #10: findFreePort with Docker-bind retry to eliminate the TOCTOU race.
+     * FIX #11: Atomic port allocation — replaces the old probe-then-retry
+     * approach (FIX #10) entirely.
      *
-     * The old approach:
-     *   1. Probe a port with stream_socket_server() to see if it's free.
-     *   2. Close the socket immediately.
-     *   3. Pass the port number to Docker.
+     * FIX #10 probed a port with stream_socket_server(), then handed it to
+     * Docker, and retried up to 3 times if Docker reported "address already
+     * in use". That's a mitigation, not a fix — two concurrent requests can
+     * still both pass the probe for the same port before either binds it
+     * (classic TOCTOU), and repeated bad luck could still exhaust the 3
+     * retries and surface an error to the user.
      *
-     * Under concurrent load, two requests could complete step 2 before either
-     * reaches step 3, letting both get the same port. Docker would then fail
-     * to start the second container with "address already in use".
+     * This version claims the port inside a distributed lock (Cache::lock,
+     * backed by whatever cache store is configured — redis/database/etc.)
+     * and immediately reserves it by inserting an open SandboxRun row for
+     * that port BEFORE releasing the lock and BEFORE calling Docker at all.
+     * Because the reservation happens inside the lock, no other request can
+     * observe that port as free until we've committed to it — the race is
+     * gone, not just retried around.
      *
-     * The correct mitigation is NOT trying to eliminate the race (impossible
-     * with a probe-then-use pattern) but to catch the Docker failure and retry
-     * with a new port. That's what runProject() now does.
+     * "occupied" is determined purely from our own bookkeeping (open
+     * SandboxRun rows), not from OS-level socket probing, which is why
+     * step 0 (reapStaleSandboxes) matters: if we ever fail to clean up an
+     * open row for a container that's actually dead, this method would
+     * treat that port as permanently unavailable. reapStaleSandboxes()
+     * closes that gap by reconciling DB state against real Docker state
+     * before every run.
      *
-     * findFreePort() itself is kept as a fast pre-check to avoid obviously
-     * occupied ports; the retry loop in runProject() is the real safety net.
-     *
-     * @param  int $start  First port in the scan range (inclusive)
-     * @param  int $end    Last port in the scan range (inclusive)
-     * @return int         A port that appeared free at probe time
      * @throws \RuntimeException if the entire range is occupied
+     * @return array{0:int,1:SandboxRun} [$port, $reservationRow]
      */
-    private function findFreePort(int $start = 8100, int $end = 8899): int
+    private function claimPortAndReserve(Project $project, $user, string $runtime, string $framework, int $start = 8100, int $end = 8899): array
     {
-        for ($port = $start; $port <= $end; $port++) {
-            $sock = @stream_socket_server("tcp://127.0.0.1:{$port}", $errno, $errstr);
-            if ($sock !== false) {
-                fclose($sock);
-                return $port;
+        $lock = Cache::lock('sandbox-port-allocation', 10);
+
+        return $lock->block(5, function () use ($project, $user, $runtime, $framework, $start, $end) {
+            $used = SandboxRun::whereNull('stopped_at')->pluck('port')->all();
+
+            for ($port = $start; $port <= $end; $port++) {
+                if (in_array($port, $used, true)) {
+                    continue;
+                }
+
+                // Reserve immediately, while still holding the lock, so the
+                // very next claimPortAndReserve() call (even microseconds
+                // later) sees this port as used.
+                $run = SandboxRun::create([
+                    'user_id'      => $user->id,
+                    'project_id'   => $project->id,
+                    'ip_address'   => request()->ip(),
+                    'user_agent'   => substr(request()->userAgent() ?? '', 0, 500),
+                    'started_at'   => now(),
+                    'heartbeat_at' => now(),
+                    'port'         => $port,
+                    'runtime'      => $runtime,
+                    'framework'    => $framework,
+                ]);
+
+                return [$port, $run];
             }
-        }
-        throw new \RuntimeException("No free port found in range {$start}-{$end}");
+
+            throw new \RuntimeException("No free port found in range {$start}-{$end}");
+        });
     }
- 
+
+    /**
+     * FIX #11: Self-healing reap, run at the start of every runProject()
+     * call for the requesting user (not just on the 15-minute cron).
+     *
+     * Because port occupancy is now determined from open SandboxRun rows
+     * rather than OS sockets, a row that says "open" but whose container is
+     * actually dead (crashed, OOM-killed, or a "docker rm" that silently
+     * failed) would otherwise camp on a port forever. This reconciles this
+     * user's own open rows against real Docker state and closes any that
+     * are lying, immediately before we try to claim a new port — so a user
+     * who hits a crashed sandbox self-heals on their very next click instead
+     * of waiting on the cron.
+     *
+     * Scoped to the current user only (typically 1-3 rows) to keep this
+     * cheap enough to run synchronously on every request.
+     */
+    private function reapStaleSandboxes($user): void
+    {
+        $openRuns = SandboxRun::where('user_id', $user->id)->whereNull('stopped_at')->get();
+
+        foreach ($openRuns as $run) {
+            $containerName = "ubiq_project_{$run->project_id}";
+            $state = Process::run("docker inspect -f '{{.State.Running}}' {$containerName}");
+
+            if (trim($state->output()) === 'true') {
+                continue; // genuinely still running — leave it alone
+            }
+
+            // Container is gone, exited, or was never actually created —
+            // force-remove any remnant and free the port/plan-slot it held.
+            Log::warning("[Sandbox] Reaping stale run for project {$run->project_id} (container not running).");
+            Process::run("docker rm -f {$containerName} 2>/dev/null || true");
+            $run->update(['stopped_at' => now()]);
+            $this->planGuard->release($user, 'active_sandboxes');
+        }
+    }
+
     /**
      * Start a Docker Sandbox container to run the project.
      *
-     * FIX #10: Wraps the docker run call in a retry loop (up to 3 attempts).
-     * If Docker reports "address already in use" — which happens when two
-     * concurrent requests race through findFreePort — we probe for a new port
-     * and retry rather than returning a 500 to the user.
+     * FIX #11: Port is claimed atomically up-front (claimPortAndReserve) so
+     * there is no port race left to retry around, and any of this user's
+     * dead sandboxes are reaped first (reapStaleSandboxes) so a crashed
+     * container from an earlier run can never block a new one.
      */
     public function runProject(Request $request, Project $project)
     {
@@ -984,7 +1079,12 @@ class ProjectController extends Controller
         $user          = $request->user();
         $baseHostPath  = env('HOST_WORKSPACE_PATH', '/home/ubuntu/ubiq/backend/storage/app/workspaces');
         $hostMountPath = $baseHostPath . "/{$project->user_id}/{$project->id}";
- 
+
+        // --- 0. SELF-HEAL: reconcile this user's own sandboxes against
+        // real Docker state before we try to claim a new port. Cheap
+        // (1-3 rows/user) and closes the gap the 15-min cron leaves open.
+        $this->reapStaleSandboxes($user);
+
         // --- 1. GET DYNAMIC CONFIGURATION ---
         $config = $this->getRuntimeConfig($workspacePath);
         $runtime = $config['runtime'];
@@ -1028,107 +1128,96 @@ class ProjectController extends Controller
         chmod($workspacePath, 0777);
  
         // --- 3. CONTAINER PREP ---
+        // -f forces removal even if the container is in a stuck/"Removing"
+        // state, and we verify it's actually gone rather than trusting the
+        // exit code — a lingering container here would hold its old port
+        // hostage regardless of what claimPortAndReserve() decides next.
         $containerName = "ubiq_project_{$project->id}";
-        Process::run("docker stop {$containerName}");
-        Process::run("docker rm   {$containerName}");
- 
+        Process::run("docker rm -f {$containerName} 2>/dev/null || true");
+
+        $stillThere = Process::run("docker ps -a --filter name=^/{$containerName}\$ --format '{{.Names}}'");
+        if (trim($stillThere->output()) !== '') {
+            Log::error("[Sandbox] Could not remove stale container {$containerName} before restart.");
+            $this->planGuard->release($request->user(), 'active_sandboxes');
+            return response()->json(['error' => 'A previous instance of this sandbox could not be cleaned up. Please try again in a moment.'], 500);
+        }
+
         // --- 4. SELECT DOCKER IMAGE ---
         $dockerConfig = $this->selectDockerImage($config);
         $image = $dockerConfig['image'];
         $internalPort = $dockerConfig['port'];
- 
-        // --- 5. EXECUTE (With Port Retry) ---
-        $maxAttempts = 3;
-        $result      = null;
-        $port        = null;
-        $lastError   = '';
- 
-        for ($attempt = 1; $attempt <= $maxAttempts; $attempt++) {
-            try {
-                $port = $this->findFreePort(8100, 8899);
-            } catch (\RuntimeException $e) {
-                $this->planGuard->release($request->user(), 'active_sandboxes');
-                return response()->json(['error' => 'No free ports available. Try again later.'], 503);
-            }
- 
-            // Angular CLI + esbuild needs ~700-900MB RAM during build.
-            // Node containers get 1GB; PHP/Python stay at 512MB.
-            // Tier-aware sizing from plan_features (was hardcoded before —
-            // sandbox.cpu/sandbox.memory_mb were seeded in Phase A but
-            // never actually read anywhere until now). Memory uses
-            // max(tier, runtime-minimum) rather than a hard tier cap: the
-            // tier value is the baseline every plan gets, but a Node/Angular
-            // build genuinely needs ~700-900MB to not OOM regardless of
-            // tier — silently failing free-tier Node builds isn't a
-            // deliberate product decision we've made, so we bump up rather
-            // than cap down. If you want tier to be a hard ceiling instead
-            // (e.g. "heavy JS builds require Creator+"), swap max() for
-            // min() here — one-line change.
-            $tierCpu       = (string) ($this->planService->limitFor($user, 'sandbox.cpu') ?? '0.75');
-            $tierMemoryMb  = (int) ($this->planService->limitFor($user, 'sandbox.memory_mb') ?? 512);
-            $runtimeFloorMb = ($runtime === 'node') ? 1024 : 512;
-            $memoryMb      = max($tierMemoryMb, $runtimeFloorMb);
-            $memoryLimit   = "{$memoryMb}m";
-            $memorySwap    = "{$memoryMb}m";
-            // Angular also spawns more processes (tsc, esbuild workers)
-            $pidsLimit   = ($runtime === 'node') ? 200 : 100;
 
-            $cmd = implode(' ', [
-                'docker run -d',
-                '--name',   escapeshellarg($containerName),
-                '-p',       "{$port}:{$internalPort}",
-                '-e',       "PORT={$internalPort}",
-                '-v',       escapeshellarg($hostMountPath) . ':/app',
-                '-w',       '/app',
-                "--memory={$memoryLimit}",
-                "--memory-swap={$memorySwap}",
-                "--cpus={$tierCpu}",
-                "--pids-limit={$pidsLimit}",
-                '--ulimit', 'nofile=1024:1024',
-                '--ulimit', 'nproc=100:100',
-                '--network=ubiq_sandbox',
-                '--cap-drop=ALL',
-                '--cap-add=NET_BIND_SERVICE',
-                '--security-opt', 'no-new-privileges:true',
-                '--log-driver=json-file',
-                '--log-opt', 'max-size=10m',
-                '--log-opt', 'max-file=1',
-                '--restart=no',
-                $image,
-                "sh -c 'sh startup.sh > /app/startup.log 2>&1 || tail -f /dev/null'",
-            ]);
- 
-            $result = Process::timeout(120)->run($cmd);
-            if ($result->successful()) break; 
- 
-            $lastError = $result->errorOutput();
-            if (!str_contains($lastError, 'address already in use') && !str_contains($lastError, 'port is already allocated')) {
-                break;
-            }
- 
-            Log::warning("[Sandbox] Port {$port} collision on attempt {$attempt}/{$maxAttempts} for project {$project->id}. Retrying.");
-            Process::run("docker stop {$containerName} 2>/dev/null || true");
-            Process::run("docker rm   {$containerName} 2>/dev/null || true");
-        }
- 
-        if (!$result->successful()) {
+        // --- 5. CLAIM PORT (atomic — see claimPortAndReserve docblock) ---
+        try {
+            [$port, $sandboxRun] = $this->claimPortAndReserve($project, $user, $runtime, $framework);
+        } catch (\RuntimeException $e) {
             $this->planGuard->release($request->user(), 'active_sandboxes');
-            return response()->json(['error' => 'Docker failed to start the sandbox.', 'details' => $lastError], 500);
+            return response()->json(['error' => 'No free ports available. Try again later.'], 503);
         }
- 
-        $serverIp = env('SERVER_PUBLIC_IP', $request->getHost());
- 
-        SandboxRun::create([
-            'user_id'    => $request->user()->id,
-            'project_id' => $project->id,
-            'ip_address' => $request->ip(),
-            'user_agent' => substr($request->userAgent() ?? '', 0, 500),
-            'started_at' => now(),
-            'port'       => $port,
-            'runtime'    => $runtime,
-            'framework'  => $framework,
+
+        // Angular CLI + esbuild needs ~700-900MB RAM during build.
+        // Node containers get 1GB; PHP/Python stay at 512MB.
+        // Tier-aware sizing from plan_features (was hardcoded before —
+        // sandbox.cpu/sandbox.memory_mb were seeded in Phase A but
+        // never actually read anywhere until now). Memory uses
+        // max(tier, runtime-minimum) rather than a hard tier cap: the
+        // tier value is the baseline every plan gets, but a Node/Angular
+        // build genuinely needs ~700-900MB to not OOM regardless of
+        // tier — silently failing free-tier Node builds isn't a
+        // deliberate product decision we've made, so we bump up rather
+        // than cap down. If you want tier to be a hard ceiling instead
+        // (e.g. "heavy JS builds require Creator+"), swap max() for
+        // min() here — one-line change.
+        $tierCpu       = (string) ($this->planService->limitFor($user, 'sandbox.cpu') ?? '0.75');
+        $tierMemoryMb  = (int) ($this->planService->limitFor($user, 'sandbox.memory_mb') ?? 512);
+        $runtimeFloorMb = ($runtime === 'node') ? 1024 : 512;
+        $memoryMb      = max($tierMemoryMb, $runtimeFloorMb);
+        $memoryLimit   = "{$memoryMb}m";
+        $memorySwap    = "{$memoryMb}m";
+        // Angular also spawns more processes (tsc, esbuild workers)
+        $pidsLimit   = ($runtime === 'node') ? 200 : 100;
+
+        $cmd = implode(' ', [
+            'docker run -d',
+            '--name',   escapeshellarg($containerName),
+            '-p',       "{$port}:{$internalPort}",
+            '-e',       "PORT={$internalPort}",
+            '-v',       escapeshellarg($hostMountPath) . ':/app',
+            '-w',       '/app',
+            "--memory={$memoryLimit}",
+            "--memory-swap={$memorySwap}",
+            "--cpus={$tierCpu}",
+            "--pids-limit={$pidsLimit}",
+            '--ulimit', 'nofile=1024:1024',
+            '--ulimit', 'nproc=100:100',
+            '--network=ubiq_sandbox',
+            '--cap-drop=ALL',
+            '--cap-add=NET_BIND_SERVICE',
+            '--security-opt', 'no-new-privileges:true',
+            '--log-driver=json-file',
+            '--log-opt', 'max-size=10m',
+            '--log-opt', 'max-file=1',
+            '--restart=no',
+            $image,
+            "sh -c 'sh startup.sh > /app/startup.log 2>&1 || tail -f /dev/null'",
         ]);
- 
+
+        $result = Process::timeout(120)->run($cmd);
+
+        if (!$result->successful()) {
+            // Port collisions are structurally impossible now (the port was
+            // reserved in our own DB before this call), so a failure here
+            // is a genuine Docker/image/resource problem — release the
+            // reservation and the plan slot and surface it as-is.
+            Log::error("[Sandbox] Docker run failed for project {$project->id}: " . $result->errorOutput());
+            $sandboxRun->update(['stopped_at' => now()]);
+            Process::run("docker rm -f {$containerName} 2>/dev/null || true");
+            $this->planGuard->release($request->user(), 'active_sandboxes');
+            return response()->json(['error' => 'Docker failed to start the sandbox.', 'details' => $result->errorOutput()], 500);
+        }
+
+        $serverIp = env('SERVER_PUBLIC_IP', $request->getHost());
+
         return response()->json([
             'message'   => 'Project booting...',
             'url'       => "http://{$serverIp}:{$port}",

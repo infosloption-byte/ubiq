@@ -22,17 +22,20 @@ import { getAuthToken } from '../services/api';
  *        still alive for in-app navigation).
  *
  *   3. User walks away / laptop sleeps / network drops
- *      → Neither handler fires.
- *      → The backend cron (ubiq:cleanup-sandboxes) catches these once the
- *        sandbox's plan-specific idle timeout is exceeded (20min-180min
- *        depending on tier — see plan_features.sandbox.idle_timeout_minutes),
- *        checked every 15 minutes. Was previously documented here as a
- *        flat "2 hours" — that was true before the B3b/B3e plan system
- *        work made this per-tier; updated to avoid stale docs drifting
- *        from what the backend actually does.
+ *      → Neither handler fires — there's no unload/unmount event to catch.
+ *      → FIX #11: while isRunning is true, this hook now also pings
+ *        POST /projects/{id}/heartbeat every 30s. The backend cron
+ *        (ubiq:cleanup-sandboxes, now every 2min — see routes/console.php)
+ *        treats a sandbox as abandoned once its heartbeat goes quiet for
+ *        ~2 minutes, which is what actually closes this gap quickly.
+ *      → The per-tier idle timeout (20min-180min depending on plan — see
+ *        plan_features.sandbox.idle_timeout_minutes) still exists as a
+ *        separate, longer-window backstop for sandboxes that are open and
+ *        heartbeating but genuinely unused — it does not replace the
+ *        heartbeat check, the two serve different cases.
  *
- * The hook only fires stop requests when isRunning is true — it does
- * nothing if the sandbox was never started or was already stopped.
+ * The hook only fires stop/heartbeat requests when isRunning is true — it
+ * does nothing if the sandbox was never started or was already stopped.
  */
 export function useSandboxAutoStop(projectId: number, isRunning: boolean) {
     // Keep a ref so the beforeunload callback always sees the latest value
@@ -42,6 +45,38 @@ export function useSandboxAutoStop(projectId: number, isRunning: boolean) {
     useEffect(() => {
         isRunningRef.current = isRunning;
     }, [isRunning]);
+
+    // FIX #11: heartbeat while the sandbox is running, independent of the
+    // stop-on-unload logic below. 30s interval vs. the backend's ~2min
+    // abandonment threshold gives a few missed pings of slack for a flaky
+    // connection before the cron would consider the sandbox abandoned.
+    useEffect(() => {
+        if (!isRunning) return;
+
+        const apiUrl       = import.meta.env.VITE_API_URL;
+        const heartbeatUrl = `${apiUrl}/projects/${projectId}/heartbeat`;
+
+        const sendHeartbeat = () => {
+            const token = getAuthToken();
+            if (!token) return;
+
+            fetch(heartbeatUrl, {
+                method:  'POST',
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type':  'application/json',
+                },
+            }).catch(() => {
+                // Best-effort — a single missed heartbeat is fine, the
+                // 2min abandonment window tolerates a few dropped pings.
+            });
+        };
+
+        sendHeartbeat(); // immediately on start, don't wait 30s for the first one
+        const intervalId = setInterval(sendHeartbeat, 30_000);
+
+        return () => clearInterval(intervalId);
+    }, [projectId, isRunning]);
 
     useEffect(() => {
         const apiUrl  = import.meta.env.VITE_API_URL;

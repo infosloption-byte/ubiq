@@ -32,8 +32,20 @@ Artisan::command('inspire', function () {
 // between "nominal timeout" and "actual enforcement" small relative to the
 // shortest tier timeout, without running so often it becomes its own
 // meaningful load.
+//
+// FIX #11: tightened 15min -> 2min. This same command now also enforces
+// the --abandoned-minutes heartbeat check (default 2min, see
+// CleanupSandboxes), which exists specifically to catch a laptop
+// sleep/dropped-network/crash within a couple of minutes instead of
+// waiting up to a full tier idle-timeout window. Running the whole command
+// every 15min would have made that heartbeat check pointless — it would
+// never fire meaningfully faster than the idle timeout it's meant to beat.
+// The query itself stays cheap even at this frequency: per the capacity
+// note above, open sandbox_runs rows are only ever a handful at a time
+// system-wide (global concurrency capped at ~2-3 sandboxes), so this is a
+// tiny, indexed scan every 2 minutes, not a load concern.
 Schedule::command('ubiq:cleanup-sandboxes')
-    ->everyFifteenMinutes()
+    ->everyTwoMinutes()
     ->withoutOverlapping()   // skip if a previous run is still going
     ->runInBackground()
     ->appendOutputTo(storage_path('logs/sandbox-cleanup.log'));

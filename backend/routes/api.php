@@ -125,6 +125,13 @@ Route::prefix('v1')->group(function () {
                 Route::post('projects/{project}/stop', [ProjectController::class, 'stopProject']);
             });
 
+            // Heartbeat — pinged every ~30s while a preview is open, needs
+            // its own higher limit (120/min covers a full session's worth
+            // of pings without ever throttling a normal user).
+            Route::middleware('throttle:120,1')->group(function () {
+                Route::post('projects/{project}/heartbeat', [ProjectController::class, 'heartbeat']);
+            });
+
             // Terminal — 60 commands per minute (allows rapid use without hammering)
             Route::middleware('throttle:60,1')->group(function () {
                 Route::post('projects/{project}/terminal', [TerminalController::class, 'execute']);

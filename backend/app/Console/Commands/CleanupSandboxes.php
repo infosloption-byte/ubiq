@@ -12,9 +12,10 @@ class CleanupSandboxes extends Command
 {
     protected $signature   = 'ubiq:cleanup-sandboxes
                                 {--dry-run : List containers that would be stopped without stopping them}
-                                {--hours= : Override — stop ALL open sandboxes older than this many hours, ignoring each user\'s plan-specific idle timeout. Omit to use per-tier sandbox.idle_timeout_minutes instead.}';
+                                {--hours= : Override — stop ALL open sandboxes older than this many hours, ignoring each user\'s plan-specific idle timeout. Omit to use per-tier sandbox.idle_timeout_minutes instead.}
+                                {--abandoned-minutes=2 : Also stop any open sandbox whose last heartbeat is older than this many minutes, regardless of tier idle timeout. Set to 0 to disable this check.}';
 
-    protected $description = 'Stop Docker sandbox containers that have been idle past their plan\'s timeout, or past an explicit --hours override.';
+    protected $description = 'Stop Docker sandbox containers that have been idle past their plan\'s timeout, past an explicit --hours override, or abandoned (no heartbeat) past --abandoned-minutes.';
 
     public function __construct(private PlanGuard $planGuard, private PlanService $planService)
     {
@@ -43,7 +44,22 @@ class CleanupSandboxes extends Command
             ->whereNull('stopped_at')
             ->get();
 
-        $stale = $open->filter(function ($run) use ($overrideMinutes) {
+        // FIX #11: abandoned-minutes catches tabs/laptops that vanished
+        // (sleep, dropped network, crash) without a clean beforeunload or
+        // React-unmount firing — see useSandboxAutoStop.ts. This runs
+        // independently of, and typically much faster than, the per-tier
+        // idle timeout below, which is for sandboxes that are still open
+        // and heartbeating but genuinely unused. Rows written before the
+        // heartbeat_at migration have heartbeat_at = null and are simply
+        // skipped by this check (they still fall through to the timeout
+        // check below via started_at).
+        $abandonedMinutes = (int) $this->option('abandoned-minutes');
+
+        $stale = $open->filter(function ($run) use ($overrideMinutes, $abandonedMinutes) {
+            if ($abandonedMinutes > 0 && $run->heartbeat_at && $run->heartbeat_at->lt(now()->subMinutes($abandonedMinutes))) {
+                return true;
+            }
+
             $idleMinutes = $overrideMinutes
                 ?? (int) ($this->planService->limitFor($run->user, 'sandbox.idle_timeout_minutes') ?? 20);
 
@@ -53,7 +69,7 @@ class CleanupSandboxes extends Command
         if ($stale->isEmpty()) {
             $this->info($hasOverride
                 ? "No sandboxes found older than {$this->option('hours')}h."
-                : 'No sandboxes have exceeded their plan\'s idle timeout.');
+                : 'No sandboxes have exceeded their plan\'s idle timeout or gone quiet on heartbeat.');
             return self::SUCCESS;
         }
 
@@ -72,11 +88,14 @@ class CleanupSandboxes extends Command
                 continue;
             }
 
-            // Stop and remove the container.
-            // We don't check success — the container may already be stopped
-            // (crashed, OOM-killed, etc.). Either way we stamp stopped_at.
-            Process::run("docker stop {$containerName}");
-            Process::run("docker rm   {$containerName}");
+            // Force-remove the container. -f skips a graceful-stop attempt
+            // (and the hang that comes with trying to gracefully stop a
+            // container that's already crashed/OOM-killed) and guarantees
+            // the host port is released. We don't gate on the exit code —
+            // "already gone" is a success case here too — but we do stamp
+            // stopped_at either way so the port is freed in our own
+            // bookkeeping regardless of what Docker reports.
+            Process::run("docker rm -f {$containerName} 2>/dev/null || true");
 
             $run->update(['stopped_at' => now()]);
 

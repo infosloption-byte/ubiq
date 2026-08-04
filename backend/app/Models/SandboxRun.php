@@ -22,6 +22,7 @@ class SandboxRun extends Model
         'ip_address',
         'user_agent',
         'started_at',
+        'heartbeat_at',
         'stopped_at',
         'port',
         'runtime',
@@ -29,8 +30,9 @@ class SandboxRun extends Model
     ];
 
     protected $casts = [
-        'started_at' => 'datetime',
-        'stopped_at' => 'datetime',
+        'started_at'   => 'datetime',
+        'heartbeat_at' => 'datetime',
+        'stopped_at'   => 'datetime',
     ];
 
     public function user(): BelongsTo
