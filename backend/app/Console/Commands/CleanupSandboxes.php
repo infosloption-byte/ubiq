@@ -91,11 +91,24 @@ class CleanupSandboxes extends Command
             // Force-remove the container. -f skips a graceful-stop attempt
             // (and the hang that comes with trying to gracefully stop a
             // container that's already crashed/OOM-killed) and guarantees
-            // the host port is released. We don't gate on the exit code —
-            // "already gone" is a success case here too — but we do stamp
-            // stopped_at either way so the port is freed in our own
-            // bookkeeping regardless of what Docker reports.
+            // the host port is released.
+            //
+            // FIX #13: this used to stamp stopped_at unconditionally,
+            // treating "already gone" and "rm silently failed" the same
+            // way. That's exactly how an orphaned container (still holding
+            // its host port) can end up with zero record anywhere in
+            // sandbox_runs — the row says stopped, the container doesn't
+            // know that. Now we verify removal actually took before
+            // closing the row; if it didn't, we leave the row open (still
+            // charged against the user's counter, still visible here on
+            // the next cron pass) rather than silently losing track of it.
             Process::run("docker rm -f {$containerName} 2>/dev/null || true");
+
+            $stillThere = Process::run("docker ps -a --filter name=^/{$containerName}\$ --format '{{.Names}}'");
+            if (trim($stillThere->output()) !== '') {
+                $this->error("  ✗ Failed to remove {$containerName} — leaving run #{$run->id} open. Manual cleanup needed: docker rm -f {$containerName}");
+                continue;
+            }
 
             $run->update(['stopped_at' => now()]);
 

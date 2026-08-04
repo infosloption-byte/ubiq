@@ -394,6 +394,18 @@ class ProjectController extends Controller
         // leave the port held — same reasoning as in runProject().
         Process::run("docker rm -f {$containerName} 2>/dev/null || true");
 
+        // FIX #13: verify before declaring victory, same as everywhere
+        // else that removes a container (reapStaleSandboxes,
+        // CleanupSandboxes, runProject's pre-run cleanup). An unverified
+        // "docker rm -f" here was the other place a silently-failed
+        // removal could mark a row stopped and release its counter while
+        // the container — and the port it's bound to — kept existing.
+        $stillThere = Process::run("docker ps -a --filter name=^/{$containerName}\$ --format '{{.Names}}'");
+        if (trim($stillThere->output()) !== '') {
+            Log::error("[Sandbox] stopProject: failed to remove {$containerName} for project {$project->id}.");
+            return response()->json(['error' => 'Could not stop the sandbox cleanly. Please try again.'], 500);
+        }
+
         // Stamp the most recent open audit run for this project
         SandboxRun::where('project_id', $project->id)
             ->whereNull('stopped_at')
@@ -985,6 +997,35 @@ class ProjectController extends Controller
                     continue;
                 }
 
+                // FIX #13: our own bookkeeping isn't the only thing that can
+                // occupy a host port. An orphaned container from a failed
+                // cleanup (docker rm that silently failed and got marked
+                // stopped anyway — see reapStaleSandboxes fix below), or
+                // literally any other process/container on this box, can
+                // hold a port with zero record in sandbox_runs. Purely
+                // trusting the DB here (as this method did before FIX #13)
+                // meant we'd confidently hand Docker a port it was going to
+                // reject, forever, since the DB would never stop believing
+                // that port was free.
+                //
+                // This binds 0.0.0.0 (matching how `docker run -p` actually
+                // publishes) rather than 127.0.0.1, so it reflects the same
+                // interface Docker itself needs — a wildcard bind by
+                // anything else on this port will correctly fail here too.
+                // This is a live check only for the 1-2 candidate ports we
+                // actually try (not an 800-port scan), so it doesn't
+                // reintroduce the concurrent-request race FIX #11 removed —
+                // that race is still fully closed by the DB claim above,
+                // which is evaluated first and is what two of *our own*
+                // simultaneous requests would collide on. This check only
+                // ever fires for genuinely untracked occupancy.
+                $sock = @stream_socket_server("tcp://0.0.0.0:{$port}", $errno, $errstr);
+                if ($sock === false) {
+                    Log::warning("[Sandbox] Port {$port} is free in our DB but occupied at the OS level ({$errstr}) — skipping. Likely an untracked or orphaned container; consider `docker ps | grep {$port}`.");
+                    continue;
+                }
+                fclose($sock);
+
                 // Reserve immediately, while still holding the lock, so the
                 // very next claimPortAndReserve() call (even microseconds
                 // later) sees this port as used.
@@ -1039,6 +1080,24 @@ class ProjectController extends Controller
             // force-remove any remnant and free the port/plan-slot it held.
             Log::warning("[Sandbox] Reaping stale run for project {$run->project_id} (container not running).");
             Process::run("docker rm -f {$containerName} 2>/dev/null || true");
+
+            // FIX #13: verify the removal actually worked before declaring
+            // this row closed. Previously this update() ran unconditionally
+            // — if `docker rm -f` silently failed (daemon busy, container
+            // stuck in a weird state, permissions), the row would be marked
+            // stopped and the counter released while the real container
+            // (and its port binding) kept right on existing, invisible to
+            // every check we have from that point on. That's the exact
+            // mechanism that produced the orphaned container this fix is
+            // responding to. If removal didn't actually take, we leave the
+            // row open and the counter charged — visibly stuck and worth
+            // investigating, rather than silently wrong.
+            $stillThere = Process::run("docker ps -a --filter name=^/{$containerName}\$ --format '{{.Names}}'");
+            if (trim($stillThere->output()) !== '') {
+                Log::error("[Sandbox] Failed to remove container {$containerName} during reap — leaving run #{$run->id} open rather than losing track of it. Manual cleanup needed: docker rm -f {$containerName}");
+                continue;
+            }
+
             $run->update(['stopped_at' => now()]);
             $this->planGuard->release($user, 'active_sandboxes');
         }
