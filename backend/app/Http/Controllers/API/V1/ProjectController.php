@@ -1047,10 +1047,30 @@ class ProjectController extends Controller
     /**
      * Start a Docker Sandbox container to run the project.
      *
-     * FIX #11: Port is claimed atomically up-front (claimPortAndReserve) so
-     * there is no port race left to retry around, and any of this user's
-     * dead sandboxes are reaped first (reapStaleSandboxes) so a crashed
-     * container from an earlier run can never block a new one.
+     * FIX #12: Two additional problems found after FIX #11 shipped, both
+     * causing the SAME symptom — a user permanently stuck at their
+     * concurrent-sandbox limit ("Sandbox limit reached", usage == limit)
+     * with zero actual containers running:
+     *
+     *   (a) reapStaleSandboxes() ran AFTER planGuard->authorize(). Once a
+     *       user's counter is already maxed out from stale entries,
+     *       authorize() throws and returns 429 before the reap ever runs
+     *       — the self-heal was unreachable in exactly the situation it
+     *       exists to fix. Reap now runs BEFORE authorize().
+     *
+     *   (b) authorize() increments the 'active_sandboxes' counter, but
+     *       only the anticipated failure branches below it (port
+     *       exhaustion, stale-container-removal-failed, docker run
+     *       failure) called release(). Any *unanticipated* exception
+     *       between authorize() succeeding and the method returning
+     *       (config detection, script generation, a disk write failing,
+     *       anything) skipped every release() call and leaked the
+     *       counter by 1, permanently — this is almost certainly how a
+     *       Pro user (limit 2) ended up stuck at usage 2 with nothing
+     *       actually running. The whole post-authorize body is now
+     *       wrapped in try/catch(\Throwable) so literally nothing can
+     *       exit this method without either succeeding or releasing what
+     *       it reserved.
      */
     public function runProject(Request $request, Project $project)
     {
@@ -1058,14 +1078,20 @@ class ProjectController extends Controller
             return response()->json(['error' => 'Unauthorized'], 403);
         }
 
+        $user = $request->user();
+
+        // FIX #12(a): reap THIS user's own dead sandboxes before the plan
+        // check, not after — otherwise a user already stuck at their limit
+        // from stale entries can never reach the code that would fix it.
+        $this->reapStaleSandboxes($user);
+
         // Check BEFORE any file writes / docker stop-rm / docker run — no
         // point doing expensive work for a request we're about to deny.
         // This increments the 'active_sandboxes' concurrent counter on
-        // success; every failure path below that aborts the actual
-        // container start must call planGuard->release() to avoid the
-        // counter drifting upward for sandboxes that never really started.
+        // success; FIX #12(b) below guarantees release() fires on every
+        // exit path from here on, not just the ones we anticipated.
         try {
-            $this->planGuard->authorize($request->user(), 'sandbox.start');
+            $this->planGuard->authorize($user, 'sandbox.start');
         } catch (PlanLimitExceededException $e) {
             return response()->json([
                 'error' => 'Sandbox limit reached',
@@ -1075,17 +1101,20 @@ class ProjectController extends Controller
             ], 429);
         }
 
-        $workspacePath = $this->getProjectPath($project);
-        $user          = $request->user();
-        $baseHostPath  = env('HOST_WORKSPACE_PATH', '/home/ubuntu/ubiq/backend/storage/app/workspaces');
-        $hostMountPath = $baseHostPath . "/{$project->user_id}/{$project->id}";
+        // FIX #12(b): guaranteed release. $sandboxRun is only non-null
+        // once claimPortAndReserve() has actually created the row: if we
+        // fail before that point, there's no row to close, only the
+        // counter to release. If we fail after, both need to be undone.
+        // The success `return` at the bottom of the try block skips this
+        // catch entirely, same as normal.
+        $sandboxRun = null;
 
-        // --- 0. SELF-HEAL: reconcile this user's own sandboxes against
-        // real Docker state before we try to claim a new port. Cheap
-        // (1-3 rows/user) and closes the gap the 15-min cron leaves open.
-        $this->reapStaleSandboxes($user);
+        try {
+            $workspacePath = $this->getProjectPath($project);
+            $baseHostPath  = env('HOST_WORKSPACE_PATH', '/home/ubuntu/ubiq/backend/storage/app/workspaces');
+            $hostMountPath = $baseHostPath . "/{$project->user_id}/{$project->id}";
 
-        // --- 1. GET DYNAMIC CONFIGURATION ---
+            // --- 1. GET DYNAMIC CONFIGURATION ---
         $config = $this->getRuntimeConfig($workspacePath);
         $runtime = $config['runtime'];
         $framework = $config['framework'];
@@ -1225,6 +1254,29 @@ class ProjectController extends Controller
             'runtime'   => $runtime,
             'framework' => $framework,
         ]);
+
+        } catch (\Throwable $e) {
+            // FIX #12(b): the actual guarantee. Whatever broke — a bug in
+            // config detection, a disk write failing, anything we didn't
+            // specifically anticipate above — the counter this method
+            // incremented via authorize() gets released, and if a port had
+            // already been reserved (claimPortAndReserve succeeded before
+            // the failure), that reservation and any container it started
+            // are torn down too. Without this, every unanticipated failure
+            // here leaked the user's concurrent-sandbox slot permanently,
+            // which is what produced a Pro user stuck at usage==limit with
+            // nothing actually running.
+            Log::error("[Sandbox] Unhandled exception in runProject for project {$project->id}: {$e->getMessage()}");
+
+            if ($sandboxRun !== null) {
+                $sandboxRun->update(['stopped_at' => now()]);
+                Process::run("docker rm -f ubiq_project_{$project->id} 2>/dev/null || true");
+            }
+
+            $this->planGuard->release($user, 'active_sandboxes');
+
+            return response()->json(['error' => 'Failed to start the sandbox.', 'details' => $e->getMessage()], 500);
+        }
     }
 
     public function getBuildLog(Request $request, Project $project)
