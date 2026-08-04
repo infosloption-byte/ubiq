@@ -257,8 +257,17 @@ export default function ProjectRunner({ projectId, onClose, onContainerStateChan
             {/* --- VIEW AREA --- */}
             <div className="flex-1 relative overflow-hidden flex flex-col bg-[#0B0B10]">
                 
-                {/* 1. LOG TERMINAL */}
-                {(isRunning || previewUrl) && (
+                {/* 1. LOG TERMINAL
+                     Must also show while isPollingActive — handleRun() hands
+                     off from isRunning=true to isPollingActive=true (see its
+                     comments) well before previewUrl is set (that only
+                     happens once the poller sees port_ready). Without
+                     isPollingActive here, that entire boot-polling window
+                     had neither isRunning nor previewUrl true, so this block
+                     hid itself and the IDLE block below took over instead —
+                     "Ready to compile..." while build-log kept polling
+                     invisibly underneath. */}
+                {(isRunning || isPollingActive || previewUrl) && (
                     <div className="absolute inset-0 flex flex-col p-4 bg-ubiq-950 z-10">
                          <div className="flex items-center gap-2 mb-3 shrink-0">
                             {isRunning ? (
@@ -297,8 +306,13 @@ export default function ProjectRunner({ projectId, onClose, onContainerStateChan
                     </div>
                 )}
 
-                {/* 2. ERROR STATE */}
-                {error && !isRunning && (
+                {/* 2. ERROR STATE
+                     Also gated on !isPollingActive for the same reason as
+                     above — an error set mid-poll (e.g. stall timeout)
+                     already calls setIsPollingActive(false) itself, but
+                     guarding here too keeps this block from ever fighting
+                     the Log Terminal block for the same render. */}
+                {error && !isRunning && !isPollingActive && (
                     <div className="absolute inset-0 flex flex-col p-6 bg-ubiq-950 overflow-y-auto custom-scrollbar">
                         <div className="flex items-center gap-2 text-red-400 mb-2">
                             <ExclamationTriangleIcon className="w-6 h-6" />
@@ -334,8 +348,14 @@ export default function ProjectRunner({ projectId, onClose, onContainerStateChan
                     />
                 )}
 
-                {/* 4. IDLE STATE */}
-                {!previewUrl && !isRunning && !error && (
+                {/* 4. IDLE STATE
+                     The actual bug fix: this used to be reachable during
+                     active build-log polling (isRunning already false,
+                     previewUrl not yet set), which is why the panel showed
+                     "Ready to compile..." while requests kept firing in the
+                     background. Now excluded for the whole isPollingActive
+                     window, not just the initial isRunning one. */}
+                {!previewUrl && !isRunning && !isPollingActive && !error && (
                     <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-500 bg-ubiq-950">
                         <CommandLineIcon className="w-12 h-12 mb-4 opacity-20" />
                         <span className="text-sm font-medium">Ready to compile and boot sandbox.</span>
