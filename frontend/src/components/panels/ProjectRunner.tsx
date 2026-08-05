@@ -12,24 +12,6 @@ interface ProjectRunnerProps {
     onContainerStateChange?: (running: boolean) => void;
 }
 
-// Keywords that indicate the server is stable and we can stop polling
-const STABLE_PATTERNS = [
-    'static site ready',
-    'ready in ',
-    'listening on',
-    'compiled successfully',
-    'server started',
-    'application started',
-    'running on port',
-    'local:',       // Vite output
-    'network:',     // Vite output
-];
-
-function isLogStable(log: string): boolean {
-    const lower = log.toLowerCase();
-    return STABLE_PATTERNS.some(p => lower.includes(p));
-}
-
 export default function ProjectRunner({ projectId, onClose, onContainerStateChange }: ProjectRunnerProps) {
     const [previewUrl, setPreviewUrl] = useState<string | null>(null);
     const [isRunning, setIsRunning] = useState(false);
@@ -42,8 +24,6 @@ export default function ProjectRunner({ projectId, onClose, onContainerStateChan
     const [exitCode, setExitCode] = useState<number | null>(null);
     
     const bottomRef = useRef<HTMLDivElement>(null);
-    const stableCountRef = useRef(0);   // consecutive unchanged polls
-    const lastLogRef = useRef('');
     const pollStartRef = useRef<number>(0);
     const pendingUrlRef = useRef<string | null>(null);
 
@@ -64,15 +44,28 @@ export default function ProjectRunner({ projectId, onClose, onContainerStateChan
         }).catch(() => {});
     }, []);
 
-    const STALL_TIMEOUT_MS = 90_000;
+    // FIX #14: client-side timeout is now a pure elapsed-time safety net
+    // (network issues, backend unreachable) — not a text-matching one.
+    // The old version required the log to NOT match a "success" pattern
+    // to fire at all, which is exactly what silently disabled it here:
+    // Vite's "ready in "/"Local:" banner printed before the crash, so the
+    // log satisfied that pattern forever afterward and this check could
+    // never trigger. Real success/failure now comes from the backend
+    // (port_ready / container_status, see getBuildLog FIX #14) which
+    // checks the actual TCP port rather than guessing from log text —
+    // this timeout only exists to stop polling if THAT itself goes
+    // silent (e.g. the network drops), set comfortably above the
+    // backend's own 60s stall threshold so the backend's real answer
+    // wins in the normal case.
+    const CLIENT_TIMEOUT_MS = 150_000;
 
     // Real-state polling — stops only once the port actually answers,
-    // or reports a concrete failure (crashed / stuck) instead of spinning forever.
+    // or the backend reports a concrete failure (crashed / stuck / gone),
+    // or this client-side timeout is hit as a last-resort safety net.
     useEffect(() => {
         if (!isPollingActive) return;
 
         let cancelled = false;
-        stableCountRef.current = 0;
 
         const fetchLogs = async () => {
             if (cancelled) return;
@@ -88,13 +81,6 @@ export default function ProjectRunner({ projectId, onClose, onContainerStateChan
                 setContainerStatus(status);
                 setExitCode(code);
 
-                if (log === lastLogRef.current) {
-                    stableCountRef.current += 1;
-                } else {
-                    stableCountRef.current = 0;
-                    lastLogRef.current = log;
-                }
-
                 // Real success: the port actually answers.
                 if (portReady) {
                     setPreviewUrl(pendingUrlRef.current);
@@ -103,7 +89,10 @@ export default function ProjectRunner({ projectId, onClose, onContainerStateChan
                     return;
                 }
 
-                // Real failure: container fell into its dead-end fallback or vanished.
+                // Real failure: backend says the container crashed/stalled/vanished
+                // (see getBuildLog FIX #14 — checks the real port + log mtime,
+                // not log text, so this fires reliably even when the log
+                // contains an earlier "ready"-looking line from before a crash).
                 if (status === 'exited' || status === 'missing') {
                     setError(
                         status === 'exited'
@@ -114,11 +103,12 @@ export default function ProjectRunner({ projectId, onClose, onContainerStateChan
                     return;
                 }
 
-                // Stuck: container's alive, log stopped changing, port never came up,
-                // and we've been at it too long — stop pretending it's still booting.
+                // Last-resort safety net — only reachable if the backend
+                // itself has been unable to answer definitively for this
+                // long (e.g. network trouble reaching it).
                 const elapsed = Date.now() - pollStartRef.current;
-                if (elapsed > STALL_TIMEOUT_MS && !isLogStable(log) && stableCountRef.current >= 5) {
-                    setError('Build appears stuck — no progress for 90s.');
+                if (elapsed > CLIENT_TIMEOUT_MS) {
+                    setError('Build is taking longer than expected — please try again.');
                     setIsPollingActive(false);
                 }
             } catch (e) {
@@ -139,8 +129,6 @@ export default function ProjectRunner({ projectId, onClose, onContainerStateChan
         setIsPollingActive(false);
         setContainerStatus(null);
         setExitCode(null);
-        lastLogRef.current = '';
-        stableCountRef.current = 0;
         pollStartRef.current = Date.now();
 
         try {

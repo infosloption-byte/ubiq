@@ -1338,12 +1338,107 @@ class ProjectController extends Controller
         }
     }
 
+    /**
+     * FIX #14: implements the container_status / exit_code / port_ready
+     * contract the frontend poller has been reading since it was written —
+     * this endpoint only ever returned { log }, so every real stop
+     * condition in ProjectRunner.tsx (port answering, container exited)
+     * was structurally unreachable, and polling never stopped on its own.
+     *
+     * Two constraints shaped this implementation (see docker-compose.yml):
+     *   - docker inspect .State.Status is USELESS for crash detection —
+     *     runProject's startup command intentionally falls back to
+     *     `tail -f /dev/null` on failure, so the container stays
+     *     "running" forever even after the real app process has died.
+     *   - docker exec (which could pgrep the real process directly) is
+     *     rejected by the socket-proxy (EXEC: 0), so that's not available
+     *     either.
+     *
+     * What IS available and used below:
+     *   - the log file itself, straight off the mounted volume, no
+     *     Docker involved at all.
+     *   - a real TCP check of the container's published host port, via
+     *     host.docker.internal (already in docker-compose.yml's
+     *     extra_hosts) — this is the one signal that can't lie: a log
+     *     line saying "ready" doesn't mean the process didn't crash a
+     *     moment later, which is exactly what happened with the
+     *     Vite-then-PostCSS-crash case that motivated this fix.
+     */
     public function getBuildLog(Request $request, Project $project)
     {
         if ($project->user_id !== $request->user()->id) abort(403);
+
         $logPath = $this->getProjectPath($project) . '/startup.log';
-        if (file_exists($logPath)) return response()->json(['log' => file_get_contents($logPath)]);
-        return response()->json(['log' => 'Waiting for logs...']);
+        $log = file_exists($logPath) ? file_get_contents($logPath) : 'Waiting for logs...';
+
+        $run = SandboxRun::where('project_id', $project->id)
+            ->whereNull('stopped_at')
+            ->latest('started_at')
+            ->first();
+
+        if (!$run) {
+            return response()->json([
+                'log' => $log, 'container_status' => 'missing',
+                'exit_code' => null, 'port_ready' => false,
+            ]);
+        }
+
+        $containerName = "ubiq_project_{$project->id}";
+        $inspect = Process::run("docker inspect -f '{{.State.Status}}' {$containerName}");
+        $dockerStatus = trim($inspect->output());
+
+        if (!$inspect->successful() || $dockerStatus === '') {
+            // Genuinely gone — not just the tail-fallback keep-alive, e.g.
+            // OOM-killed the whole cgroup, or removed out from under us.
+            return response()->json([
+                'log' => $log, 'container_status' => 'missing',
+                'exit_code' => null, 'port_ready' => false,
+            ]);
+        }
+
+        if ($dockerStatus !== 'running') {
+            return response()->json([
+                'log' => $log, 'container_status' => 'exited',
+                'exit_code' => null, 'port_ready' => false,
+            ]);
+        }
+
+        // Real readiness — the only signal here immune to misleading log
+        // text. Published on the host by `docker run -p`; reachable from
+        // this container via host.docker.internal.
+        $portReady = false;
+        if ($run->port) {
+            $sock = @fsockopen('host.docker.internal', $run->port, $errno, $errstr, 0.5);
+            if ($sock) { $portReady = true; fclose($sock); }
+        }
+
+        // Immediate crash detection: Node always prints its version banner
+        // as the LAST line of output when an uncaught exception/unhandled
+        // rejection kills the process — exactly what the tailwindcss/
+        // PostCSS failure did here, right after Vite's own "ready" banner
+        // had already printed. This is why matching on log *content*
+        // ("ready in ", "local:") is fundamentally unsafe for deciding
+        // "stable" — those strings don't stop being true just because
+        // something crashed three lines later.
+        $crashed = !$portReady && (bool) preg_match('/Node\.js v\d+\.\d+\.\d+\s*$/', rtrim($log));
+
+        // Generic stall fallback, keyed on file mtime rather than log
+        // content for the same reason. 60s is generous enough to not
+        // false-positive on a slow-but-legitimate install step gone quiet
+        // (large package download, native module compile, etc).
+        $stalled = !$portReady && file_exists($logPath) && (time() - filemtime($logPath)) > 60;
+
+        if ($crashed || $stalled) {
+            return response()->json([
+                'log' => $log, 'container_status' => 'exited',
+                'exit_code' => null, 'port_ready' => false,
+            ]);
+        }
+
+        return response()->json([
+            'log' => $log, 'container_status' => 'running',
+            'exit_code' => null, 'port_ready' => $portReady,
+        ]);
     }
 
     // =========================================================================
