@@ -30,11 +30,27 @@ export default function ProjectEditorPage() {
     const [localUrl, setLocalUrl] = useState(localStorage.getItem('ubiq_local_url') || 'http://localhost:11434');
     const [remoteUrl, setRemoteUrl] = useState(localStorage.getItem('ubiq_ollama_url') || '');
 
+    // D5 FIX: replaces the three native alert() calls in this file (settings
+    // save confirmation, "please open a file", "select some code first").
+    // alert() blocks the whole tab on its own modal, which felt jarring for
+    // messages this minor. Kept intentionally self-contained (no new shared
+    // component/context) since this is a single-file, low-risk UX fix —
+    // if a second page ends up needing the same pattern, it's worth
+    // promoting to a shared component/context at that point, not before.
+    const toastTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+    const [toast, setToast] = useState<{ message: string; tone: 'success' | 'notice' } | null>(null);
+    const showToast = (message: string, tone: 'success' | 'notice' = 'notice') => {
+        if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
+        setToast({ message, tone });
+        toastTimeoutRef.current = setTimeout(() => setToast(null), 3000);
+    };
+    useEffect(() => () => { if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current); }, []);
+
     const handleSaveSettings = () => {
         if (aiMode === 'remote') localStorage.setItem('ubiq_ollama_url', remoteUrl);
         else localStorage.setItem('ubiq_local_url', localUrl);
         setShowSettings(false);
-        alert("Connection URL updated!");
+        showToast("Connection URL updated!", 'success');
     };
 
     const [searchParams] = useSearchParams();
@@ -507,7 +523,7 @@ export default function ProjectEditorPage() {
     useEffect(() => { handleSaveRef.current = handleSave; }, [handleSave]);
 
     const handleApplyCode = (newCode: string) => {
-        if (!activeFile) { alert("Please open a file."); return; }
+        if (!activeFile) { showToast("Please open a file."); return; }
         setProposedContent(newCode);
     };
 
@@ -538,7 +554,7 @@ export default function ProjectEditorPage() {
                 const selection = ed.getSelection();
                 const text = ed.getModel()?.getValueInRange(selection || undefined);
                 if (text) { setRightPanelContent('chat'); setAutoPrompt(`Explain this code:\n\`\`\`${text}\`\`\``); }
-                else { alert("Select some code first."); }
+                else { showToast("Select some code first."); }
             }
         });
         editor.addAction({
@@ -910,6 +926,13 @@ export default function ProjectEditorPage() {
                 <InputDialog isOpen={createModal.isOpen} onClose={() => setCreateModal(p => ({ ...p, isOpen: false }))} onSubmit={submitCreate} title={`New ${createModal.type === 'folder' ? 'Folder' : 'File'}`} message={`Enter name for new ${createModal.type} inside '${createModal.parentPath || 'root'}':`} placeholder={createModal.type === 'folder' ? "components" : "App.tsx"} />
                 <ConfirmDialog isOpen={deleteModal.isOpen} onClose={() => setDeleteModal({ isOpen: false, node: null })} onConfirm={submitDelete} title="Delete Item?" message={`Are you sure you want to delete '${deleteModal.node?.name}'? This action cannot be undone.`} confirmText="Delete" isDestructive={true} />
                 <ConfirmDialog isOpen={confirmDiscardModal.isOpen} onClose={() => setConfirmDiscardModal({ isOpen: false, message: '', onConfirm: () => {} })} onConfirm={() => { confirmDiscardModal.onConfirm(); setConfirmDiscardModal({ isOpen: false, message: '', onConfirm: () => {} }); }} title="Discard Changes?" message={confirmDiscardModal.message} confirmText="Discard Changes" isDestructive={true} />
+
+                {/* D5 FIX: replaces alert() — non-blocking, auto-dismisses after 3s */}
+                {toast && (
+                    <div className={`fixed bottom-6 right-6 z-[999] px-4 py-2.5 rounded-lg shadow-lg text-sm font-medium text-white animate-fade-in ${toast.tone === 'success' ? 'bg-emerald-600' : 'bg-slate-700'}`}>
+                        {toast.message}
+                    </div>
+                )}
             </div>
         </Layout>
     );

@@ -63,6 +63,9 @@ first) and security, not by discovery order.
       `key={editor-${activeFile.fileId}}`) but the returned disposable is
       never stored/disposed. Long sessions accumulate duplicate global
       providers, each independently firing `aiAPI.completion` per keystroke.
+      _(Backend cross-check: this endpoint is PlanGuard-gated on `ai.request`
+      — see 2026-08-06 decision-log entry, no backend bug, but pre-fix
+      sessions over-consumed each user's real rate-limit allowance.)_
 - [x] D4 — **[data integrity, edge case]** Concurrent `Ctrl+S` saves aren't
       guarded — two in-flight `fileAPI.update` calls can resolve out of
       order, with the later-arriving response's content winning regardless
@@ -73,7 +76,7 @@ first) and security, not by discovery order.
       payloads. No known active exploit path in this codebase (no injected
       third-party scripts), but flagging since it's XSS-exposed by
       definition. No code change planned unless requested.
-- [ ] D5 — Blocking `alert()` used for "Connection URL updated!", "Please
+- [x] D5 — Blocking `alert()` used for "Connection URL updated!", "Please
       open a file," "Select some code first." — jarring UX, not a toast.
 - [ ] D6 — `closeTab` always reactivates the *last* tab in the list rather
       than the tab adjacent to the one just closed.
@@ -618,3 +621,57 @@ feature_key gets renamed, a limit default changes, a phase gets reordered.)
   errors. Remaining queue is D8 (security flag, informational-only — no
   code change planned unless requested) then D5/D6/D7 (pure UX, lowest
   priority).
+
+- 2026-08-06 — Backend cross-check on D0a–D4, no backend bugs found, one
+  important **documentation-only** finding on D3:
+  `CompletionController::complete()` (the endpoint behind `aiAPI.completion`,
+  used by the Monaco inline-completion provider) routes through
+  `PlanGuard->authorize($user, 'ai.request')`, which per its own doc-comment
+  "ALWAYS writes one row to plan_action_logs (allowed or not)" and counts
+  toward the user's hourly/daily `ai_requests` limit shown in
+  `PlanUsageWidget.tsx` — regardless of tier or BYO key. This means the pre-
+  fix D3 leak (one live completion provider per file ever opened in a
+  session, each firing its own debounced request per keystroke) wasn't just
+  wasted compute — every user session with N files open was consuming
+  roughly N× their real AI-request rate-limit allowance, which could:
+  (a) trigger premature 429 "Rate limit exceeded" responses on Free/Starter
+  tiers well before their actual usage justified it, and (b) inflate any
+  historical `plan_action_logs` analysis (the B6-style usage-percentile/
+  denial-rate reporting) for sessions logged before this fix shipped — worth
+  the caveat if that data is ever revisited. No backend code change is
+  needed: PlanGuard logged and rate-limited exactly what it received; it
+  just received far more requests than real usage warranted. The D3
+  frontend fix is the complete fix for this. Also checked D4: `FileController
+  ::update()` (the save endpoint) has no PlanGuard gate and no optimistic-
+  locking/version check at all — a plain last-write-wins `$file->save()` —
+  but since the D4 frontend guard now prevents a second save from ever being
+  *sent* while one is in flight, the backend never receives overlapping
+  writes to reconcile for a single session; nothing to add. (Multi-tab/
+  multi-device concurrent editing of the *same* file is a separate, broader
+  feature never in scope here.) D1/D2 confirmed backend-clean too:
+  `FileController::show()` (used by `loadFileContent`) has no PlanGuard gate
+  either. D0a/D0b never touched the network layer at all.
+
+- 2026-08-06 — D5 complete. Replaced all three native `alert()` calls
+  ("Connection URL updated!", "Please open a file.", "Select some code
+  first.") with a small self-contained toast: a `toast` state + `showToast()`
+  helper local to this file, auto-dismissing after 3s via a tracked
+  `toastTimeoutRef` (cleared on unmount and re-triggered on each new call so
+  rapid successive toasts don't stack/overlap oddly), rendered as a single
+  fixed-position `div` near the bottom of the JSX tree. Deliberately kept
+  file-local rather than promoted to a shared component/context — no other
+  page in this codebase uses a toast pattern yet, and this is a single-file,
+  low-risk UX fix; worth promoting once a second consumer actually needs it,
+  not speculatively. Caught a pre-existing, unrelated dead-class bug while
+  wiring the toast's entrance animation: `animate-slide-up` (used originally
+  on the terminal panel before D0b's rewrite, and still used today on the
+  provider-picker dropdown at the `animate-slide-down` call site) isn't
+  actually defined anywhere — this project's Tailwind v4 config lives in
+  `src/index.css`'s `@theme` block, which only defines `--animate-fade-in`.
+  Both `slide-up`/`slide-down` silently no-op; Tailwind doesn't error on an
+  undefined utility, it just emits nothing. Used the real `animate-fade-in`
+  utility for the new toast instead. Left the pre-existing `animate-slide-
+  down` dead class on the provider dropdown untouched — out of scope for
+  D5, flagging here in case it's worth a follow-up (either define the
+  keyframe in `@theme` or drop the dead class name). Verified with `tsc
+  --noEmit` — zero errors. D6 next (closeTab tab-selection UX).
