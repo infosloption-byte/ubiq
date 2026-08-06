@@ -1197,6 +1197,19 @@ class ProjectController extends Controller
             $run->update(['stopped_at' => now()]);
             $this->planGuard->release($user, 'active_sandboxes');
         }
+
+        // FIX #16: hard backstop after the per-row pass above. That pass
+        // can only fix leaks tied to a row that still exists — it cannot
+        // help if authorize() incremented the counter and the request died
+        // before claimPortAndReserve() ever created a row at all (worker
+        // crash, or nginx's fastcgi_read_timeout racing our own Docker
+        // process timeout — both sit at 120s). Clamp the counter down to
+        // the TRUE number of open rows remaining for this user; see
+        // PlanGuard::reconcileConcurrent() for why this is safe to do
+        // unconditionally (one-directional, can't stomp a genuinely
+        // concurrent new claim).
+        $trueOpenCount = SandboxRun::where('user_id', $user->id)->whereNull('stopped_at')->count();
+        $this->planGuard->reconcileConcurrent($user, 'active_sandboxes', $trueOpenCount);
     }
 
     /**

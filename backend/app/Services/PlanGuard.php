@@ -136,6 +136,40 @@ class PlanGuard
     }
 
     /**
+     * FIX #16: hard reconciliation for a concurrent counter — closes a leak
+     * class that release() structurally cannot reach. release() only ever
+     * fires in correlation with a specific SandboxRun row; if authorize()
+     * increments the counter and the request then dies before
+     * claimPortAndReserve() creates that row (worker crash, OOM, or a
+     * web-server-level timeout killing the request mid-flight — nginx's
+     * fastcgi_read_timeout for this route is 120s, the same boundary as
+     * our own Docker process timeout, so it's a real race, not just a
+     * theoretical one), there is no row anywhere for reapStaleSandboxes()
+     * to find and correlate the leaked increment against. That leak is
+     * permanent under every fix so far, because all of them work by
+     * iterating existing rows.
+     *
+     * This instead directly clamps the counter down to the TRUE number of
+     * open rows for the user — ground truth, independent of whether a
+     * leak has a row behind it or not. Deliberately one-directional: only
+     * ever decreases the counter, only down to $trueCount, never up — so a
+     * genuinely concurrent authorize() call for a real new sandbox, landing
+     * in the narrow window between this method's read and write, can't be
+     * stomped by a stale comparison here. Called from
+     * ProjectController::reapStaleSandboxes() after its per-row pass, so
+     * this is the actual backstop under all of it.
+     */
+    public function reconcileConcurrent(User $user, string $counterKey, int $trueCount): void
+    {
+        UsageCounter::query()
+            ->where('user_id', $user->id)
+            ->where('counter_key', $counterKey)
+            ->where('window_type', 'concurrent')
+            ->where('count', '>', $trueCount)
+            ->update(['count' => max(0, $trueCount)]);
+    }
+
+    /**
      * Total active count for a concurrent counter across ALL users —
      * this is the primitive Phase B3e's global sandbox ceiling check
      * builds on (box can only sustain ~2-3 concurrent sandboxes total,
