@@ -163,6 +163,24 @@ class ProjectController extends Controller
                 continue;
             }
 
+            // FIX #15: package.json is protected from full AI overwrites
+            // (preserves scaffold-critical scripts/versions), but the AI
+            // is explicitly instructed elsewhere to add packages it needs
+            // — reactAiPrompt() literally says "add react-router-dom to
+            // package.json" — and blanket-skipping this file meant that
+            // instruction could never take effect. Any AI-authored config
+            // (postcss.config.js, a router setup, etc.) that assumed a
+            // package was installed was guaranteed to crash on first run,
+            // because nothing could ever get that package into
+            // package.json. Merge only NEW dependency/devDependency
+            // entries instead of skipping outright — see
+            // mergePackageJsonDependencies() for exactly what's allowed
+            // to change.
+            if ($path === 'package.json' && in_array($path, $protected, true)) {
+                $this->mergePackageJsonDependencies($project, $projectPath, $content);
+                continue;
+            }
+
             // Never let AI overwrite scaffold files
             if (in_array($path, $protected, true)) {
                 Log::info("[Ubiq] scaffold: protected path blocked: {$path}");
@@ -206,6 +224,84 @@ class ProjectController extends Controller
             'files_saved'    => $savedCount,
             'files'          => $savedFiles,
         ]);
+    }
+
+    /**
+     * FIX #15: see the scaffold() call site for the full rationale.
+     *
+     * Merges only genuinely-new dependency/devDependency ENTRIES from the
+     * AI's proposed package.json into the real one on disk/DB — never the
+     * file wholesale. Specifically:
+     *
+     *   - scripts, name, type, version, private, etc. are never touched —
+     *     only the two dependency maps are read from the AI's content at
+     *     all.
+     *   - Any package name the scaffold itself already lists (react, vite,
+     *     next, vue, ...) is left exactly as the scaffold pinned it, even
+     *     if the AI's proposed package.json has a different version for
+     *     it — this can't be used to downgrade or destabilize the
+     *     scaffold, only to add packages that weren't there before.
+     *   - Version strings are sanity-checked (must start with an optional
+     *     ^/~ followed by a digit) before being accepted, so malformed or
+     *     hallucinated values can't end up in package.json and break
+     *     `npm install` outright.
+     */
+    private function mergePackageJsonDependencies(Project $project, string $projectPath, string $aiProposedContent): void
+    {
+        $aiPkg = json_decode($aiProposedContent, true);
+        if (!is_array($aiPkg)) {
+            return; // not valid JSON — nothing safe to do with it
+        }
+
+        $pkgPath = $projectPath . '/package.json';
+        $current = FileSystem::exists($pkgPath) ? json_decode((string) file_get_contents($pkgPath), true) : null;
+        if (!is_array($current)) {
+            return; // scaffold's own package.json missing/corrupt — bail rather than guess
+        }
+
+        $added = [];
+        foreach (['dependencies', 'devDependencies'] as $depKey) {
+            if (!is_array($aiPkg[$depKey] ?? null)) {
+                continue;
+            }
+
+            foreach ($aiPkg[$depKey] as $pkgName => $version) {
+                if (!is_string($pkgName) || $pkgName === '') {
+                    continue;
+                }
+                // Already pinned by the scaffold (in either dep map) —
+                // leave it exactly as-is, don't let the AI change it.
+                if (isset($current['dependencies'][$pkgName]) || isset($current['devDependencies'][$pkgName])) {
+                    continue;
+                }
+                if (!is_string($version) || !preg_match('/^[\^~]?\d/', $version)) {
+                    continue; // reject anything that isn't a plausible semver range
+                }
+
+                $current[$depKey][$pkgName] = $version;
+                $added[] = $pkgName;
+            }
+        }
+
+        if (empty($added)) {
+            return;
+        }
+
+        $newContent = json_encode($current, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+        file_put_contents($pkgPath, $newContent);
+
+        $project->files()->updateOrCreate(
+            ['path' => 'package.json'],
+            [
+                'name'       => 'package.json',
+                'content'    => $newContent,
+                'language'   => $this->detectLanguage('json'),
+                'size_bytes' => strlen($newContent),
+                'is_deleted' => false,
+            ]
+        );
+
+        Log::info('[Ubiq] scaffold: merged new package.json dependencies for project ' . $project->id . ': ' . implode(', ', $added));
     }
 
     /**
