@@ -37,6 +37,49 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 - [x] C4 — Upgrade/downgrade flow via PayPal, webhook updates `users.plan_id`, downgrade-over-limit policy (grandfather existing, block new)
 - [x] C5 — Internal admin UI to edit `plan_features` values directly
 
+## Phase D — ProjectEditorPage Reliability & Panel Fixes
+
+Found during a routine review of `frontend/src/pages/ProjectEditorPage.tsx`,
+unrelated to the Plan/Tier system itself but tracked here since it's the only
+active tracker in this repo. Ordered by urgency (data-loss / correctness
+first) and security, not by discovery order.
+
+- [x] D0a — Right panel (Chat ↔ Sandbox Runner) tab switch was unmounting the
+      inactive component via a ternary, resetting `ProjectRunner`'s live
+      state (logs, polling, preview URL) every time you switched to Chat and
+      back — required a full re-run to see logs again.
+- [x] D0b — Same bug, `TerminalPanel`: hiding the terminal (`showTerminal`
+      toggle) unmounted it entirely, wiping command history and output.
+- [x] D1 — **[data loss]** File-switch/tab-close silently discards unsaved
+      manual edits. Only AI-proposed diffs (`proposedContent`) were guarded
+      by the discard-confirmation dialog; plain typed edits had no dirty
+      check at all.
+- [ ] D2 — **[data integrity]** Stale-response race in `loadFileContent`:
+      switching files quickly (before the previous file's fetch resolves)
+      can let an old file's content land in the editor under the new file's
+      tab, since there's no request-id/cancellation guard.
+- [ ] D3 — **[perf/cost, grows over a session]** Monaco inline-completion
+      provider is re-registered on every file switch (editor remounts via
+      `key={editor-${activeFile.fileId}}`) but the returned disposable is
+      never stored/disposed. Long sessions accumulate duplicate global
+      providers, each independently firing `aiAPI.completion` per keystroke.
+- [ ] D4 — **[data integrity, edge case]** Concurrent `Ctrl+S` saves aren't
+      guarded — two in-flight `fileAPI.update` calls can resolve out of
+      order, with the later-arriving response's content winning regardless
+      of which was actually sent last.
+- [ ] D8 — **[security flag, informational]** AI provider keys and the
+      remote Ollama URL are stored in plaintext `localStorage`
+      (`ubiq_api_keys`, `ubiq_ollama_url`) and read directly into request
+      payloads. No known active exploit path in this codebase (no injected
+      third-party scripts), but flagging since it's XSS-exposed by
+      definition. No code change planned unless requested.
+- [ ] D5 — Blocking `alert()` used for "Connection URL updated!", "Please
+      open a file," "Select some code first." — jarring UX, not a toast.
+- [ ] D6 — `closeTab` always reactivates the *last* tab in the list rather
+      than the tab adjacent to the one just closed.
+- [ ] D7 — `sidebarWidth`/`chatWidth` aren't persisted to localStorage the
+      way open tabs are — resets on every reload.
+
 ---
 
 ## Notes / decisions log
@@ -466,3 +509,40 @@ feature_key gets renamed, a limit default changes, a phase gets reordered.)
   proactive "Setup Key" lock icon, only fail at generation time. Minor
   pre-existing UX gap, not introduced by this fix, lower priority than
   the four issues above.
+
+- 2026-08-06 — Phase D opened. D0a/D0b complete: `ProjectEditorPage.tsx`'s
+  right panel used `rightPanelContent === 'chat' ? <Chat/> : <Runner/>` — a
+  ternary that mounts only the active side and fully unmounts the other,
+  destroying `ProjectRunner`'s live state (`realLogs`, `isPollingActive`,
+  `previewUrl`) and killing its polling `useEffect`/`setInterval` every time
+  the user switched to Chat and back. Same pattern on `showTerminal &&
+  <TerminalPanel/>` for the bottom terminal, wiping command history/output
+  on every hide. Both fixed by keeping the component always mounted while
+  its parent panel is open/visible and toggling only CSS (`hidden` class /
+  `h-0` collapse) instead of the JSX conditional. Side effect worth noting:
+  `ProjectRunner`'s one-time `userAPI.getStats()` mount effect now also
+  fires whenever the Chat tab is opened first (since both mount together),
+  not just when the Sandbox tab is opened — harmless extra request, not a
+  functional issue.
+
+- 2026-08-06 — D1 complete. Added `savedContentRef` — set whenever content
+  is fetched (`loadFileContent`) or successfully saved (`handleSave`) — as
+  the baseline to detect unsaved manual edits (`fileContent !==
+  savedContentRef.current`), alongside the pre-existing `proposedContent !==
+  null` check for unaccepted AI diffs. Generalized `confirmDiscardModal`
+  from `{ isOpen, nextFile }` (wired only for the AI-diff path through
+  `handleFileSelect`) to `{ isOpen, message, onConfirm }` so one dialog now
+  guards three call sites: `handleFileSelect` (clicking a different file),
+  `closeTab` (X button on the active tab), and — deliberately NOT guarded —
+  `submitDelete`'s own `closeTab(node.fileId, true)` call, forced through
+  since the file is already deleted server-side by that point and a
+  discard-changes prompt for a file that no longer exists would be
+  nonsensical. Both `handleFileSelect` and `closeTab` gained a `force`
+  param so the dialog's own "Discard Changes" retry doesn't re-trigger
+  itself (infinite-loop guard, not just a style choice — without it the
+  dirty check is still true on the recursive call since nothing's been
+  saved yet). Verified with `tsc --noEmit` — zero errors. Out of scope for
+  this task (tracked separately if wanted): browser-level `beforeunload`
+  warning on tab close/refresh, and a visual "unsaved" dot on the tab
+  itself — this fix only covers in-app navigation, which was the reported
+  bug. D2 next (stale-response race on rapid file switching).

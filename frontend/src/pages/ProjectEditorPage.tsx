@@ -77,7 +77,12 @@ export default function ProjectEditorPage() {
 
     const [createModal, setCreateModal] = useState<{ isOpen: boolean; type: 'file' | 'folder'; parentPath: string }>({ isOpen: false, type: 'file', parentPath: '' });
     const [deleteModal, setDeleteModal] = useState<{ isOpen: boolean; node: FileNode | null }>({ isOpen: false, node: null });
-    const [confirmDiscardModal, setConfirmDiscardModal] = useState<{ isOpen: boolean; nextFile: any | null }>({ isOpen: false, nextFile: null });
+    // D1 FIX: previously `{ isOpen, nextFile }`, wired only for the
+    // file-switch-with-pending-AI-diff case. Generalized to `{ isOpen,
+    // message, onConfirm }` so the same dialog can also guard plain unsaved
+    // manual edits, and guard closeTab (X button) as well as sidebar file
+    // clicks, without each caller needing to know about `nextFile`.
+    const [confirmDiscardModal, setConfirmDiscardModal] = useState<{ isOpen: boolean; message: string; onConfirm: () => void }>({ isOpen: false, message: '', onConfirm: () => {} });
 
     const [sidebarWidth, setSidebarWidth] = useState(256);
     const [isResizingSidebar, setIsResizingSidebar] = useState(false);
@@ -92,6 +97,12 @@ export default function ProjectEditorPage() {
     const monacoRef = useRef<any>(null);
     const debounceRef = useRef<NodeJS.Timeout | null>(null);
     const restoredRef = useRef(false);
+
+    // D1 FIX: baseline content for the currently active file, set whenever
+    // content is loaded from the server or successfully saved. Comparing
+    // `fileContent` against this ref is how we detect unsaved manual edits
+    // (separately from `proposedContent`, which only covers AI diffs).
+    const savedContentRef = useRef<string>('');
 
     // 1. Initial Load
     useEffect(() => {
@@ -289,7 +300,7 @@ export default function ProjectEditorPage() {
                 await fileAPI.delete(node.fileId);
             }
 
-            if (node.fileId) closeTab(node.fileId);
+            if (node.fileId) closeTab(node.fileId, true); // D1: force — file is already deleted server-side
             if (activeFile && (activeFile.fileId === node.fileId || (activeFile.path && activeFile.path.startsWith(node.path + '/')))) {
                 setActiveFile(null);
                 setFileContent('');
@@ -332,12 +343,32 @@ export default function ProjectEditorPage() {
         if (fileInputRef.current) fileInputRef.current.value = '';
     };
 
-    const handleFileSelect = async (file: FileNode) => {
+    // D1 FIX: previously only checked `proposedContent !== null` (an
+    // unaccepted AI diff). A plain manual edit — type in the editor, click
+    // a different file in the tree, never hit Save — had no check at all:
+    // loadFileContent would silently overwrite `fileContent` from the
+    // server and the edit was gone, no warning. Now also checks
+    // `fileContent !== savedContentRef.current` (set on load/save, see
+    // loadFileContent/handleSave). `force=true` is used by the confirm
+    // dialog's own retry so accepting "Discard" doesn't re-trigger this
+    // same check on itself.
+    const handleFileSelect = async (file: FileNode, force: boolean = false) => {
         if (!file.fileId) return;
 
-        if (proposedContent !== null && activeFile?.fileId !== file.fileId) {
-            setConfirmDiscardModal({ isOpen: true, nextFile: file });
-            return;
+        if (!force && activeFile?.fileId !== file.fileId) {
+            const hasUnsavedAiDiff = proposedContent !== null;
+            const hasUnsavedEdits = activeFile !== null && fileContent !== savedContentRef.current;
+
+            if (hasUnsavedAiDiff || hasUnsavedEdits) {
+                setConfirmDiscardModal({
+                    isOpen: true,
+                    message: hasUnsavedAiDiff
+                        ? 'You have unsaved AI changes. Switching files will discard them.'
+                        : 'You have unsaved edits in this file. Switching files will discard them.',
+                    onConfirm: () => { setProposedContent(null); handleFileSelect(file, true); }
+                });
+                return;
+            }
         }
 
         setOpenFiles(prev => {
@@ -348,7 +379,25 @@ export default function ProjectEditorPage() {
         loadFileContent(file);
     };
 
-    const closeTab = (fileId: number) => {
+    // D1 FIX: closing the active tab (X button) hit the exact same bug as
+    // handleFileSelect via a different path — loadFileContent(newTabs[...])
+    // or the empty-state branch would discard unsaved edits with zero
+    // warning. Same guard, same `force` retry pattern.
+    const closeTab = (fileId: number, force: boolean = false) => {
+        const isClosingDirtyActiveTab = activeFile?.fileId === fileId
+            && (proposedContent !== null || fileContent !== savedContentRef.current);
+
+        if (isClosingDirtyActiveTab && !force) {
+            setConfirmDiscardModal({
+                isOpen: true,
+                message: proposedContent !== null
+                    ? 'You have unsaved AI changes. Closing this tab will discard them.'
+                    : 'You have unsaved edits in this file. Closing this tab will discard them.',
+                onConfirm: () => { setProposedContent(null); closeTab(fileId, true); }
+            });
+            return;
+        }
+
         const newTabs = openFiles.filter(f => f.fileId !== fileId);
         setOpenFiles(newTabs);
         if (activeFile?.fileId === fileId) {
@@ -372,7 +421,9 @@ export default function ProjectEditorPage() {
 
         try {
             const res = await fileAPI.get(file.fileId);
-            setFileContent(res.data.file.content || '');
+            const content = res.data.file.content || '';
+            setFileContent(content);
+            savedContentRef.current = content; // D1 FIX: new baseline for dirty-check
         } catch (e) { console.error(e); }
         finally { setTimeout(() => setShowEditor(true), 50); }
     };
@@ -390,6 +441,7 @@ export default function ProjectEditorPage() {
                 f.id === activeFile.fileId ? { ...f, content } : f
             ));
             setFileContent(content || '');
+            savedContentRef.current = content || ''; // D1 FIX: new baseline for dirty-check
         } catch (e) { console.error("Save failed", e); }
         finally { setIsSaving(false); }
     };
@@ -785,7 +837,7 @@ export default function ProjectEditorPage() {
 
                 <InputDialog isOpen={createModal.isOpen} onClose={() => setCreateModal(p => ({ ...p, isOpen: false }))} onSubmit={submitCreate} title={`New ${createModal.type === 'folder' ? 'Folder' : 'File'}`} message={`Enter name for new ${createModal.type} inside '${createModal.parentPath || 'root'}':`} placeholder={createModal.type === 'folder' ? "components" : "App.tsx"} />
                 <ConfirmDialog isOpen={deleteModal.isOpen} onClose={() => setDeleteModal({ isOpen: false, node: null })} onConfirm={submitDelete} title="Delete Item?" message={`Are you sure you want to delete '${deleteModal.node?.name}'? This action cannot be undone.`} confirmText="Delete" isDestructive={true} />
-                <ConfirmDialog isOpen={confirmDiscardModal.isOpen} onClose={() => setConfirmDiscardModal({ isOpen: false, nextFile: null })} onConfirm={() => { setProposedContent(null); handleFileSelect(confirmDiscardModal.nextFile); }} title="Discard Changes?" message="You have unsaved AI changes. Switching files will discard them." confirmText="Discard Changes" isDestructive={true} />
+                <ConfirmDialog isOpen={confirmDiscardModal.isOpen} onClose={() => setConfirmDiscardModal({ isOpen: false, message: '', onConfirm: () => {} })} onConfirm={() => { confirmDiscardModal.onConfirm(); setConfirmDiscardModal({ isOpen: false, message: '', onConfirm: () => {} }); }} title="Discard Changes?" message={confirmDiscardModal.message} confirmText="Discard Changes" isDestructive={true} />
             </div>
         </Layout>
     );
