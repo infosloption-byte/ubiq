@@ -78,7 +78,7 @@ first) and security, not by discovery order.
       definition. No code change planned unless requested.
 - [x] D5 — Blocking `alert()` used for "Connection URL updated!", "Please
       open a file," "Select some code first." — jarring UX, not a toast.
-- [ ] D6 — `closeTab` always reactivates the *last* tab in the list rather
+- [x] D6 — `closeTab` always reactivates the *last* tab in the list rather
       than the tab adjacent to the one just closed.
 - [ ] D7 — `sidebarWidth`/`chatWidth` aren't persisted to localStorage the
       way open tabs are — resets on every reload.
@@ -675,3 +675,18 @@ feature_key gets renamed, a limit default changes, a phase gets reordered.)
   D5, flagging here in case it's worth a follow-up (either define the
   keyframe in `@theme` or drop the dead class name). Verified with `tsc
   --noEmit` — zero errors. D6 next (closeTab tab-selection UX).
+
+- 2026-08-06 — D6 complete. `closeTab` previously always ran
+  `loadFileContent(newTabs[newTabs.length - 1])` when closing the active
+  tab — closing *any* tab, anywhere in the strip, jumped straight to
+  whichever file happened to be open last, not the one next to where you
+  were looking. Now captures `closingIndex` (position of the closed tab in
+  the pre-removal list) and activates `newTabs[Math.max(closingIndex - 1,
+  0)]` — the tab immediately to its left, matching the convention used by
+  most editors, falling back to the new first tab if you closed the
+  leftmost one (nothing to its left to fall back to). The guard this sits
+  inside (`if (activeFile?.fileId === fileId)`) is unchanged, so closing a
+  *background* tab still just filters the list and leaves the active file
+  untouched — this fix only changes what happens when the tab you close is
+  the one you're currently looking at. Verified with `tsc --noEmit` — zero
+  errors. D7 next (panel widths not persisted across reloads).

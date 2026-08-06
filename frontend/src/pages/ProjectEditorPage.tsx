@@ -436,11 +436,19 @@ export default function ProjectEditorPage() {
             return;
         }
 
+        // D6 FIX: previously always did `loadFileContent(newTabs[newTabs.length - 1])`
+        // — closing any tab jumped straight to the *last* tab in the strip,
+        // regardless of where the closed tab actually was. Now activates the
+        // tab immediately to the left of the one just closed (the common
+        // editor convention), or the new first tab if you closed the
+        // leftmost one (nothing to its left to fall back to).
+        const closingIndex = openFiles.findIndex(f => f.fileId === fileId);
         const newTabs = openFiles.filter(f => f.fileId !== fileId);
         setOpenFiles(newTabs);
         if (activeFile?.fileId === fileId) {
             if (newTabs.length > 0) {
-                loadFileContent(newTabs[newTabs.length - 1]);
+                const nextIndex = Math.max(closingIndex - 1, 0);
+                loadFileContent(newTabs[nextIndex]);
             } else {
                 setActiveFile(null);
                 setFileContent('');
