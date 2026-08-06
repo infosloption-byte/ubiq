@@ -54,7 +54,7 @@ first) and security, not by discovery order.
       manual edits. Only AI-proposed diffs (`proposedContent`) were guarded
       by the discard-confirmation dialog; plain typed edits had no dirty
       check at all.
-- [ ] D2 — **[data integrity]** Stale-response race in `loadFileContent`:
+- [x] D2 — **[data integrity]** Stale-response race in `loadFileContent`:
       switching files quickly (before the previous file's fetch resolves)
       can let an old file's content land in the editor under the new file's
       tab, since there's no request-id/cancellation guard.
@@ -546,3 +546,20 @@ feature_key gets renamed, a limit default changes, a phase gets reordered.)
   warning on tab close/refresh, and a visual "unsaved" dot on the tab
   itself — this fix only covers in-app navigation, which was the reported
   bug. D2 next (stale-response race on rapid file switching).
+
+- 2026-08-06 — D2 complete. Added `latestRequestedFileIdRef`, stamped with
+  `file.fileId` synchronously at the top of `loadFileContent` — i.e. before
+  the `await fileAPI.get(...)` — so it always reflects whichever file was
+  *most recently clicked*, regardless of fetch ordering. Both the success
+  and error branches check this ref against the fileId the response
+  belongs to and bail out silently if they no longer match (a newer file
+  was opened while this request was in flight); the `finally` block's
+  `setTimeout(() => setShowEditor(true), 50)` — which exists to force a
+  Monaco remount — gets the same double-check, once before scheduling the
+  timeout and again inside it when it actually fires, since the 50ms delay
+  is itself long enough for a third file-click to land in between. Net
+  effect: an in-flight request for a file you've since navigated away from
+  can no longer overwrite `fileContent`/`savedContentRef` or force the
+  editor's loading-flicker state, no matter how fast you click through
+  files. Verified with `tsc --noEmit` — zero errors. D3 next (Monaco
+  inline-completion provider leak on every file switch).

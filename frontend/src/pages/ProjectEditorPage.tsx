@@ -104,6 +104,13 @@ export default function ProjectEditorPage() {
     // (separately from `proposedContent`, which only covers AI diffs).
     const savedContentRef = useRef<string>('');
 
+    // D2 FIX: latest file.fileId that loadFileContent was called with.
+    // Guards against the stale-response race: if you click file A then
+    // file B before A's fetch resolves, A's response arriving after B's
+    // request started must NOT be applied — otherwise A's content (or A's
+    // showEditor remount timing) can land under B's tab.
+    const latestRequestedFileIdRef = useRef<number | null>(null);
+
     // 1. Initial Load
     useEffect(() => {
         if (projectId) {
@@ -415,17 +422,31 @@ export default function ProjectEditorPage() {
     const loadFileContent = async (file: FileNode) => {
         if (!file.fileId) return;
         setActiveFile(file);
+        latestRequestedFileIdRef.current = file.fileId; // D2 FIX: stamp this as the most recent request
 
         if (isBinaryFile(file.name)) { setShowPreview(true); setShowEditor(false); }
         else { setShowPreview(false); setShowEditor(false); }
 
         try {
             const res = await fileAPI.get(file.fileId);
+            // D2 FIX: a newer file was selected while this fetch was in flight —
+            // discard this response entirely rather than let it clobber the
+            // now-active file's content.
+            if (latestRequestedFileIdRef.current !== file.fileId) return;
+
             const content = res.data.file.content || '';
             setFileContent(content);
             savedContentRef.current = content; // D1 FIX: new baseline for dirty-check
-        } catch (e) { console.error(e); }
-        finally { setTimeout(() => setShowEditor(true), 50); }
+        } catch (e) {
+            if (latestRequestedFileIdRef.current !== file.fileId) return; // D2 FIX: stale error, ignore
+            console.error(e);
+        } finally {
+            if (latestRequestedFileIdRef.current === file.fileId) { // D2 FIX: only this file's own request may re-enable the editor
+                setTimeout(() => {
+                    if (latestRequestedFileIdRef.current === file.fileId) setShowEditor(true);
+                }, 50);
+            }
+        }
     };
 
     const handleSave = async (contentToSave?: string) => {
