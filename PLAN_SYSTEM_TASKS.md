@@ -63,7 +63,7 @@ first) and security, not by discovery order.
       `key={editor-${activeFile.fileId}}`) but the returned disposable is
       never stored/disposed. Long sessions accumulate duplicate global
       providers, each independently firing `aiAPI.completion` per keystroke.
-- [ ] D4 — **[data integrity, edge case]** Concurrent `Ctrl+S` saves aren't
+- [x] D4 — **[data integrity, edge case]** Concurrent `Ctrl+S` saves aren't
       guarded — two in-flight `fileAPI.update` calls can resolve out of
       order, with the later-arriving response's content winning regardless
       of which was actually sent last.
@@ -592,3 +592,29 @@ feature_key gets renamed, a limit default changes, a phase gets reordered.)
   and Monaco already disposes them correctly on remount, confirmed not a
   leak. Verified with `tsc --noEmit` — zero errors. D4 next (concurrent
   Ctrl+S save race).
+
+- 2026-08-06 — D4 complete. Two distinct races lived in `handleSave`. First:
+  the Save *button* is disabled while `isSaving` is true, but Monaco's
+  Ctrl+S command calls `handleSaveRef.current()` directly and was never
+  gated by that same state — mashing Ctrl+S could fire two overlapping
+  `fileAPI.update` calls, and if the network reordered their responses,
+  whichever arrived last would win in `setFileContent` regardless of send
+  order. Fixed with `isSavingRef` — a synchronous ref-based re-entrancy
+  guard (needed because `isSaving` state isn't synchronously readable
+  within the same tick a rapid second Ctrl+S would land in). Second, more
+  interesting one found while fixing the first: `handleSave` is `async`
+  and closes over `activeFile` at call time, but nothing stopped the user
+  from switching to a *different* file while a save was still in flight —
+  when that save's response eventually arrived, it unconditionally called
+  `setFileContent`/`savedContentRef.current =` with the OLD file's content,
+  silently overwriting whatever the newly-active file had already loaded.
+  Fixed by reusing D2's `latestRequestedFileIdRef` (already the source of
+  truth for "which file is actually on screen") as a guard: a save's
+  response now only touches live editor state if that ref still matches
+  the file being saved (`savingFileId`, snapshotted at call start) — a save
+  for a file you've since navigated away from still persists correctly to
+  the server (via `setFiles`, keyed by `savingFileId` not `activeFile`) but
+  no longer clobbers the screen. Verified with `tsc --noEmit` — zero
+  errors. Remaining queue is D8 (security flag, informational-only — no
+  code change planned unless requested) then D5/D6/D7 (pure UX, lowest
+  priority).

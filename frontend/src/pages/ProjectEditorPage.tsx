@@ -464,22 +464,43 @@ export default function ProjectEditorPage() {
         }
     };
 
+    // D4 FIX: the Save *button* is already disabled while `isSaving` is
+    // true, but Monaco's Ctrl+S command (wired below via handleSaveRef)
+    // calls handleSave() directly and isn't gated by that UI state at all
+    // — mashing Ctrl+S could fire two overlapping `fileAPI.update` calls,
+    // and if the network reordered their responses, the one that arrived
+    // last would win in `setFileContent` regardless of which was actually
+    // sent last. `isSavingRef` is a synchronous re-entrancy guard (state
+    // updates aren't synchronous within the same tick, a ref is).
+    const isSavingRef = useRef(false);
+
     const handleSave = async (contentToSave?: string) => {
         if (!activeFile?.fileId) return;
+        if (isSavingRef.current) return; // D4 FIX: drop overlapping save attempts
+        isSavingRef.current = true;
+        const savingFileId = activeFile.fileId; // D4 FIX: snapshot — see check below
         setIsSaving(true);
         try {
             let content = contentToSave;
             if (content === undefined) {
                 content = editorRef.current ? editorRef.current.getValue() : fileContent;
             }
-            await fileAPI.update(activeFile.fileId, { content: content });
+            await fileAPI.update(savingFileId, { content: content });
             setFiles(prevFiles => prevFiles.map(f =>
-                f.id === activeFile.fileId ? { ...f, content } : f
+                f.id === savingFileId ? { ...f, content } : f
             ));
-            setFileContent(content || '');
-            savedContentRef.current = content || ''; // D1 FIX: new baseline for dirty-check
+            // D4 FIX: only touch the live editor state if the user hasn't
+            // switched to a different file while this save was in flight
+            // (reusing D2's latestRequestedFileIdRef as the source of truth
+            // for "which file is actually on screen right now") — otherwise
+            // this save's now-stale content would clobber whatever the
+            // newly-active file has already loaded.
+            if (latestRequestedFileIdRef.current === savingFileId) {
+                setFileContent(content || '');
+                savedContentRef.current = content || ''; // D1 FIX: new baseline for dirty-check
+            }
         } catch (e) { console.error("Save failed", e); }
-        finally { setIsSaving(false); }
+        finally { setIsSaving(false); isSavingRef.current = false; }
     };
 
     const handleSaveRef = useRef(handleSave);
