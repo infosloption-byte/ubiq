@@ -684,11 +684,14 @@ export default function ProjectEditorPage() {
                         </div>
                     </div>
 
-                    {showTerminal && (
-                        <div className="h-[40%] shrink-0 border-t border-white/10 animate-slide-up bg-[#0c0c0c]">
-                            <TerminalPanel projectId={projectId} isContainerRunning={isSandboxRunning} />
-                        </div>
-                    )}
+                    {/* FIX: previously `{showTerminal && (<div><TerminalPanel/></div>)}` unmounted
+                        TerminalPanel entirely when hidden, wiping its command history/output
+                        (`history` state) and up/down-arrow history (`cmdHistory` ref) each time.
+                        Now it stays mounted and we only collapse its height, so re-opening the
+                        terminal keeps everything from before. */}
+                    <div className={`shrink-0 border-t border-white/10 bg-[#0c0c0c] overflow-hidden transition-all duration-300 ${showTerminal ? 'h-[40%]' : 'h-0 border-t-0'}`}>
+                        <TerminalPanel projectId={projectId} isContainerRunning={isSandboxRunning} />
+                    </div>
                 </div>
 
                 {/* RIGHT PANEL */}
@@ -696,7 +699,15 @@ export default function ProjectEditorPage() {
                     <div ref={chatRef} className="bg-ubiq-950 flex flex-col shrink-0 border-l border-white/5 transition-none relative" style={{ width: chatWidth }}>
                         <div onMouseDown={(e) => { e.preventDefault(); startResizingChat(); }} className="absolute top-0 left-0 w-1.5 h-full cursor-col-resize hover:bg-ubiq-accent/50 z-50 -ml-0.5 transition-colors" />
 
-                        {rightPanelContent === 'chat' ? (
+                        {/* FIX: previously this was `rightPanelContent === 'chat' ? <Chat/> : <ProjectRunner/>`,
+                            a ternary that MOUNTS ONLY the active tab. Switching tabs unmounted the other
+                            one entirely, destroying its React state (ProjectRunner's realLogs,
+                            isPollingActive, previewUrl, etc.) and killing its polling interval/effects.
+                            That's why the log panel looked "reset" and required a re-run after
+                            switching to Chat and back. Now both are always mounted while the panel is
+                            open; we only toggle which one is visible via CSS, so state and intervals
+                            survive tab switches. */}
+                        <div className={`h-full w-full flex-col ${rightPanelContent === 'chat' ? 'flex' : 'hidden'}`}>
                             <>
                                 <div className="h-12 flex items-center justify-between px-4 border-b border-white/5 bg-ubiq-900/50 shrink-0">
                                     <span className="text-sm font-medium text-slate-200">AI Assistant</span>
@@ -764,9 +775,11 @@ export default function ProjectEditorPage() {
                                     ) : null}
                                 </div>
                             </>
-                        ) : (
+                        </div>
+
+                        <div className={`h-full w-full flex-col ${rightPanelContent === 'runner' ? 'flex' : 'hidden'}`}>
                             <ProjectRunner projectId={projectId} onClose={() => setRightPanelContent(null)} onContainerStateChange={setIsSandboxRunning} />
-                        )}
+                        </div>
                     </div>
                 )}
 
