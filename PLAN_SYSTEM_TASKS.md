@@ -58,7 +58,7 @@ first) and security, not by discovery order.
       switching files quickly (before the previous file's fetch resolves)
       can let an old file's content land in the editor under the new file's
       tab, since there's no request-id/cancellation guard.
-- [ ] D3 — **[perf/cost, grows over a session]** Monaco inline-completion
+- [x] D3 — **[perf/cost, grows over a session]** Monaco inline-completion
       provider is re-registered on every file switch (editor remounts via
       `key={editor-${activeFile.fileId}}`) but the returned disposable is
       never stored/disposed. Long sessions accumulate duplicate global
@@ -563,3 +563,32 @@ feature_key gets renamed, a limit default changes, a phase gets reordered.)
   editor's loading-flicker state, no matter how fast you click through
   files. Verified with `tsc --noEmit` — zero errors. D3 next (Monaco
   inline-completion provider leak on every file switch).
+
+- 2026-08-06 — D3 complete. Root cause: `<Editor key={editor-${activeFile.
+  fileId}}>` forces a full Monaco editor remount on every file switch, so
+  `handleEditorMount` — which called `monaco.languages.
+  registerInlineCompletionItemProvider(...)` unconditionally — fired again
+  each time. That registration is global to the Monaco *module*, not
+  scoped to one editor instance, and its returned disposable was never
+  stored, so nothing ever called `.dispose()` on the previous one. A
+  session that opens N files ends up with N live providers all firing
+  `aiAPI.completion` on every keystroke in whichever file is currently
+  open — compounding latency, duplicate suggestions, and BYO-key API cost
+  the longer someone works. Fixed by adding
+  `completionProviderDisposableRef`: `handleEditorMount` now only calls
+  `registerInlineCompletionItemProvider` if that ref is still null, so
+  registration happens exactly once for the page's whole lifetime
+  regardless of how many files get opened afterward. Since the provider is
+  now long-lived rather than re-created per file, it could no longer rely
+  on closing over the `aiMode` value from whenever it happened to be
+  registered — added `aiModeRef` (kept current via a `useEffect` on
+  `[aiMode]`) so the one persistent provider always reads live AI-mode
+  state instead of freezing whatever mode was active on first mount. Added
+  a page-unmount cleanup effect that disposes the provider when navigating
+  away from the editor entirely (e.g. to a different project), so it
+  doesn't keep running against a Monaco instance whose host component no
+  longer exists. `editor.addCommand`/`editor.addAction` calls in the same
+  function were left untouched — those are scoped to the editor *instance*
+  and Monaco already disposes them correctly on remount, confirmed not a
+  leak. Verified with `tsc --noEmit` — zero errors. D4 next (concurrent
+  Ctrl+S save race).

@@ -98,6 +98,21 @@ export default function ProjectEditorPage() {
     const debounceRef = useRef<NodeJS.Timeout | null>(null);
     const restoredRef = useRef(false);
 
+    // D3 FIX: `handleEditorMount` runs on every file switch (the <Editor>
+    // remounts because its `key` includes `activeFile.fileId`), but
+    // `monaco.languages.registerInlineCompletionItemProvider` is global to
+    // the Monaco module, not scoped to that one editor instance. Previously
+    // this fired on every remount with the returned disposable never
+    // stored/disposed, so a long session accumulated one live provider per
+    // file ever opened — each independently firing `aiAPI.completion` on
+    // every keystroke. `completionProviderDisposableRef` makes registration
+    // happen exactly once; `aiModeRef` lets that one long-lived provider
+    // always read the *current* AI mode instead of freezing whatever mode
+    // was active the moment it happened to be registered.
+    const completionProviderDisposableRef = useRef<{ dispose: () => void } | null>(null);
+    const aiModeRef = useRef(aiMode);
+    useEffect(() => { aiModeRef.current = aiMode; }, [aiMode]);
+
     // D1 FIX: baseline content for the currently active file, set whenever
     // content is loaded from the server or successfully saved. Comparing
     // `fileContent` against this ref is how we detect unsaved manual edits
@@ -522,8 +537,11 @@ export default function ProjectEditorPage() {
             }
         });
 
-        if (monaco.languages.registerInlineCompletionItemProvider) {
-            monaco.languages.registerInlineCompletionItemProvider({ pattern: '**' }, {
+        // D3 FIX: guard so this only registers once across the whole page's
+        // lifetime, not once per file switch. See completionProviderDisposableRef
+        // declaration above for why that matters.
+        if (!completionProviderDisposableRef.current && monaco.languages.registerInlineCompletionItemProvider) {
+            completionProviderDisposableRef.current = monaco.languages.registerInlineCompletionItemProvider({ pattern: '**' }, {
                 provideInlineCompletionItems: async (model, position) => {
                     return new Promise((resolve) => {
                         if (debounceRef.current) clearTimeout(debounceRef.current);
@@ -536,9 +554,12 @@ export default function ProjectEditorPage() {
 
                             const storedKeys = localStorage.getItem('ubiq_api_keys');
                             const apiKeys = storedKeys ? JSON.parse(storedKeys) : {};
-                            if (aiMode === 'local') {
+                            // D3 FIX: read aiModeRef.current, not the `aiMode` closed over at
+                            // registration time — this provider now lives for the whole page
+                            // session, so it must see mode changes made after it was created.
+                            if (aiModeRef.current === 'local') {
                                 apiKeys['ollama_url'] = localStorage.getItem('ubiq_local_url') || 'http://localhost:11434';
-                            } else if (aiMode === 'remote') {
+                            } else if (aiModeRef.current === 'remote') {
                                 const savedRemote = localStorage.getItem('ubiq_ollama_url') || '';
                                 if (savedRemote) apiKeys['ollama_url'] = savedRemote;
                             }
@@ -569,6 +590,15 @@ export default function ProjectEditorPage() {
             });
         }
     };
+
+    // D3 FIX: dispose the single long-lived completion provider when the
+    // page itself unmounts (e.g. navigating away to a different project).
+    // Without this, the provider — and its closure over debounceRef/
+    // aiModeRef — would keep running against a Monaco instance whose host
+    // component no longer exists.
+    useEffect(() => {
+        return () => { completionProviderDisposableRef.current?.dispose(); };
+    }, []);
 
     const startResizingSidebar = useCallback(() => setIsResizingSidebar(true), []);
     const startResizingChat = useCallback(() => setIsResizingChat(true), []);
