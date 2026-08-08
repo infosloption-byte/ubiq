@@ -986,6 +986,51 @@ then the net-new Privacy tab last.
         `php -l` — both clean; confirmed `PlanUsageWidget.tsx` is the only
         frontend consumer of this endpoint's response shape, so nothing
         else needed updating for the new fields.
+  - [x] **E2b sub-part 2 — layout still wrong, storage merge, refresh
+        button, day progress bar** (reported after sub-part 1 shipped;
+        the two-column fix in sub-part 1 solved the auto-placement bug
+        but wasn't the layout actually wanted). Five changes, all in
+        `PlanUsageWidget.tsx`/`SettingsPage.tsx`, no backend change needed:
+        (1) **Single column, not two.** Dropped the `md:grid-cols-2` split
+        from sub-part 1 entirely — status area is now one stacked column
+        (`space-y-4`), per explicit feedback that two columns wasn't
+        wanted at all.
+        (2) **Storage merged into Plan Usage.** Removed the separate
+        `<StorageUsage/>` card from `SettingsPage.tsx` and added a Storage
+        row directly inside `PlanUsageWidget`, sourced from `data.storage`
+        — which this component was already fetching as part of the same
+        `/user/plan-usage` response the whole time, just never rendering.
+        No new API call. This left `StorageUsage.tsx` with zero consumers
+        anywhere in the app — a stale comment in the old code claimed it
+        "already has its own DashboardPage consumer," checked via a
+        repo-wide grep while making this change and that was never
+        actually true. Flagged as now-dead code; left in place since
+        deleting files wasn't asked for.
+        (3) **"Your Plan Includes" is now a visually distinct section**
+        (explicit divider + spacing) appearing after Plan Usage, rather
+        than reading as just one more row in the same flowing list.
+        (4) **AI requests/hour and /day added to that includes list** as
+        static numbers (`data.ai.hour_limit`/`day_limit`, already in
+        state — no new field needed), alongside the existing sandbox
+        CPU/RAM/idle-timeout/model-tier/sharing specs. Deliberately
+        redundant with the live usage numbers shown above in Plan Usage —
+        one section is "what your plan includes" (static reference), the
+        other is "how much you've used" (live), and both are useful.
+        (5) **Daily AI-requests row now has a progress bar**, matching the
+        hourly row — was text-only before.
+        (6) **Manual refresh button** in the Plan Usage header — pulled
+        the mount-time fetch out into a reusable `fetchUsage()` (still
+        called from a `useEffect` on mount, same as before), wired a
+        `RefreshCw` button to call it again on click with a spin
+        animation while in flight. Recalls the exact same
+        `GET /user/plan-usage` PlanGuard already computes fresh on every
+        request — no separate "refresh" endpoint needed. Verified with
+        `tsc --noEmit` and a full `npm run build` (not just `--noEmit`,
+        to also catch anything Rollup's stricter bundling analysis would
+        flag) — both clean; the one warning `npm run build` surfaces
+        (`AiApiConfig` not exported by `aiService.ts`) is the
+        already-flagged, pre-existing, harmless one from before this
+        session, confirmed unchanged.
   - [ ] **E2c — Upgrade path for non-top-tier active subscribers.** Once
         E2a is fixed, a Starter/Creator subscriber will correctly get a
         "Manage Subscription" section — but should *also* still see an

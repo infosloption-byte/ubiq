@@ -4,7 +4,11 @@ import Layout from '../components/Layout';
 import { useAuthStore } from '../stores/authStore';
 import api, { userAPI, authAPI, subscriptionApi, aiKeysAPI } from '../services/api';
 import PricingGrid from '../components/PricingGrid';
-import StorageUsage from '../components/StorageUsage';
+// Sub-part 2 (PLAN_SYSTEM_TASKS.md Phase E): StorageUsage import removed —
+// storage is now rendered as a row inside PlanUsageWidget instead of its
+// own separate card here. This leaves StorageUsage.tsx with zero consumers
+// anywhere in the app (confirmed via repo-wide grep) — flagged as now-dead
+// code, left in place since deleting files wasn't asked for.
 import PlanUsageWidget from '../components/PlanUsageWidget';
 import { 
   User, Key, Monitor, Save, 
@@ -434,20 +438,16 @@ export default function SettingsPage() {
                   </div>
 
                   {/* ── Status Cards ──
-                      E2b sub-part (PLAN_SYSTEM_TASKS.md Phase E) — this grid
-                      previously had 3 direct children (Plan card,
-                      StorageUsage, a wrapper around PlanUsageWidget) inside
-                      a 2-column grid. CSS grid auto-placement filled them
-                      left-to-right, top-to-bottom: Plan card → row1/col1,
-                      StorageUsage → row1/col2, then PlanUsageWidget wrapped
-                      to row2/col1 — leaving row2/col2 completely empty and
-                      the right column much shorter than the left, which is
-                      exactly the lopsided look reported. Fixed by grouping
-                      explicitly into two column divs instead of relying on
-                      auto-placement across a flat list. */}
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    {/* Left column: current plan status + live usage, stacked together */}
-                    <div className="space-y-4">
+                      E2b sub-part 2 (PLAN_SYSTEM_TASKS.md Phase E) — per
+                      feedback, dropped the two-column grid entirely in
+                      favor of a single stacked column (the earlier
+                      two-column attempt fixed the auto-placement bug but
+                      wasn't the layout actually wanted). Also removed the
+                      separate <StorageUsage/> card — storage is now its own
+                      row inside PlanUsageWidget, since storage IS plan
+                      usage and reads better grouped with the rest of it
+                      rather than sitting in its own card alongside. */}
+                  <div className="space-y-4">
                       <div className="p-6 bg-white/5 rounded-xl border border-white/10">
                         <p className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-2">Current Plan</p>
                         <div className="flex items-center gap-3 mb-3">
@@ -522,12 +522,6 @@ export default function SettingsPage() {
                       </div>
 
                       <PlanUsageWidget />
-                    </div>
-
-                    {/* Right column: storage — its own column now, not a stray auto-placed cell */}
-                    <div>
-                      <StorageUsage />
-                    </div>
                   </div>
 
                   {/* ── Upgrade — show all plans unless already on the top tier ── */}
