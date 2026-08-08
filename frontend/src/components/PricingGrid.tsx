@@ -78,7 +78,16 @@ function formatPrice(cents: number): string {
     return cents === 0 ? 'Free' : `$${(cents / 100).toFixed(0)}`;
 }
 
-export default function PricingGrid() {
+/**
+ * E2c (PLAN_SYSTEM_TASKS.md Phase E) — optional filter so this grid can
+ * show only tiers ABOVE a given sort_order, for an already-subscribed
+ * Starter/Creator user who should see an upgrade path to higher tiers
+ * only, not the full grid including their own tier and anything below it.
+ * Omitting the prop entirely (the default, used for unsubscribed/free
+ * users) keeps the original unfiltered behavior — every existing caller
+ * of this component before E2c continues to work unchanged.
+ */
+export default function PricingGrid({ minSortOrder }: { minSortOrder?: number } = {}) {
     const [plans, setPlans] = useState<Plan[]>([]);
     const [loading, setLoading] = useState(true);
     const [confirming, setConfirming] = useState(false);
@@ -157,9 +166,17 @@ export default function PricingGrid() {
         );
     }
 
+    // E2c: filtered view used for rendering only — `plans` state itself
+    // stays the full fetched list untouched, in case some other part of
+    // this component (PayPal button wiring, etc.) ever needs the complete
+    // set rather than the filtered one.
+    const visiblePlans = minSortOrder != null
+        ? plans.filter(p => p.sort_order > minSortOrder)
+        : plans;
+
     return (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            {plans.map((plan) => {
+            {visiblePlans.map((plan) => {
                 const isCurrent = user?.subscription_tier === plan.key || (plan.key === 'free' && !user?.subscription_tier);
                 const hasCheckout = !!plan.paypal_plan_id;
                 const bullets = planBullets(plan);

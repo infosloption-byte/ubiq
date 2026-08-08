@@ -92,6 +92,13 @@ export default function SettingsPage() {
     ? (currentPlan.price_cents === 0 ? 'Free' : `$${(currentPlan.price_cents / 100).toFixed(2)}/month`)
     : null; // null while /plans hasn't resolved yet, or tier genuinely unmatched — copy below handles this by simply omitting the price rather than showing a wrong one
 
+  // E2c (PLAN_SYSTEM_TASKS.md Phase E): derived from the same `plans` list
+  // already fetched above — computed from the data (max sort_order seen)
+  // rather than hardcoding 'pro' as "the top tier," so this stays correct
+  // if a 5th tier is ever added without needing a matching code change here.
+  const topSortOrder = plans.length > 0 ? Math.max(...plans.map(p => p.sort_order)) : null;
+  const isOnTopTier = !!currentPlan && topSortOrder !== null && currentPlan.sort_order >= topSortOrder;
+
   const trialEndsAt = user?.trial_ends_at
     ? new Date(user.trial_ends_at) : null;
   const subEndsAt = (user as any)?.subscription_ends_at
@@ -524,14 +531,29 @@ export default function SettingsPage() {
                       <PlanUsageWidget />
                   </div>
 
-                  {/* ── Upgrade — show all plans unless already on the top tier ── */}
-                  {!isSubscribed && !isCanceled && (
+                  {/* ── Upgrade — E2c fix (PLAN_SYSTEM_TASKS.md Phase E):
+                      previously `!isSubscribed && !isCanceled` hid this
+                      section completely for ANY active paid subscriber,
+                      Starter/Creator included — meaning someone already
+                      paying for Starter had no way to see or start an
+                      upgrade to Creator/Pro from this page at all. Now
+                      shown for unsubscribed users (full grid, unchanged)
+                      AND for subscribers not yet on the top tier (grid
+                      filtered to tiers above their own via minSortOrder,
+                      so they don't see their own tier or anything below
+                      it as if it were a fresh choice). Still hidden
+                      entirely for canceled subscriptions (unchanged) and
+                      for anyone already on the top tier — correctly
+                      nothing to upgrade to there. ── */}
+                  {!isCanceled && (!isSubscribed || !isOnTopTier) && (
                     <div className="mt-4">
                       <div className="mb-4">
-                        <h3 className="text-lg font-bold text-white">Plans</h3>
-                        <p className="text-sm text-slate-400">Pick the plan that fits how you're building.</p>
+                        <h3 className="text-lg font-bold text-white">{isSubscribed ? 'Upgrade Your Plan' : 'Plans'}</h3>
+                        <p className="text-sm text-slate-400">
+                          {isSubscribed ? 'Get more capacity and features with a higher tier.' : "Pick the plan that fits how you're building."}
+                        </p>
                       </div>
-                      <PricingGrid />
+                      <PricingGrid minSortOrder={isSubscribed ? currentPlan?.sort_order : undefined} />
                     </div>
                   )}
 

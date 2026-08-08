@@ -1031,13 +1031,33 @@ then the net-new Privacy tab last.
         (`AiApiConfig` not exported by `aiService.ts`) is the
         already-flagged, pre-existing, harmless one from before this
         session, confirmed unchanged.
-  - [ ] **E2c — Upgrade path for non-top-tier active subscribers.** Once
-        E2a is fixed, a Starter/Creator subscriber will correctly get a
-        "Manage Subscription" section — but should *also* still see an
-        upgrade option (to the tier(s) above their own, not the full
-        grid including tiers below what they already have). Filter
-        `PricingGrid` by `sort_order` above the user's current plan
-        rather than showing all 4 unconditionally.
+  - [x] **E2c — Upgrade path for non-top-tier active subscribers.**
+        Previously `!isSubscribed && !isCanceled` hid the upgrade grid
+        completely for ANY active paid subscriber — a Starter or Creator
+        subscriber had no way to see or start an upgrade to a higher tier
+        from this page at all, only "Manage Subscription" (refresh/
+        cancel). Added an optional `minSortOrder` prop to `PricingGrid`
+        (defaults to unset, so every pre-existing caller keeps its
+        original unfiltered behavior) — filters the rendered plans to
+        `sort_order > minSortOrder` just before the render loop, leaving
+        the component's own fetched `plans` state untouched in case
+        anything else in it ever needs the full list. `SettingsPage.tsx`
+        now shows the grid when either unsubscribed (full grid, unchanged)
+        or subscribed-but-not-on-the-top-tier (filtered to
+        `currentPlan.sort_order`), hidden only when canceled (unchanged)
+        or already on the top tier — computed from the actual `plans`
+        data's max `sort_order` rather than hardcoding `'pro'` as "the
+        top tier," so a 5th tier added later wouldn't need a matching
+        code change here. Verified `paypalPlan`/`isPro` resolution inside
+        `PricingGrid` (used for wiring the one real PayPal-checkout
+        button) stays correct under filtering: both read from the
+        component's full unfiltered `plans` list, not the filtered
+        render list, and Pro — the only plan with a real `paypal_plan_id`
+        today — is mathematically guaranteed to appear in the filtered
+        set whenever the grid is shown to a non-top-tier subscriber,
+        since it's always the highest `sort_order`. Verified with
+        `tsc --noEmit` and a full `npm run build` — both clean, same
+        pre-existing unrelated warning as before, nothing new.
 
 - [ ] **E3 — Account tab**, ordered easy → hard, deliberately saving the
       destructive one for last:
