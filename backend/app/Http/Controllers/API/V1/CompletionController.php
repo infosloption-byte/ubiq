@@ -144,6 +144,61 @@ class CompletionController extends Controller
     }
 
     /**
+     * D8 fix (PLAN_SYSTEM_TASKS.md Phase D): previously every endpoint below
+     * trusted whatever `api_keys` the client sent in the request body —
+     * meaning the browser had to hold each provider's raw secret in
+     * localStorage indefinitely and re-transmit it on every single AI call.
+     * Provider secrets are now resolved from encrypted server-side storage
+     * (see App\Models\UserAiKey) instead; any google/openai/openrouter/
+     * mistral value the client still sends is silently ignored, not an
+     * error — old frontend builds or cached JS keep working, they just stop
+     * being the source of truth.
+     *
+     * `ollama_url` is deliberately NOT resolved here — it's a per-request
+     * proxy target (which Ollama instance to call *this time*), not a
+     * bearer-token secret, and the backend has no way to know it without
+     * the client sending it (a user might run local Ollama in one session
+     * and point at a remote box in another). It keeps passing straight
+     * through from the client, unchanged from before this fix.
+     */
+    private function mergeServerKeys($user, array $clientSuppliedKeys = []): array
+    {
+        $serverKeys = \App\Models\UserAiKey::where('user_id', $user->id)
+            ->whereIn('provider', ['google', 'openai', 'openrouter', 'mistral'])
+            ->get()
+            ->mapWithKeys(fn ($row) => [$row->provider => $row->value]) // decrypted transiently via the model cast
+            ->toArray();
+
+        return array_merge(
+            ['ollama_url' => $clientSuppliedKeys['ollama_url'] ?? null],
+            $serverKeys
+        );
+    }
+
+    /**
+     * D8 fix: bumps last_used_at for whichever stored provider key actually
+     * served this request — lets a user tell, from the settings UI, whether
+     * a key they suspect is compromised is still actively being used.
+     * Ollama has no stored key to touch (see mergeServerKeys above).
+     */
+    private function touchKeyUsage($user, ?array $providerConfig): void
+    {
+        if (!$providerConfig) return;
+
+        $providerKeyName = match ($providerConfig['provider'] ?? null) {
+            'gemini' => 'google',
+            'openai', 'openrouter', 'mistral' => $providerConfig['provider'],
+            default => null,
+        };
+
+        if ($providerKeyName) {
+            \App\Models\UserAiKey::where('user_id', $user->id)
+                ->where('provider', $providerKeyName)
+                ->update(['last_used_at' => now()]);
+        }
+    }
+
+    /**
      * Helper: Map model ID to API Endpoint & Key
      */
     private function getProviderConfig($modelId, $apiKeys)
@@ -264,11 +319,12 @@ class CompletionController extends Controller
         }
 
         $model   = $request->model;
-        $apiKeys = $request->input('api_keys', []);
+        $apiKeys = $this->mergeServerKeys($request->user(), $request->input('api_keys', [])); // D8 fix
         if ($guardResponse = $this->guardModelAccess($request->user(), $model, $apiKeys)) {
             return $guardResponse;
         }
         $config  = $this->getProviderConfig($model, $apiKeys);
+        $this->touchKeyUsage($request->user(), $config); // D8 fix
 
         if (!$config) {
             return response()->json(['error' => "Configuration failed for model: {$model}. Please check your API keys."], 400);
@@ -561,11 +617,12 @@ SYSTEMPROMPT;
         }
 
         $model   = $request->model ?? ($user->preferences->preferred_model ?? 'codellama:7b');
-        $apiKeys = $request->input('api_keys', []);
+        $apiKeys = $this->mergeServerKeys($user, $request->input('api_keys', [])); // D8 fix
         if ($guardResponse = $this->guardModelAccess($user, $model, $apiKeys)) {
             return $guardResponse;
         }
         $config  = $this->getProviderConfig($model, $apiKeys);
+        $this->touchKeyUsage($user, $config); // D8 fix
 
         if (!$config) return response()->json(['error' => 'Missing API Key for selected model'], 400);
 
@@ -645,12 +702,13 @@ SYSTEMPROMPT;
         }
 
         $model   = $request->model ?? 'gpt-3.5-turbo';
-        $apiKeys = $request->input('api_keys', []);
+        $apiKeys = $this->mergeServerKeys($user, $request->input('api_keys', [])); // D8 fix
         if ($guardResponse = $this->guardModelAccess($user, $model, $apiKeys)) {
             return $guardResponse;
         }
 
         $config = $this->getProviderConfig($model, $apiKeys);
+        $this->touchKeyUsage($user, $config); // D8 fix
         if (!$config) {
             return response()->json(['error' => 'Missing API Key'], 400);
         }
@@ -734,7 +792,7 @@ SYSTEMPROMPT;
         }
 
         $model       = $request->model ?? 'gpt-4o';
-        $apiKeys     = $request->input('api_keys', []);
+        $apiKeys     = $this->mergeServerKeys($user, $request->input('api_keys', [])); // D8 fix
         if ($guardResponse = $this->guardModelAccess($user, $model, $apiKeys)) {
             return $guardResponse;
         }
@@ -742,6 +800,7 @@ SYSTEMPROMPT;
         $prompt      = "Review the following {$request->language} code for " . implode(', ', $reviewTypes) . ":\n\n{$request->code}\n\nProvide a detailed review with specific suggestions.";
 
         $config = $this->getProviderConfig($model, $apiKeys);
+        $this->touchKeyUsage($user, $config); // D8 fix
         if (!$config) return response()->json(['error' => 'Missing API Key'], 400);
 
         try {
@@ -797,13 +856,14 @@ SYSTEMPROMPT;
         }
 
         $model   = $request->model ?? 'gpt-4o';
-        $apiKeys = $request->input('api_keys', []);
+        $apiKeys = $this->mergeServerKeys($user, $request->input('api_keys', [])); // D8 fix
         if ($guardResponse = $this->guardModelAccess($user, $model, $apiKeys)) {
             return $guardResponse;
         }
         $prompt  = "Debug this {$request->language} code that produces the following error:\n\nError: {$request->error_message}\n\nCode:\n{$request->code}\n\nExplain the issue and provide a fix.";
 
         $config = $this->getProviderConfig($model, $apiKeys);
+        $this->touchKeyUsage($user, $config); // D8 fix
         if (!$config) return response()->json(['error' => 'Missing API Key'], 400);
 
         try {
@@ -858,13 +918,14 @@ SYSTEMPROMPT;
         }
 
         $model   = $request->model ?? 'gpt-4o';
-        $apiKeys = $request->input('api_keys', []);
+        $apiKeys = $this->mergeServerKeys($user, $request->input('api_keys', [])); // D8 fix
         if ($guardResponse = $this->guardModelAccess($user, $model, $apiKeys)) {
             return $guardResponse;
         }
         $prompt  = "Explain this {$request->language} code in detail:\n\n{$request->code}";
 
         $config = $this->getProviderConfig($model, $apiKeys);
+        $this->touchKeyUsage($user, $config); // D8 fix
         if (!$config) return response()->json(['error' => 'Missing API Key'], 400);
 
         try {

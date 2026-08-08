@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Layout from '../components/Layout';
 import { useAuthStore } from '../stores/authStore';
-import { userAPI, authAPI, subscriptionApi } from '../services/api';
+import { userAPI, authAPI, subscriptionApi, aiKeysAPI } from '../services/api';
 import PricingGrid from '../components/PricingGrid';
 import StorageUsage from '../components/StorageUsage';
 import PlanUsageWidget from '../components/PlanUsageWidget';
@@ -13,6 +13,22 @@ import {
   ShieldCheck, AlertTriangle, XCircle
 } from 'lucide-react';
 
+// D8 fix (PLAN_SYSTEM_TASKS.md Phase D): the three providers this UI has
+// ever actually collected and that the backend supports. `grok` used to be
+// listed here too but was never wired to anything server-side — Completion
+// Controller has no xAI/Grok branch — so it was a decoy field that silently
+// did nothing; removed rather than "migrated" to a backend that doesn't
+// exist. OpenAI IS supported server-side (CompletionController checks
+// `apiKeys['openai']`) but was never collectible from any settings UI in
+// this codebase — a pre-existing gap, not something this fix invents;
+// flagging it rather than quietly adding a new provider as a side effect
+// of a security fix.
+const AI_KEY_PROVIDERS: Array<{ id: 'openrouter' | 'mistral' | 'google'; label: string; link: string }> = [
+  { id: 'openrouter', label: 'OpenRouter',    link: 'https://openrouter.ai/keys' },
+  { id: 'mistral',    label: 'Mistral AI',    link: 'https://console.mistral.ai/' },
+  { id: 'google',     label: 'Google Gemini', link: 'https://aistudio.google.com/app/apikey' },
+];
+
 export default function SettingsPage() {
   const { user, setUser } = useAuthStore();
   const navigate = useNavigate();
@@ -20,7 +36,13 @@ export default function SettingsPage() {
   const [saving, setSaving] = useState(false);
   const [successMsg, setSuccessMsg] = useState('');
 
-  const [apiKeys, setApiKeys] = useState({ openrouter: '', grok: '', mistral: '', google: '' });
+  // D8 fix: `configuredKeys` holds only what the server is willing to give
+  // back — a masked preview per provider, never the real value. `keyInputs`
+  // holds draft text the user is currently typing, kept entirely separate
+  // so there's no path (accidental or otherwise) for a real secret to end
+  // up echoed back into a text field after being saved.
+  const [configuredKeys, setConfiguredKeys] = useState<Record<string, { masked: string; updated_at?: string; last_used_at?: string | null }>>({});
+  const [keyInputs, setKeyInputs] = useState<Record<string, string>>({ openrouter: '', mistral: '', google: '' });
   const [showKeys, setShowKeys] = useState<Record<string, boolean>>({});
   const [editorSettings, setEditorSettings] = useState({
     fontSize: 14, theme: 'vs-dark', wordWrap: 'on',
@@ -43,11 +65,26 @@ export default function SettingsPage() {
     ? Math.max(0, Math.ceil((trialEndsAt.getTime() - Date.now()) / 86400000))
     : 0;
 
-  useEffect(() => {
-    const storedKeys = localStorage.getItem('ubiq_api_keys');
-    if (storedKeys) {
-      try { setApiKeys(prev => ({ ...prev, ...JSON.parse(storedKeys) })); } catch (e) {}
+  // D8 fix: fetches masked previews only — see aiKeysAPI/AiKeyController.
+  // Pulled out as its own function (not inline in the effect) so
+  // handleSaveKeys/handleRemoveKey can re-call it after a change without
+  // duplicating the fetch-and-index logic.
+  const loadAiKeys = async () => {
+    try {
+      const res = await aiKeysAPI.list();
+      const byProvider: Record<string, { masked: string; updated_at?: string; last_used_at?: string | null }> = {};
+      (res.data?.keys || []).forEach((k: any) => { byProvider[k.provider] = k; });
+      setConfiguredKeys(byProvider);
+    } catch (e) {
+      console.error('Failed to load AI key status', e);
     }
+  };
+
+  useEffect(() => {
+    loadAiKeys();
+  }, []);
+
+  useEffect(() => {
     if (user?.preferences) {
       const prefs = user.preferences.editor_settings || {};
       setEditorSettings({
@@ -102,13 +139,46 @@ export default function SettingsPage() {
     }
   };
 
-  const handleSaveKeys = () => {
+  // D8 fix: previously wrote the raw `apiKeys` object straight into
+  // localStorage. Now PUTs each non-empty draft to the encrypted backend
+  // (one request per changed provider — most saves are a single key
+  // anyway, and Promise.all keeps a multi-key save no slower than before).
+  // Drafts are cleared and configuredKeys re-fetched afterward, so the
+  // input immediately reflects the new masked value rather than the raw
+  // text the user just typed.
+  const handleSaveKeys = async () => {
+    const toSave = Object.entries(keyInputs).filter(([, value]) => value.trim().length > 0);
+    if (toSave.length === 0) return;
+
     setSaving(true);
-    setTimeout(() => {
-      localStorage.setItem('ubiq_api_keys', JSON.stringify(apiKeys));
-      showSuccess("API Keys saved securely to browser.");
+    try {
+      await Promise.all(
+        toSave.map(([provider, value]) => aiKeysAPI.update(provider as 'openrouter' | 'mistral' | 'google', value.trim()))
+      );
+      setKeyInputs({ openrouter: '', mistral: '', google: '' });
+      await loadAiKeys();
+      showSuccess('API keys saved securely.');
+    } catch (e: any) {
+      alert(e?.response?.data?.error || 'Failed to save one or more keys. Double-check the value and try again.');
+    } finally {
       setSaving(false);
-    }, 500);
+    }
+  };
+
+  // D8 fix: actual revocation (DELETE, not a soft-delete) — nothing lingers
+  // server-side once removed here.
+  const handleRemoveKey = async (provider: 'openrouter' | 'mistral' | 'google') => {
+    if (!window.confirm(`Remove your ${provider} key? AI requests using this provider will stop working until you add a new one.`)) return;
+    setSaving(true);
+    try {
+      await aiKeysAPI.remove(provider);
+      await loadAiKeys();
+      showSuccess('Key removed.');
+    } catch (e) {
+      alert('Failed to remove key.');
+    } finally {
+      setSaving(false);
+    }
   };
 
   const handleSaveEditor = async () => {
@@ -147,27 +217,36 @@ export default function SettingsPage() {
     </button>
   );
 
-  const KeyInput = ({ id, label, link }: any) => (
-    <div className="group">
-      <div className="flex justify-between items-baseline mb-1.5">
-        <label className="text-xs font-bold text-slate-400 uppercase tracking-wide">{label}</label>
-        <a href={link} target="_blank" rel="noreferrer" className="text-[10px] text-indigo-500 hover:text-indigo-300 hover:underline">Get Key ↗</a>
+  const KeyInput = ({ id, label, link }: { id: 'openrouter' | 'mistral' | 'google'; label: string; link: string }) => {
+    const existing = configuredKeys[id];
+    return (
+      <div className="group">
+        <div className="flex justify-between items-baseline mb-1.5">
+          <label className="text-xs font-bold text-slate-400 uppercase tracking-wide">{label}</label>
+          <a href={link} target="_blank" rel="noreferrer" className="text-[10px] text-indigo-500 hover:text-indigo-300 hover:underline">Get Key ↗</a>
+        </div>
+        {existing && (
+          <div className="flex items-center justify-between mb-1.5 text-xs font-mono">
+            <span className="text-slate-500">Configured: <span className="text-slate-300">{existing.masked}</span></span>
+            <button onClick={() => handleRemoveKey(id)} className="text-red-400 hover:text-red-300 text-[10px] font-bold uppercase tracking-wide">Remove</button>
+          </div>
+        )}
+        <div className="relative">
+          <input
+            type={showKeys[id] ? "text" : "password"}
+            value={keyInputs[id] ?? ''}
+            onChange={(e) => setKeyInputs({ ...keyInputs, [id]: e.target.value })}
+            placeholder={existing ? "Enter a new key to replace it" : "sk-..."}
+            className="w-full bg-[#050509] border border-white/10 rounded-lg pl-3 pr-10 py-2.5 text-sm text-slate-200 focus:border-indigo-500 outline-none font-mono transition-all"
+          />
+          <button onClick={() => setShowKeys(prev => ({ ...prev, [id]: !prev[id] }))}
+            className="absolute right-3 top-2.5 text-slate-500 hover:text-white transition-colors">
+            {showKeys[id] ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+          </button>
+        </div>
       </div>
-      <div className="relative">
-        <input
-          type={showKeys[id] ? "text" : "password"}
-          value={apiKeys[id as keyof typeof apiKeys]}
-          onChange={(e) => setApiKeys({ ...apiKeys, [id]: e.target.value })}
-          placeholder="sk-..."
-          className="w-full bg-[#050509] border border-white/10 rounded-lg pl-3 pr-10 py-2.5 text-sm text-slate-200 focus:border-indigo-500 outline-none font-mono transition-all"
-        />
-        <button onClick={() => setShowKeys(prev => ({ ...prev, [id]: !prev[id] }))}
-          className="absolute right-3 top-2.5 text-slate-500 hover:text-white transition-colors">
-          {showKeys[id] ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-        </button>
-      </div>
-    </div>
-  );
+    );
+  };
 
   // ── Billing Section subcomponents ──────────────────────────────────────────
   const ProStatusBadge = () => {
@@ -223,18 +302,21 @@ export default function SettingsPage() {
                     <h2 className="text-xl font-bold text-white mb-2">Manage API Keys</h2>
                     <div className="bg-blue-500/10 border border-blue-500/20 p-4 rounded-lg">
                       <h3 className="text-blue-400 font-bold text-sm mb-1 flex items-center gap-2"><Key className="w-4 h-4"/> Bring Your Own Key</h3>
-                      <p className="text-xs text-slate-400 leading-relaxed">Keys are stored locally in your browser for AI features.</p>
+                      {/* D8 fix: was "Keys are stored locally in your browser" —
+                          no longer true, and no longer the safer claim anyway.
+                          Keys are now encrypted at rest server-side and never
+                          sent back to the browser after you save them. */}
+                      <p className="text-xs text-slate-400 leading-relaxed">Keys are encrypted and stored on our servers for AI features — never sent back to your browser after you save them.</p>
                     </div>
                   </div>
                   <div className="space-y-5">
-                    <KeyInput id="openrouter" label="OpenRouter"   link="https://openrouter.ai/keys" />
-                    <KeyInput id="mistral"    label="Mistral AI"   link="https://console.mistral.ai/" />
-                    <KeyInput id="google"     label="Google Gemini" link="https://aistudio.google.com/app/apikey" />
-                    <KeyInput id="grok"       label="xAI (Grok)"   link="https://console.x.ai/" />
+                    {AI_KEY_PROVIDERS.map(({ id, label, link }) => (
+                      <KeyInput key={id} id={id} label={label} link={link} />
+                    ))}
                   </div>
                   <div className="pt-6 border-t border-white/5">
                     <button onClick={handleSaveKeys} disabled={saving} className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white px-6 py-2.5 rounded-lg text-sm font-bold transition-all">
-                      {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />} Save Keys Locally
+                      {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />} Save Keys
                     </button>
                   </div>
                 </div>

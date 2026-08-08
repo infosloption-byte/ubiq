@@ -609,11 +609,16 @@ export default function ProjectEditorPage() {
                             });
                             if (text.length < 5) { resolve({ items: [] }); return; }
 
-                            const storedKeys = localStorage.getItem('ubiq_api_keys');
-                            const apiKeys = storedKeys ? JSON.parse(storedKeys) : {};
-                            // D3 FIX: read aiModeRef.current, not the `aiMode` closed over at
-                            // registration time — this provider now lives for the whole page
-                            // session, so it must see mode changes made after it was created.
+                            // D8 fix (PLAN_SYSTEM_TASKS.md Phase D): previously
+                            // read google/openai/openrouter/mistral straight out
+                            // of localStorage here and sent them with every
+                            // completion request. The backend endpoint this hits
+                            // (CompletionController::complete()) now resolves
+                            // those from encrypted server-side storage itself —
+                            // this provider only needs to still send ollama_url,
+                            // which is a per-request connection target, not a
+                            // secret, and was never part of that migration.
+                            const apiKeys: Record<string, string> = {};
                             if (aiModeRef.current === 'local') {
                                 apiKeys['ollama_url'] = localStorage.getItem('ubiq_local_url') || 'http://localhost:11434';
                             } else if (aiModeRef.current === 'remote') {

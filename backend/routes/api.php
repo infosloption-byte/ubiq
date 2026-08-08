@@ -15,6 +15,7 @@ use App\Http\Controllers\API\V1\PlanController;
 use App\Http\Controllers\API\V1\GitController;
 use App\Http\Controllers\API\V1\TerminalController;
 use App\Http\Controllers\API\V1\PayPalController;
+use App\Http\Controllers\API\V1\AiKeyController; // D8 fix — PLAN_SYSTEM_TASKS.md Phase D
 use App\Http\Controllers\OllamaProxyController;
 
 // ── Unauthenticated fallback ───────────────────────────────────────────────
@@ -174,6 +175,14 @@ Route::prefix('v1')->group(function () {
             Route::get('/user/stats',        [UsageController::class, 'stats']);
             Route::get('/user/usage',        [UsageController::class, 'index']);
             Route::get('/user/plan-usage',   [UsageController::class, 'planUsage']);
+
+            // D8 fix (PLAN_SYSTEM_TASKS.md Phase D): BYOK provider secrets,
+            // encrypted server-side — see AiKeyController. Never returns raw
+            // values, only masked previews; the secret itself never travels
+            // back to the browser after the initial PUT.
+            Route::get('/ai-keys',             [AiKeyController::class, 'index']);
+            Route::put('/ai-keys/{provider}',  [AiKeyController::class, 'update']);
+            Route::delete('/ai-keys/{provider}', [AiKeyController::class, 'destroy']);
         });
     });
 });

@@ -178,6 +178,23 @@ export const aiAPI = {
         }),
 };
 
+// D8 fix (PLAN_SYSTEM_TASKS.md Phase D): BYOK provider secrets now live
+// server-side, encrypted, via App\Models\UserAiKey — never in localStorage.
+// `list()` and `update()` only ever return a masked preview
+// ("••••••4a1f"), never the raw value; there's no endpoint that returns a
+// usable secret back to the browser after the initial PUT. Deliberately
+// covers only google/openai/openrouter/mistral — Ollama URLs (local/remote)
+// are still a per-request client-supplied connection target, not a secret,
+// and keep going through aiAPI's own `api_keys.ollama_url` payloads as
+// before; see CompletionController::mergeServerKeys() on the backend.
+export const aiKeysAPI = {
+    list: () => api.get('/ai-keys'),
+    update: (provider: 'google' | 'openai' | 'openrouter' | 'mistral', value: string) =>
+        api.put(`/ai-keys/${provider}`, { value }),
+    remove: (provider: 'google' | 'openai' | 'openrouter' | 'mistral') =>
+        api.delete(`/ai-keys/${provider}`),
+};
+
 export const chatAPI = {
     getSessions: (params?: { project_id?: number }) => api.get('/chat/sessions', { params }),
     createSession: (data: { title?: string; project_id?: number }) => api.post('/chat/sessions', data),

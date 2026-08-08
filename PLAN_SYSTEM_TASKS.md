@@ -70,12 +70,14 @@ first) and security, not by discovery order.
       guarded — two in-flight `fileAPI.update` calls can resolve out of
       order, with the later-arriving response's content winning regardless
       of which was actually sent last.
-- [ ] D8 — **[security flag, informational]** AI provider keys and the
-      remote Ollama URL are stored in plaintext `localStorage`
-      (`ubiq_api_keys`, `ubiq_ollama_url`) and read directly into request
-      payloads. No known active exploit path in this codebase (no injected
-      third-party scripts), but flagging since it's XSS-exposed by
-      definition. No code change planned unless requested.
+- [x] D8 — **[security]** ~~AI provider keys and the remote Ollama URL are
+      stored in plaintext `localStorage`~~ Fixed: google/openai/openrouter/
+      mistral BYOK secrets now live server-side, encrypted at rest, via
+      `App\Models\UserAiKey` — never round-tripped back to the browser after
+      the initial save. Ollama URLs (local/remote) deliberately left as
+      client-supplied per-request connection targets, not secrets — see the
+      2026-08-07 decision-log entry for the full reasoning. Originally
+      scoped as informational-only; upgraded to an actual fix per request.
 - [x] D5 — Blocking `alert()` used for "Connection URL updated!", "Please
       open a file," "Select some code first." — jarring UX, not a toast.
 - [x] D6 — `closeTab` always reactivates the *last* tab in the list rather
@@ -717,3 +719,109 @@ feature_key gets renamed, a limit default changes, a phase gets reordered.)
   codebase, no code change planned unless explicitly requested. Leaving it
   open on the checklist as a standing awareness item rather than closing it
   out with no actual change.
+
+- 2026-08-07 — D8 upgraded from "flag" to "fix" per request: BYOK provider
+  secrets now stored server-side, encrypted at rest, never round-tripped
+  back to the browser. What follows is everything touched, since this
+  ended up crossing 8 frontend files plus the backend, not just
+  `ProjectEditorPage.tsx`.
+
+  **Scoping decision, made before writing any code:** only google/openai/
+  openrouter/mistral — the actual bearer-token secrets — moved server-side.
+  Ollama URLs (local/remote) did NOT, on purpose. Tracing `aiService.ts`'s
+  `chatLocal`/`chatCloud` split showed the Laravel backend proxies even
+  "local" Ollama calls (`/api/ollama/chat`) to avoid mixed-content HTTPS→
+  HTTP blocking in the browser — meaning the backend needs to know *which*
+  Ollama instance to call on every single request, and that answer is
+  inherently per-request, per-user-choice (someone might run local Ollama
+  one session and point at a remote box the next), not a fixed
+  account-level fact the way an API key is. There's no "the server-side
+  Ollama URL" to resolve the way there's now a "the server-side Google
+  key" — it has to keep coming from the client. Also: a connection target
+  isn't a bearer-token secret in the first place; encrypting it server-side
+  wouldn't reduce its exposure since it still transits per-request either
+  way. GitHub PATs (`SourceControlPanel.tsx`, stored in the very same
+  `ubiq_api_keys` blob) are a related-but-separate finding, deliberately
+  NOT touched here — same storage vulnerability, different secret
+  category, wasn't part of D8's original scope. Flagging, not silently
+  folding in.
+
+  **Backend** — new migration `2026_08_07_000001_create_user_ai_keys_table`
+  creates `user_ai_keys` (user_id, provider, `value` — encrypted at rest via
+  the model cast below, last_used_at, unique on [user_id, provider]).
+  `App\Models\UserAiKey`: `protected $casts = ['value' => 'encrypted']` is
+  what actually does the AES-256-CBC encrypt/decrypt (Laravel's Crypt
+  facade, keyed by APP_KEY) — transparent on read/write, never touch the
+  raw column directly. Added `$hidden = ['value']` on the model too, as a
+  second guardrail against some future endpoint accidentally
+  `return`-ing the model directly and serializing the decrypted value.
+  `User::aiKeys()` hasMany relation added for convenience. New
+  `AiKeyController` (`index`/`update`/`destroy`) is the only place a raw
+  key is ever written from now on — `index()`/`update()` both return a
+  masked preview only (`mask()`: last 4 characters visible, dot-count
+  capped at 20 so a very long key doesn't produce an absurd string of
+  bullets), never the real value; `destroy()` is a genuine DELETE, not a
+  soft-delete, so revoking a key leaves nothing behind server-side either.
+  Routes added under the same authenticated group as `/user/preferences`.
+
+  `CompletionController` — added `mergeServerKeys($user, $clientKeys)`:
+  builds the `$apiKeys` array used by `hasByoKeyFor`/`getProviderConfig`
+  from `UserAiKey` rows instead of the request body; still takes
+  `ollama_url` from whatever the client sent (see scoping decision above),
+  but google/openai/openrouter/mistral from the client are now silently
+  ignored, not an error — an old cached frontend build still sending them
+  just doesn't break. Added `touchKeyUsage($user, $config)`, bumping
+  `last_used_at` for whichever stored key actually served the request, so
+  a user can tell from Settings whether a key they suspect is compromised
+  is still active. Rewired across **all 6 AI endpoints** in this
+  controller (`generate`, `chat`, `complete`, `review`, `debug`,
+  `explain`) — each now calls `mergeServerKeys()` in place of the old
+  `$request->input('api_keys', [])`, and `touchKeyUsage()` right after
+  `getProviderConfig()`. No `vendor/`/Composer available in this sandbox
+  (packagist.org isn't on the allowed-domains list) so no full Laravel
+  boot test was possible — installed a real PHP 8.3 CLI via apt instead
+  and ran `php -l` against every touched file; all clean. Recommend a
+  real `php artisan migrate` + manual smoke test of one BYOK provider
+  before this reaches production.
+
+  **Frontend, write-sites** (where keys are actually entered) —
+  `SettingsPage.tsx` and `SettingsDialog.tsx` (two separate settings UIs
+  that both did this) rebuilt around `aiKeysAPI` (`list`/`update`/
+  `remove`, added to `services/api.ts`): `configuredKeys` state holds only
+  the masked preview fetched from the server, `keyInputs` holds draft text
+  the user is currently typing — kept in two separate state slots
+  specifically so there's no path, accidental or otherwise, for a real
+  secret to get echoed back into a text field after being saved. Both
+  dropped the `grok` field entirely rather than "migrating" it — it was
+  never wired to any backend provider support (`CompletionController` has
+  no xAI/Grok branch), a pre-existing decoy field that did nothing even
+  before this fix. Also surfaced, not fixed: there's no field anywhere in
+  either settings UI for an OpenAI key, even though the backend has always
+  supported one (`apiKeys['openai']` in `getProviderConfig`) — a
+  pre-existing product gap, not something to add as a side effect of a
+  security patch.
+
+  **Frontend, read-sites** (where keys were being attached to requests) —
+  `ModelSelector.tsx` needed a real migration, not just deletion: it uses
+  key presence to decide whether to show a model as locked. Replaced its
+  raw-value `apiKeys` state with `configuredProviders` (a `Set<string>`
+  of provider names, fetched from the same masked endpoint) and simplified
+  `isKeyMissing` to a presence check; dropped the `'xAI': 'grok'` map entry
+  for the same reason `grok` was dropped from Settings. `aiService.ts`
+  (`chatCloud`) and `ProjectEditorPage.tsx`'s Monaco inline-completion
+  provider both had dead-weight localStorage reads removed outright — the
+  backend endpoints they call now resolve secrets server-side regardless
+  of what's sent, so assembling them client-side was pure waste; also
+  fixed a stale comment in `aiService.ts` that still described the old
+  behavior. Checked `ChatInterface.tsx` and `AiGeneratorModal.tsx`
+  carefully and confirmed **no change needed** in either — both only ever
+  handled Ollama URLs (never assembled google/openai/openrouter/mistral in
+  the first place), consistent with the scoping decision above.
+
+  Verified with `npx tsc --noEmit` across the whole frontend — zero errors
+  — and `php -l` across every touched backend file — all clean. Full
+  repo-wide grep for `ubiq_api_keys` afterward confirms only
+  `SourceControlPanel.tsx` still references it (GitHub PAT, deliberately
+  out of scope, flagged above).
+
+  Phase D is now fully closed — D0a through D8, nothing left open.

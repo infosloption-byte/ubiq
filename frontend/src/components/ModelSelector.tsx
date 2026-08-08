@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
-import { aiAPI, userAPI, authAPI } from '../services/api';
+import { aiAPI, userAPI, authAPI, aiKeysAPI } from '../services/api';
 import { useAuthStore } from '../stores/authStore';
 import { 
   ChevronUpIcon, ChevronDownIcon, CheckIcon, CpuChipIcon, ArrowPathIcon, 
@@ -30,7 +30,12 @@ export default function ModelSelector({ aiMode, selectedModel, onSelectModel, me
   const [isOpen, setIsOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [ollamaError, setOllamaError] = useState<string | null>(null);
-  const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
+  // D8 fix (PLAN_SYSTEM_TASKS.md Phase D): previously held the *raw* key
+  // values read straight out of localStorage, just to check `!!value`. Now
+  // holds only which providers are configured — fetched from the masked
+  // backend endpoint, which never returns the actual secret at all. This
+  // component never needed the real value, only a yes/no per provider.
+  const [configuredProviders, setConfiguredProviders] = useState<Set<string>>(new Set());
   const dropdownRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -46,13 +51,18 @@ export default function ModelSelector({ aiMode, selectedModel, onSelectModel, me
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
-  // Load API keys from local storage
+  // D8 fix: fetches only which providers are configured (masked list),
+  // reloaded every time the dropdown opens to catch changes made in
+  // Settings since it was last opened — same refresh trigger as before.
   useEffect(() => {
-    const stored = localStorage.getItem('ubiq_api_keys');
-    if (stored) {
-        try { setApiKeys(JSON.parse(stored)); } catch (e) {}
-    }
-  }, [isOpen]); // Reload keys every time dropdown opens to catch updates
+    if (!isOpen) return;
+    aiKeysAPI.list()
+      .then(res => {
+        const providers = new Set<string>((res.data?.keys || []).map((k: any) => k.provider));
+        setConfiguredProviders(providers);
+      })
+      .catch(e => console.error('Failed to load AI key status', e));
+  }, [isOpen]);
 
   // Fetch models whenever aiMode changes
   useEffect(() => {
@@ -180,15 +190,21 @@ export default function ModelSelector({ aiMode, selectedModel, onSelectModel, me
 
   const isKeyMissing = (provider: string) => {
       if (aiMode === 'local') return false;
-      // Map 'xAI' -> 'grok', 'Mistral' -> 'mistral', etc. matching SettingsPage keys
-      const keyMap: Record<string, string> = { 
-          'xAI': 'grok', 
-          'Mistral': 'mistral', 
-          'OpenRouter': 'openrouter', 
-          'Google': 'google' 
+      // D8 fix: was `{ 'xAI': 'grok', ... }` — 'grok' was removed from the
+      // settings UI (see SettingsPage.tsx D8 note) since it was never wired
+      // to any backend provider support in CompletionController; there's no
+      // key concept for it to check, so 'xAI' is intentionally left out of
+      // this map now. Net effect for an 'xAI'-provider model (if one is
+      // ever actually returned by aiAPI.getModels()) is unchanged from
+      // before: it renders as "not missing" either way, since the old grok
+      // field never gated anything real either.
+      const keyMap: Record<string, string> = {
+          'Mistral': 'mistral',
+          'OpenRouter': 'openrouter',
+          'Google': 'google'
       };
       const keyName = keyMap[provider];
-      return keyName && (!apiKeys[keyName] || apiKeys[keyName].trim() === '');
+      return !!keyName && !configuredProviders.has(keyName);
   };
 
   const ModelOption = ({ model }: { model: Model }) => {

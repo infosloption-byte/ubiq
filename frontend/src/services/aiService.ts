@@ -8,8 +8,9 @@ export interface ChatMessage {
 }
 
 // Unified config passed from the UI layer.
-// Covers all three connection modes:
-//   1. Cloud BYOK  — api_keys contains provider keys (handled by Laravel backend)
+//   1. Cloud BYOK  — D8 fix: provider keys are resolved server-side from
+//      encrypted storage now (see CompletionController::mergeServerKeys);
+//      nothing provider-secret related is ever sent through this field.
 //   2. Local Ollama — api_keys.ollama_url = 'http://localhost:11434'
 //   3. Remote Ollama — api_keys.ollama_url = 'https://my-ec2.example.com:11434'
 export interface AiApiConfig {
@@ -114,10 +115,12 @@ async function chatCloud(message: string, history: ChatMessage[], model: string,
     const apiUrl = import.meta.env.VITE_API_URL;
     const token = useAuthStore.getState().token;
 
-    // Retrieve BYOK keys from localStorage (saved by SettingsPage)
-    const storedKeys = localStorage.getItem('ubiq_api_keys');
-    const apiKeys = storedKeys ? JSON.parse(storedKeys) : {};
-
+    // D8 fix (PLAN_SYSTEM_TASKS.md Phase D): previously read BYOK keys from
+    // localStorage and sent them here. The backend endpoint this calls
+    // (CompletionController::chat(), routed at /chat/message) now resolves
+    // google/openai/openrouter/mistral from encrypted server-side storage
+    // itself and ignores whatever this field contains — so there's nothing
+    // left to assemble. `api_keys` is omitted entirely below.
     try {
         const response = await axios.post(`${apiUrl}/chat/message`, {
             model: model, 
@@ -125,8 +128,7 @@ async function chatCloud(message: string, history: ChatMessage[], model: string,
                 ...history,
                 { role: 'user', content: message }
             ],
-            project_id: projectId,
-            api_keys: apiKeys 
+            project_id: projectId
         }, {
             headers: { 
                 Authorization: `Bearer ${token}`,
