@@ -58,7 +58,14 @@ export default function ProjectEditorPage() {
 
     const [activeSideTab, setActiveSideTab] = useState<'files' | 'git'>('files');
     const [rightPanelContent, setRightPanelContent] = useState<'chat' | 'runner' | null>('chat');
-    const [chatWidth, setChatWidth] = useState(400);
+    // D7 FIX: previously always `useState(400)` — reset to the default on
+    // every reload. Reads any persisted width, bounds-checked against the
+    // same 300–800 range the resize handler enforces (guards against a
+    // stale/corrupted localStorage value producing a broken layout).
+    const [chatWidth, setChatWidth] = useState(() => {
+        const saved = parseInt(localStorage.getItem('ubiq_chat_width') || '', 10);
+        return Number.isFinite(saved) && saved >= 300 && saved <= 800 ? saved : 400;
+    });
     const [isSandboxRunning, setIsSandboxRunning] = useState(false);
 
     const [project, setProject] = useState<any>(null);
@@ -100,7 +107,12 @@ export default function ProjectEditorPage() {
     // clicks, without each caller needing to know about `nextFile`.
     const [confirmDiscardModal, setConfirmDiscardModal] = useState<{ isOpen: boolean; message: string; onConfirm: () => void }>({ isOpen: false, message: '', onConfirm: () => {} });
 
-    const [sidebarWidth, setSidebarWidth] = useState(256);
+    // D7 FIX: same as chatWidth above — was `useState(256)` with no
+    // persistence, bounds-checked against the resize handler's 150–600 range.
+    const [sidebarWidth, setSidebarWidth] = useState(() => {
+        const saved = parseInt(localStorage.getItem('ubiq_sidebar_width') || '', 10);
+        return Number.isFinite(saved) && saved >= 150 && saved <= 600 ? saved : 256;
+    });
     const [isResizingSidebar, setIsResizingSidebar] = useState(false);
     const [isResizingChat, setIsResizingChat] = useState(false);
     const [showEditor, setShowEditor] = useState(true);
@@ -645,9 +657,25 @@ export default function ProjectEditorPage() {
         return () => { completionProviderDisposableRef.current?.dispose(); };
     }, []);
 
+    // D7 FIX: refs so `stopResizing` can read the *current* width at drag-end
+    // without needing sidebarWidth/chatWidth in its own dependency array —
+    // adding them there would tear down and re-add the window mousemove/
+    // mouseup listeners on every pixel of drag movement, not just once.
+    const sidebarWidthRef = useRef(sidebarWidth);
+    const chatWidthRef = useRef(chatWidth);
+    useEffect(() => { sidebarWidthRef.current = sidebarWidth; }, [sidebarWidth]);
+    useEffect(() => { chatWidthRef.current = chatWidth; }, [chatWidth]);
+
     const startResizingSidebar = useCallback(() => setIsResizingSidebar(true), []);
     const startResizingChat = useCallback(() => setIsResizingChat(true), []);
-    const stopResizing = useCallback(() => { setIsResizingSidebar(false); setIsResizingChat(false); }, []);
+    const stopResizing = useCallback(() => {
+        setIsResizingSidebar(false);
+        setIsResizingChat(false);
+        // D7 FIX: persist once, on drag-end, rather than on every mousemove
+        // tick during the drag — same end result, far fewer writes.
+        localStorage.setItem('ubiq_sidebar_width', String(sidebarWidthRef.current));
+        localStorage.setItem('ubiq_chat_width', String(chatWidthRef.current));
+    }, []);
     const resize = useCallback((e: MouseEvent) => {
         if (isResizingSidebar) { const w = e.clientX - 64; if (w > 150 && w < 600) setSidebarWidth(w); }
         if (isResizingChat) { const w = window.innerWidth - e.clientX; if (w > 300 && w < 800) setChatWidth(w); }

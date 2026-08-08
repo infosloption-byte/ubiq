@@ -80,7 +80,7 @@ first) and security, not by discovery order.
       open a file," "Select some code first." — jarring UX, not a toast.
 - [x] D6 — `closeTab` always reactivates the *last* tab in the list rather
       than the tab adjacent to the one just closed.
-- [ ] D7 — `sidebarWidth`/`chatWidth` aren't persisted to localStorage the
+- [x] D7 — `sidebarWidth`/`chatWidth` aren't persisted to localStorage the
       way open tabs are — resets on every reload.
 
 ---
@@ -690,3 +690,30 @@ feature_key gets renamed, a limit default changes, a phase gets reordered.)
   untouched — this fix only changes what happens when the tab you close is
   the one you're currently looking at. Verified with `tsc --noEmit` — zero
   errors. D7 next (panel widths not persisted across reloads).
+
+- 2026-08-06 — D7 complete. `sidebarWidth`/`chatWidth` were plain `useState(256)`/
+  `useState(400)` with zero persistence, unlike the tab list and active file
+  (`ubiq_tabs_${projectId}`, `ubiq_active_${projectId}`), which already
+  survived reloads. Deliberately used *global* keys (`ubiq_sidebar_width`,
+  `ubiq_chat_width`), not per-project ones — this is a layout preference
+  about how the person likes to work, not project data, so it should carry
+  across every project the same way editor font size or theme would, not
+  reset each time you open a different project. Both initial states now
+  read from localStorage via a lazy `useState(() => ...)` initializer,
+  bounds-checked against the same min/max the resize handler itself
+  enforces (150–600 for sidebar, 300–800 for chat) so a stale or hand-edited
+  localStorage value can't produce a broken/invisible panel. Persistence
+  writes happen once, in `stopResizing` (mouseup), not on every `resize()`
+  tick during the drag — added `sidebarWidthRef`/`chatWidthRef`, kept in
+  sync via their own tiny effects, specifically so `stopResizing` could read
+  the latest width without being added to its own dependency array (which
+  would otherwise tear down and re-add the window mousemove/mouseup
+  listeners on every pixel of drag movement, not just once per drag).
+  Verified with `tsc --noEmit` — zero errors.
+
+  Phase D checklist is now complete except **D8**, which was scoped from
+  the start as a security *flag* rather than a fix — plaintext AI
+  keys/Ollama URL in `localStorage`, no known active exploit path in this
+  codebase, no code change planned unless explicitly requested. Leaving it
+  open on the checklist as a standing awareness item rather than closing it
+  out with no actual change.
