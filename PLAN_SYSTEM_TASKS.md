@@ -887,19 +887,46 @@ then the net-new Privacy tab last.
 - [ ] **E2 — Billing & Plan tab**, split into three because (b) and (c)
       depend on (a) being correct first:
 
-  - [ ] **E2a — Fix subscription-tier-blind status logic (real bug, found
-        during this audit).** `isTrialing`/`isActive`/`isPastDue` in
-        `SettingsPage.tsx` all gate on `user?.subscription_tier ===
-        'pro'` specifically — none of them ever match `'starter'` or
-        `'creator'`. Concrete impact: a paying **Starter or Creator**
-        subscriber currently has no "Manage Subscription" section at all
-        (it's gated on `isPro`) and instead always sees the full
-        `PricingGrid` as if they had no subscription (the `!isPro &&
-        !isCanceled` branch, which is true for them too, incorrectly).
-        They can't refresh their status or cancel from Settings today.
-        Fix: generalize these booleans to recognize any of
-        `['starter','creator','pro']` as "on a paid plan," not just the
-        literal string `'pro'`.
+  - [x] **E2a — Fix subscription-tier-blind status logic — turned out to be
+        a CRITICAL latent backend bug, not just a frontend display issue.**
+        Original scope: `isTrialing`/`isActive`/`isPastDue` in
+        `SettingsPage.tsx` all gated on `user?.subscription_tier ===
+        'pro'` specifically. Real root cause found while fixing it:
+        `users.subscription_tier` was a MySQL `ENUM('free','pro')` —
+        genuinely incapable of storing `'starter'`/`'creator'` — while
+        `PayPalController::applySubscriptionState()` already tries to
+        write `$targetPlan->key` (which can be exactly those two values)
+        into it. Hadn't surfaced yet only because no plan currently has a
+        real `paypal_plan_id` configured, so the resolution logic there
+        always falls back to `'free'` before the write happens — the
+        moment a real Starter/Creator PayPal plan ID goes live, a
+        successful payment would hit this enum constraint on the very
+        next save, either throwing outright or silently truncating,
+        either way leaving a paying customer without the tier they paid
+        for. Fixed with a new migration (same raw-ALTER pattern as the
+        earlier `available_models.tier_required` expansion) widening the
+        enum to all 4 values — no `PayPalController` code change needed,
+        it was already correct, just blocked by the narrower column.
+        Frontend fix: renamed `isPro` → `isSubscribed` (the old name would
+        itself become a footgun once it correctly covers Starter/Creator
+        too) and generalized it to check membership in `['starter',
+        'creator','pro']`. Also fixed two hardcoded-`"$9.00/month"` copy
+        spots (trial notice, active-subscription card) — leftover from
+        the single-tier-Pro era, wrong for every current tier including
+        Pro itself (which is $22, not $9) — now pulled from the real
+        `/plans` endpoint (same one `PricingGrid` already uses) matched
+        against the user's actual tier. Fixed a third tier-blind spot:
+        the canceled-subscription notice said "Pro access until…"
+        unconditionally. **Checked, confirmed NOT buggy:** `PricingGrid.
+        tsx` has its own similarly-named `isPro` also checking `===
+        'pro'` — but that one's correctly scoped, since `paypalPlan`
+        there always resolves to whichever single plan currently has a
+        real `paypal_plan_id` (only Pro today; Starter/Creator
+        deliberately show "Coming Soon," per an existing comment
+        referencing a not-yet-built Phase C4) — it really is asking
+        "does the user already have *this specific* plan," not making
+        the same tier-blind mistake. Left untouched. Verified with `tsc
+        --noEmit` (frontend) and `php -l` (migration) — both clean.
   - [ ] **E2b — Show every plan limit, not just the ones already tracked
         as usage.** `PlanUsageWidget`/`StorageUsage` already cover AI
         requests (hour+day), sandbox concurrency, projects, and storage —

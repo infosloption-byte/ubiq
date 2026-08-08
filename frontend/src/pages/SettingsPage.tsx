@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Layout from '../components/Layout';
 import { useAuthStore } from '../stores/authStore';
-import { userAPI, authAPI, subscriptionApi, aiKeysAPI } from '../services/api';
+import api, { userAPI, authAPI, subscriptionApi, aiKeysAPI } from '../services/api';
 import PricingGrid from '../components/PricingGrid';
 import StorageUsage from '../components/StorageUsage';
 import PlanUsageWidget from '../components/PlanUsageWidget';
@@ -50,11 +50,43 @@ export default function SettingsPage() {
   });
 
   // ── Derived subscription state ─────────────────────────────────────────────
-  const isTrialing  = user?.subscription_tier === 'pro' && user?.subscription_status === 'trialing';
-  const isActive    = user?.subscription_tier === 'pro' && user?.subscription_status === 'active';
-  const isPastDue   = user?.subscription_tier === 'pro' && user?.subscription_status === 'past_due';
-  const isPro       = isTrialing || isActive || isPastDue;
-  const isCanceled  = user?.subscription_status === 'canceled';
+  // E2a fix (PLAN_SYSTEM_TASKS.md Phase E): was `user?.subscription_tier
+  // === 'pro'` on every one of these — meaning a paying Starter or Creator
+  // subscriber had NO "Manage Subscription" section at all (gated on the
+  // old `isPro`) and was always shown the full pricing grid as if
+  // unsubscribed. This was compounded by a deeper backend bug just fixed
+  // in the same migration set: `subscription_tier` was a 2-value
+  // ENUM('free','pro') that couldn't even store 'starter'/'creator' until
+  // 2026_08_08_000001_expand_users_subscription_tier_enum — so this frontend
+  // fix only actually works correctly once that migration has run.
+  // Renamed `isPro` → `isSubscribed` since it now correctly covers any paid
+  // tier, not literally Pro — keeping the old name would itself become a
+  // footgun for the next person reading this file.
+  const PAID_TIERS = ['starter', 'creator', 'pro'];
+  const isOnPaidTier = !!user?.subscription_tier && PAID_TIERS.includes(user.subscription_tier);
+  const isTrialing   = isOnPaidTier && user?.subscription_status === 'trialing';
+  const isActive     = isOnPaidTier && user?.subscription_status === 'active';
+  const isPastDue    = isOnPaidTier && user?.subscription_status === 'past_due';
+  const isSubscribed = isTrialing || isActive || isPastDue;
+  const isCanceled   = user?.subscription_status === 'canceled';
+
+  // E2a/E2b fix: previously hardcoded "$9.00/month" in the trial/billing
+  // copy below — the old single-tier Pro price, wrong for Starter ($5),
+  // Creator ($12), and even Pro itself (which is $22, not $9, per
+  // PlanSeeder). Fetches the real plan list (same `/plans` endpoint
+  // PricingGrid already uses) and looks up the current tier's actual price
+  // instead of a stale literal. Also sets up E2c (upgrade grid filtered to
+  // tiers above the current one), which needs this same plan list.
+  const [plans, setPlans] = useState<Array<{ key: string; name: string; price_cents: number; sort_order: number }>>([]);
+  useEffect(() => {
+    api.get('/plans')
+      .then(res => setPlans(res.data?.plans || []))
+      .catch(e => console.error('Failed to load plans', e));
+  }, []);
+  const currentPlan = plans.find(p => p.key === user?.subscription_tier);
+  const currentPlanPriceLabel = currentPlan
+    ? (currentPlan.price_cents === 0 ? 'Free' : `$${(currentPlan.price_cents / 100).toFixed(2)}/month`)
+    : null; // null while /plans hasn't resolved yet, or tier genuinely unmatched — copy below handles this by simply omitting the price rather than showing a wrong one
 
   const trialEndsAt = user?.trial_ends_at
     ? new Date(user.trial_ends_at) : null;
@@ -425,7 +457,14 @@ export default function SettingsPage() {
                             Ends {trialEndsAt.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
                           </p>
                           <p className="text-slate-500 text-[11px] mt-2">
-                            After trial ends, you'll be charged $9.00/month automatically unless you cancel.
+                            {/* E2b fix: was hardcoded "$9.00/month" — the old
+                                single-tier Pro price, wrong for every tier
+                                including Pro itself (which is $22, not $9).
+                                Falls back to generic wording if /plans hasn't
+                                resolved yet rather than showing a guess. */}
+                            {currentPlanPriceLabel
+                              ? <>After trial ends, you'll be charged {currentPlanPriceLabel} automatically unless you cancel.</>
+                              : <>After trial ends, you'll be charged automatically at your plan's rate unless you cancel.</>}
                           </p>
                         </div>
                       )}
@@ -440,7 +479,11 @@ export default function SettingsPage() {
                           <p className="text-white text-sm">
                             {subEndsAt.toLocaleDateString('en-US', { weekday: 'short', month: 'long', day: 'numeric', year: 'numeric' })}
                           </p>
-                          <p className="text-slate-400 text-xs mt-1">$9.00/month · Renews automatically</p>
+                          {/* E2b fix: same hardcoded-$9 issue as the trial
+                              copy above. */}
+                          <p className="text-slate-400 text-xs mt-1">
+                            {currentPlanPriceLabel ? <>{currentPlanPriceLabel} · Renews automatically</> : 'Renews automatically'}
+                          </p>
                         </div>
                       )}
 
@@ -457,7 +500,10 @@ export default function SettingsPage() {
                         <div className="mt-3 p-3 rounded-lg bg-red-500/10 border border-red-500/20">
                           <p className="text-red-300 text-xs font-bold mb-1">Subscription Canceled</p>
                           <p className="text-slate-400 text-xs">
-                            Pro access until {subEndsAt.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}
+                            {/* E2a fix: was hardcoded "Pro access until" —
+                                wrong for a canceled Starter/Creator
+                                subscriber, who isn't losing Pro access. */}
+                            Access until {subEndsAt.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}
                           </p>
                         </div>
                       )}
@@ -470,7 +516,7 @@ export default function SettingsPage() {
                   </div>
 
                   {/* ── Upgrade — show all plans unless already on the top tier ── */}
-                  {!isPro && !isCanceled && (
+                  {!isSubscribed && !isCanceled && (
                     <div className="mt-4">
                       <div className="mb-4">
                         <h3 className="text-lg font-bold text-white">Plans</h3>
@@ -480,8 +526,8 @@ export default function SettingsPage() {
                     </div>
                   )}
 
-                  {/* ── Manage / Cancel — show for all pro states ── */}
-                  {isPro && (
+                  {/* ── Manage / Cancel — show for any active paid tier, not just Pro ── */}
+                  {isSubscribed && (
                     <div className="pt-6 border-t border-white/5 flex flex-col gap-3">
                       <h3 className="text-sm font-bold text-slate-400 uppercase tracking-widest">Manage Subscription</h3>
                       <div className="flex flex-wrap gap-3">
