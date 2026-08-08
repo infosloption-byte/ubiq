@@ -859,3 +859,156 @@ feature_key gets renamed, a limit default changes, a phase gets reordered.)
   for correcting.
 
   Verified with `npx tsc --noEmit` — zero errors — after both copy fixes.
+
+---
+
+## Phase E — Settings Page Enhancement
+
+Requested: mobile tab layout fix, a fuller Account tab (avatar/name/plan/
+email, log out all devices, delete account, active sessions), a new
+Privacy tab, a fuller Billing tab (all plan limits + an upgrade path), and
+a general "what else is missing" pass. Everything below was checked
+against the actual codebase (both `SettingsPage.tsx` and the backend)
+before being scoped — nothing here is guessed. Ordered by: isolated quick
+wins first, then a foundational bug fix everything else in Billing depends
+on, then the account-security features (new backend surface, real risk),
+then the net-new Privacy tab last.
+
+- [ ] **E1 — Mobile tab navigation.** The tab list container is
+      `flex flex-col` unconditionally (`w-full md:w-64 flex flex-col gap-2`)
+      — it's *already* vertical on mobile today, which is the reported
+      problem (a tall stack of full-width buttons pushes all tab content
+      below the fold). Fix: `flex-row overflow-x-auto` on mobile (a
+      horizontally-scrollable pill/tab bar, each button sized to its
+      content, not full-width), reverting to the current vertical sidebar
+      at `md:` and above. Frontend-only, no backend, lowest risk in this
+      phase — good first task.
+
+- [ ] **E2 — Billing & Plan tab**, split into three because (b) and (c)
+      depend on (a) being correct first:
+
+  - [ ] **E2a — Fix subscription-tier-blind status logic (real bug, found
+        during this audit).** `isTrialing`/`isActive`/`isPastDue` in
+        `SettingsPage.tsx` all gate on `user?.subscription_tier ===
+        'pro'` specifically — none of them ever match `'starter'` or
+        `'creator'`. Concrete impact: a paying **Starter or Creator**
+        subscriber currently has no "Manage Subscription" section at all
+        (it's gated on `isPro`) and instead always sees the full
+        `PricingGrid` as if they had no subscription (the `!isPro &&
+        !isCanceled` branch, which is true for them too, incorrectly).
+        They can't refresh their status or cancel from Settings today.
+        Fix: generalize these booleans to recognize any of
+        `['starter','creator','pro']` as "on a paid plan," not just the
+        literal string `'pro'`.
+  - [ ] **E2b — Show every plan limit, not just the ones already tracked
+        as usage.** `PlanUsageWidget`/`StorageUsage` already cover AI
+        requests (hour+day), sandbox concurrency, projects, and storage —
+        the actual consumable/usage-vs-limit numbers. Completely absent
+        from any Settings view today: sandbox CPU/RAM/idle-timeout, max
+        model tier, and sharing-enabled — the *static capability* specs
+        of the plan, which `GET /user/plan-usage` doesn't return at all
+        right now (checked the controller directly). Needs: extend that
+        endpoint to also return `$planService->limitsFor($user)`'s
+        remaining keys, then render a "Your plan includes" spec panel
+        alongside the existing usage bars.
+  - [ ] **E2c — Upgrade path for non-top-tier active subscribers.** Once
+        E2a is fixed, a Starter/Creator subscriber will correctly get a
+        "Manage Subscription" section — but should *also* still see an
+        upgrade option (to the tier(s) above their own, not the full
+        grid including tiers below what they already have). Filter
+        `PricingGrid` by `sort_order` above the user's current plan
+        rather than showing all 4 unconditionally.
+
+- [ ] **E3 — Account tab**, ordered easy → hard, deliberately saving the
+      destructive one for last:
+
+  - [ ] **E3a — Show the real avatar; clarify "full name."** `User.avatar`
+        already exists as a column and is populated for Google OAuth
+        signups (confirmed in the model and the OAuth-columns migration)
+        — but Settings only ever renders a colored circle with the first
+        letter of `username`, never `user.avatar`, even when a real
+        profile picture is sitting right there. Fix: render `user.avatar`
+        when present, fall back to the initial circle otherwise. **Open
+        question, not assumed:** there's no separate `full_name` column
+        on `users` — only `username`. Recommend treating `username` as
+        the display name (no migration needed) unless a real legal/full
+        name field is actually wanted, which would need a new column —
+        your call before this is built.
+  - [ ] **E3c — Log Out All Devices.** Straightforward: `$user->tokens()
+        ->delete()` (Sanctum) behind a confirmation, since it also signs
+        the current session out. Low risk, no new schema.
+  - [ ] **E3b — Active Sessions (device, location, created, updated).**
+        The biggest lift in this phase. Sanctum's stock
+        `personal_access_tokens` table (confirmed: this app never
+        customized it) has no device or IP columns at all — only
+        `name`/`last_used_at`/`created_at`. Needs: a migration adding
+        `user_agent`/`ip_address`, capturing both in
+        `AuthController::login`/`register`/`handleGoogleCallback` at
+        token-creation time, a new endpoint listing the caller's own
+        tokens with that metadata (parsing device/browser from the
+        user-agent string), and a per-row revoke action. **Scoping call
+        on "location":** true city/country geolocation needs a
+        third-party IP-lookup service (e.g. a free tier of ip-api.com) —
+        recommend shipping device + raw IP address first, treating full
+        geolocation as an optional follow-up, not a blocker.
+  - [ ] **E3d — Delete Account.** Highest-risk item in the whole phase —
+        build and test this *last*, once the rest of the tab is solid.
+        Needs, in order: (1) cancel any active PayPal subscription first
+        via the existing `subscriptionApi` (deleting the account must not
+        leave an active recurring charge behind), (2) stop/clean up any
+        running sandbox Docker containers — DB cascade deletes won't
+        touch live containers, they'd leak, (3) delete the user row —
+        checked every migration's FK definitions, cascade deletes are
+        already correctly set up on every user-owned table (projects,
+        files, chat sessions, usage counters, plan action logs,
+        `user_ai_keys` from Phase D, etc.), so the DB side is actually
+        low-risk once 1–2 are handled, (4) require typed confirmation
+        (email or literal "DELETE") given this is irreversible.
+
+- [ ] **E4 — New Privacy tab.** Checked what actually exists first,
+      specifically to avoid shipping another decoy field (the `grok`
+      lesson from Phase D) — **this app has no email/marketing
+      notification system at all, and nothing tracks analytics inside the
+      authenticated editor** (the one `analytics` hit in the whole
+      frontend is an unrelated try/catch comment on the public landing
+      page). So "email preferences" and "analytics opt-out" toggles would
+      control nothing real today — not proposing either. Grounded
+      suggestions instead, everything below maps to data/features that
+      actually exist:
+        - **Export My Data** — download a JSON/zip of the user's own
+          projects, files, and chat history plus account info. Standard
+          GDPR-style request, genuinely buildable against existing tables.
+        - **Default project visibility** — public/private default applied
+          to newly created projects; ties into the `sharing.enabled` plan
+          feature that already exists rather than inventing a new concept.
+        - **Clear AI Chat History** — delete all `chat_sessions`/messages
+          across every project. Real privacy-hygiene action against data
+          that already exists.
+        - **Link to Delete Account** — cross-reference to E3d rather than
+          duplicating it in two tabs.
+        - Explicitly **not** in v1, and why: new-device login email alerts
+          (no mail system exists to send them), marketing email opt-out
+          (nothing sends marketing email yet), analytics opt-out (nothing
+          tracked in the authenticated app today).
+
+- [ ] **E5 — Other gaps found during this audit** (the "what else is
+      missing" ask), flagged for a decision rather than assumed:
+        - **No password-change flow anywhere.** Relevant mainly for
+          email/password signups; Google OAuth users technically have a
+          password too (`Hash::make(Str::random(24))` set at signup, per
+          `AuthController`) but never see or use it, so "change password"
+          is a little conceptually odd for them specifically — worth
+          deciding whether Google-only users should even see this option,
+          or get a "Set a password" flow instead of "Change."
+        - **No "connected accounts" indicator.** Nothing in Settings shows
+          whether a given account is linked to Google OAuth or is a plain
+          email/password account — relevant context for the password
+          item above and generally useful on its own.
+        - **Two-factor authentication** — flagging for awareness only,
+          not scoped into this phase; a genuinely bigger feature than
+          anything else listed here.
+
+Open questions before implementation, not yet decided: full_name field
+(E3a), how deep to go on session geolocation (E3b), and password-change
+scope for OAuth-only users (E5) — flagging rather than picking a default
+so implementation doesn't build the wrong thing twice.
