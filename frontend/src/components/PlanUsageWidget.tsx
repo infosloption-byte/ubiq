@@ -5,8 +5,10 @@ import { Cpu, Boxes, FolderKanban, Sparkles } from 'lucide-react';
 interface RateUsage {
     hour_limit: number;
     hour_remaining: number | null; // null = unlimited (see PlanGuard::remainingRate)
+    hour_resets_at: string;        // ISO8601 UTC instant — see PlanGuard::remainingRate
     day_limit: number;
     day_remaining: number | null;
+    day_resets_at: string;
 }
 
 interface ConcurrentUsage {
@@ -51,6 +53,37 @@ function UsageBar({ used, total, unlimited }: { used: number; total: number; unl
             />
         </div>
     );
+}
+
+/**
+ * E2b sub-part (PLAN_SYSTEM_TASKS.md Phase E) — "resets in Xh Ym", matching
+ * the Claude-style rate-limit reset display that was asked for. `resetsAt`
+ * is an absolute ISO8601 UTC instant from PlanGuard::remainingRate — parsing
+ * it with `new Date()` and diffing against the browser's own clock is
+ * correct regardless of which timezone either side is in, since both ends
+ * of the subtraction are the same absolute instant. Re-renders once a
+ * minute (not every second — a rate-limit reset doesn't need
+ * seconds-precision, and a 1s interval would just burn cycles for no
+ * visible benefit at this granularity).
+ */
+function ResetCountdown({ resetsAt }: { resetsAt: string }) {
+    const [label, setLabel] = useState('');
+
+    useEffect(() => {
+        const update = () => {
+            const msLeft = new Date(resetsAt).getTime() - Date.now();
+            if (msLeft <= 0) { setLabel('resets shortly'); return; }
+            const totalMinutes = Math.ceil(msLeft / 60000);
+            const hours = Math.floor(totalMinutes / 60);
+            const minutes = totalMinutes % 60;
+            setLabel(hours > 0 ? `resets in ${hours}h ${minutes}m` : `resets in ${minutes}m`);
+        };
+        update();
+        const interval = setInterval(update, 60000);
+        return () => clearInterval(interval);
+    }, [resetsAt]);
+
+    return <span className="text-slate-600">{label}</span>;
 }
 
 /**
@@ -112,6 +145,12 @@ export default function PlanUsageWidget() {
                         total={data.ai.hour_limit}
                         unlimited={data.ai.hour_remaining === null}
                     />
+                    {/* E2b sub-part: reset countdowns, requested to match
+                        Claude's rate-limit UI. Omitted when unlimited —
+                        there's no reset to count down to on those plans. */}
+                    {data.ai.hour_remaining !== null && (
+                        <div className="text-[10px] mt-1"><ResetCountdown resetsAt={data.ai.hour_resets_at} /></div>
+                    )}
                     <div className="flex items-center justify-between mt-2 text-[10px] text-slate-500">
                         <span>Today</span>
                         <span className="font-mono">
@@ -120,6 +159,9 @@ export default function PlanUsageWidget() {
                                 : `${data.ai.day_limit - data.ai.day_remaining} / ${data.ai.day_limit}`}
                         </span>
                     </div>
+                    {data.ai.day_remaining !== null && (
+                        <div className="text-[10px] text-right"><ResetCountdown resetsAt={data.ai.day_resets_at} /></div>
+                    )}
                 </div>
             )}
 

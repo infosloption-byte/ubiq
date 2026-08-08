@@ -456,16 +456,32 @@ class PlanGuard
 
     private function remainingRate(User $user, array $rule, array $limits): array
     {
+        // E2b sub-part (PLAN_SYSTEM_TASKS.md Phase E): added hour_resets_at/
+        // day_resets_at so the frontend can show a live "resets in Xh Ym"
+        // countdown (the reported Claude-style ask). Computed server-side as
+        // absolute UTC instants (ISO8601, via toISOString()) rather than
+        // having the frontend guess "midnight" or "top of the hour" in the
+        // browser's own timezone — that would silently disagree with the
+        // actual boundary this class enforces (Carbon::now()->startOfHour/
+        // startOfDay(), in the app's configured timezone) any time those two
+        // timezones differ. A single $now snapshot is reused for both,
+        // copied before each mutating startOf*() call — Carbon mutates in
+        // place by default, so without ->copy() the day calculation below
+        // would corrupt $now for anything computed after it.
+        $now = Carbon::now();
+
         $hourLimit = $limits[$rule['feature_keys']['hour']] ?? 0;
-        $hourUsage = $this->currentWindowCount($user, $rule['counter_key'], 'hour', Carbon::now()->startOfHour());
+        $hourUsage = $this->currentWindowCount($user, $rule['counter_key'], 'hour', $now->copy()->startOfHour());
         $dayLimit = $limits[$rule['feature_keys']['day']] ?? 0;
-        $dayUsage = $this->currentWindowCount($user, $rule['counter_key'], 'day', Carbon::now()->startOfDay());
+        $dayUsage = $this->currentWindowCount($user, $rule['counter_key'], 'day', $now->copy()->startOfDay());
 
         return [
             'hour_limit' => $hourLimit,
             'hour_remaining' => $this->isUnlimited($hourLimit) ? null : max(0, $hourLimit - $hourUsage),
+            'hour_resets_at' => $now->copy()->startOfHour()->addHour()->toISOString(),
             'day_limit' => $dayLimit,
             'day_remaining' => $this->isUnlimited($dayLimit) ? null : max(0, $dayLimit - $dayUsage),
+            'day_resets_at' => $now->copy()->startOfDay()->addDay()->toISOString(),
         ];
     }
 

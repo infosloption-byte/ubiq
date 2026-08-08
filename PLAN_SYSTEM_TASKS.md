@@ -950,6 +950,42 @@ then the net-new Privacy tab last.
         cached response or a backend that hasn't deployed this yet just
         omits the panel rather than crashing. Verified with `tsc --noEmit`
         and `php -l` — both clean.
+  - [x] **E2b sub-part — grid layout fix + AI request reset countdowns**
+        (reported after E2b shipped, tracked as a sub-part rather than a
+        new letter since it's the same Billing-tab surface). Two issues:
+        (1) **Grid arrangement bug.** The status-cards grid was
+        `grid-cols-2` with 3 direct children (Plan card, `StorageUsage`,
+        a wrapper around `PlanUsageWidget`) — CSS grid auto-placement
+        filled them left-to-right/top-to-bottom: Plan card → row1/col1,
+        Storage → row1/col2, then `PlanUsageWidget` wrapped to row2/col1,
+        leaving row2/col2 completely empty and the right column much
+        shorter than the left — exactly the lopsided look reported.
+        Fixed by grouping explicitly into two column `<div>`s (left:
+        Plan card + `PlanUsageWidget` stacked via `space-y-4`; right:
+        `StorageUsage` alone) instead of relying on auto-placement across
+        a flat list of 3 items in a 2-column grid.
+        (2) **Missing reset countdowns for AI requests/hour and /day**,
+        requested to match Claude's rate-limit UI style ("resets in Xh
+        Ym"). Added `hour_resets_at`/`day_resets_at` to
+        `PlanGuard::remainingRate()` — absolute ISO8601 UTC instants
+        (`Carbon::now()->startOfHour()->addHour()` /
+        `->startOfDay()->addDay()`), computed server-side rather than
+        having the frontend guess "midnight" or "top of the hour" in the
+        browser's own timezone, which would silently disagree with the
+        actual boundary `PlanGuard` enforces (`Carbon::now()` in the app's
+        configured timezone) whenever those two timezones differ — same
+        "most accurate" standard as the E3b session-geolocation decision.
+        New frontend `ResetCountdown` component parses that instant with
+        `new Date()` and diffs against the browser's own clock — correct
+        regardless of either side's timezone, since both ends of the
+        subtraction are the same absolute instant — re-rendering once a
+        minute (seconds-precision isn't meaningful for an hour/day-scale
+        limit). Shown under the hourly bar and next to the daily count;
+        omitted entirely when a tier is unlimited, since there's no reset
+        to count down to on those plans. Verified with `tsc --noEmit` and
+        `php -l` — both clean; confirmed `PlanUsageWidget.tsx` is the only
+        frontend consumer of this endpoint's response shape, so nothing
+        else needed updating for the new fields.
   - [ ] **E2c — Upgrade path for non-top-tier active subscribers.** Once
         E2a is fixed, a Starter/Creator subscriber will correctly get a
         "Manage Subscription" section — but should *also* still see an

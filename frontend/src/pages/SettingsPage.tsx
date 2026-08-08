@@ -433,85 +433,100 @@ export default function SettingsPage() {
                     <p className="text-sm text-slate-400">Manage your subscription and billing details.</p>
                   </div>
 
-                  {/* ── Status Cards ── */}
+                  {/* ── Status Cards ──
+                      E2b sub-part (PLAN_SYSTEM_TASKS.md Phase E) — this grid
+                      previously had 3 direct children (Plan card,
+                      StorageUsage, a wrapper around PlanUsageWidget) inside
+                      a 2-column grid. CSS grid auto-placement filled them
+                      left-to-right, top-to-bottom: Plan card → row1/col1,
+                      StorageUsage → row1/col2, then PlanUsageWidget wrapped
+                      to row2/col1 — leaving row2/col2 completely empty and
+                      the right column much shorter than the left, which is
+                      exactly the lopsided look reported. Fixed by grouping
+                      explicitly into two column divs instead of relying on
+                      auto-placement across a flat list. */}
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    {/* Plan card */}
-                    <div className="p-6 bg-white/5 rounded-xl border border-white/10">
-                      <p className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-2">Current Plan</p>
-                      <div className="flex items-center gap-3 mb-3">
-                        <h3 className="text-2xl font-black text-white capitalize">
-                          {user?.subscription_tier || 'free'}
-                        </h3>
-                        <ProStatusBadge />
+                    {/* Left column: current plan status + live usage, stacked together */}
+                    <div className="space-y-4">
+                      <div className="p-6 bg-white/5 rounded-xl border border-white/10">
+                        <p className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-2">Current Plan</p>
+                        <div className="flex items-center gap-3 mb-3">
+                          <h3 className="text-2xl font-black text-white capitalize">
+                            {user?.subscription_tier || 'free'}
+                          </h3>
+                          <ProStatusBadge />
+                        </div>
+
+                        {/* Trial info */}
+                        {isTrialing && trialEndsAt && (
+                          <div className="mt-3 p-3 rounded-lg bg-blue-500/10 border border-blue-500/20">
+                            <div className="flex items-center gap-2 text-blue-300 text-xs font-bold mb-1">
+                              <Clock className="w-3.5 h-3.5" />
+                              Trial Period
+                            </div>
+                            <p className="text-white font-bold text-lg">{trialDaysLeft} day{trialDaysLeft !== 1 ? 's' : ''} remaining</p>
+                            <p className="text-slate-400 text-xs mt-1">
+                              Ends {trialEndsAt.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                            </p>
+                            <p className="text-slate-500 text-[11px] mt-2">
+                              {/* E2b fix: was hardcoded "$9.00/month" — the old
+                                  single-tier Pro price, wrong for every tier
+                                  including Pro itself (which is $22, not $9).
+                                  Falls back to generic wording if /plans hasn't
+                                  resolved yet rather than showing a guess. */}
+                              {currentPlanPriceLabel
+                                ? <>After trial ends, you'll be charged {currentPlanPriceLabel} automatically unless you cancel.</>
+                                : <>After trial ends, you'll be charged automatically at your plan's rate unless you cancel.</>}
+                            </p>
+                          </div>
+                        )}
+
+                        {/* Active subscription info */}
+                        {isActive && subEndsAt && (
+                          <div className="mt-3 p-3 rounded-lg bg-green-500/10 border border-green-500/20">
+                            <div className="flex items-center gap-2 text-green-300 text-xs font-bold mb-1">
+                              <Calendar className="w-3.5 h-3.5" />
+                              Next Billing Date
+                            </div>
+                            <p className="text-white text-sm">
+                              {subEndsAt.toLocaleDateString('en-US', { weekday: 'short', month: 'long', day: 'numeric', year: 'numeric' })}
+                            </p>
+                            {/* E2b fix: same hardcoded-$9 issue as the trial
+                                copy above. */}
+                            <p className="text-slate-400 text-xs mt-1">
+                              {currentPlanPriceLabel ? <>{currentPlanPriceLabel} · Renews automatically</> : 'Renews automatically'}
+                            </p>
+                          </div>
+                        )}
+
+                        {/* Past due warning */}
+                        {isPastDue && (
+                          <div className="mt-3 p-3 rounded-lg bg-yellow-500/10 border border-yellow-500/20">
+                            <p className="text-yellow-300 text-xs font-bold mb-1">⚠️ Payment Failed</p>
+                            <p className="text-slate-400 text-xs">PayPal will retry the payment automatically. Update your payment method on PayPal to avoid interruption.</p>
+                          </div>
+                        )}
+
+                        {/* Canceled notice */}
+                        {isCanceled && subEndsAt && (
+                          <div className="mt-3 p-3 rounded-lg bg-red-500/10 border border-red-500/20">
+                            <p className="text-red-300 text-xs font-bold mb-1">Subscription Canceled</p>
+                            <p className="text-slate-400 text-xs">
+                              {/* E2a fix: was hardcoded "Pro access until" —
+                                  wrong for a canceled Starter/Creator
+                                  subscriber, who isn't losing Pro access. */}
+                              Access until {subEndsAt.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}
+                            </p>
+                          </div>
+                        )}
                       </div>
 
-                      {/* Trial info */}
-                      {isTrialing && trialEndsAt && (
-                        <div className="mt-3 p-3 rounded-lg bg-blue-500/10 border border-blue-500/20">
-                          <div className="flex items-center gap-2 text-blue-300 text-xs font-bold mb-1">
-                            <Clock className="w-3.5 h-3.5" />
-                            Trial Period
-                          </div>
-                          <p className="text-white font-bold text-lg">{trialDaysLeft} day{trialDaysLeft !== 1 ? 's' : ''} remaining</p>
-                          <p className="text-slate-400 text-xs mt-1">
-                            Ends {trialEndsAt.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
-                          </p>
-                          <p className="text-slate-500 text-[11px] mt-2">
-                            {/* E2b fix: was hardcoded "$9.00/month" — the old
-                                single-tier Pro price, wrong for every tier
-                                including Pro itself (which is $22, not $9).
-                                Falls back to generic wording if /plans hasn't
-                                resolved yet rather than showing a guess. */}
-                            {currentPlanPriceLabel
-                              ? <>After trial ends, you'll be charged {currentPlanPriceLabel} automatically unless you cancel.</>
-                              : <>After trial ends, you'll be charged automatically at your plan's rate unless you cancel.</>}
-                          </p>
-                        </div>
-                      )}
-
-                      {/* Active subscription info */}
-                      {isActive && subEndsAt && (
-                        <div className="mt-3 p-3 rounded-lg bg-green-500/10 border border-green-500/20">
-                          <div className="flex items-center gap-2 text-green-300 text-xs font-bold mb-1">
-                            <Calendar className="w-3.5 h-3.5" />
-                            Next Billing Date
-                          </div>
-                          <p className="text-white text-sm">
-                            {subEndsAt.toLocaleDateString('en-US', { weekday: 'short', month: 'long', day: 'numeric', year: 'numeric' })}
-                          </p>
-                          {/* E2b fix: same hardcoded-$9 issue as the trial
-                              copy above. */}
-                          <p className="text-slate-400 text-xs mt-1">
-                            {currentPlanPriceLabel ? <>{currentPlanPriceLabel} · Renews automatically</> : 'Renews automatically'}
-                          </p>
-                        </div>
-                      )}
-
-                      {/* Past due warning */}
-                      {isPastDue && (
-                        <div className="mt-3 p-3 rounded-lg bg-yellow-500/10 border border-yellow-500/20">
-                          <p className="text-yellow-300 text-xs font-bold mb-1">⚠️ Payment Failed</p>
-                          <p className="text-slate-400 text-xs">PayPal will retry the payment automatically. Update your payment method on PayPal to avoid interruption.</p>
-                        </div>
-                      )}
-
-                      {/* Canceled notice */}
-                      {isCanceled && subEndsAt && (
-                        <div className="mt-3 p-3 rounded-lg bg-red-500/10 border border-red-500/20">
-                          <p className="text-red-300 text-xs font-bold mb-1">Subscription Canceled</p>
-                          <p className="text-slate-400 text-xs">
-                            {/* E2a fix: was hardcoded "Pro access until" —
-                                wrong for a canceled Starter/Creator
-                                subscriber, who isn't losing Pro access. */}
-                            Access until {subEndsAt.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}
-                          </p>
-                        </div>
-                      )}
+                      <PlanUsageWidget />
                     </div>
 
-                    <StorageUsage />
-                    <div className="mt-4">
-                      <PlanUsageWidget />
+                    {/* Right column: storage — its own column now, not a stray auto-placed cell */}
+                    <div>
+                      <StorageUsage />
                     </div>
                   </div>
 
