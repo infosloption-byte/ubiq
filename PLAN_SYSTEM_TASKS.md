@@ -825,3 +825,37 @@ feature_key gets renamed, a limit default changes, a phase gets reordered.)
   out of scope, flagged above).
 
   Phase D is now fully closed — D0a through D8, nothing left open.
+
+- 2026-08-07 — Post-D8 sweep: re-checked for anything D8 might have made
+  *inaccurate* elsewhere rather than broken. Backend: confirmed
+  `CompletionController` is the only backend file that ever touched
+  `api_keys` (repo-wide grep across `app/Http/Controllers` and
+  `app/Services`), and re-verified `hasByoKeyFor`/`guardModelAccess`
+  against the new merged-key shape — `isset($apiKeys['ollama_url'])` at the
+  Ollama-baseUrl-override site treats an explicit `null` (now always
+  present as a key, per `mergeServerKeys`) the same as a missing key in
+  PHP, so behavior there is unchanged from before D8.
+
+  Frontend: found real user-facing copy that D8 made **false** rather than
+  just stale code. `GuidePage.tsx`'s "Setup Cloud AI" section said "Your
+  keys are stored in your browser's LocalStorage... We never store them" —
+  the literal opposite of the new architecture — fixed to describe
+  server-side encrypted storage. Same section also linked out to get an
+  xAI/Grok key with nowhere to enter one (matches the dead-field removal
+  from Settings) — link removed. More consequential: `LandingPage.tsx` had
+  a public feature bullet ("Keys Stored Locally in Browser") and — worth
+  flagging on its own — an FAQ entry explicitly answering "Is my API Key
+  safe?" with "your API keys are stored in your browser's LocalStorage and
+  are never saved to our database," which is now a false public claim
+  about how user credentials are handled, not just outdated internal
+  documentation. Both fixed to accurately describe encryption at rest and
+  that keys are never sent back to the browser after saving.
+
+  Deliberately NOT fixed, flagged instead (pre-existing, unrelated to D8):
+  `LandingPage.tsx`'s "Connect OpenAI, Anthropic, Google, or Grok directly"
+  lists two providers (Anthropic, Grok) the backend has never actually
+  supported, in either architecture — a marketing/reality mismatch that
+  predates this fix and isn't something D8 introduced or is responsible
+  for correcting.
+
+  Verified with `npx tsc --noEmit` — zero errors — after both copy fixes.

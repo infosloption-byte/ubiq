@@ -148,7 +148,13 @@ export default function GuidePage() {
           {/* 2. CLOUD SETUP */}
           <Section id="cloud-ai" title="Setup Cloud AI (BYOK)" icon={Key} active={activeSection === 'cloud-ai'}>
             <p className="text-slate-400 mb-6">
-              We use a <strong>Bring Your Own Key</strong> model. Your keys are stored in your browser's LocalStorage and sent directly to the provider via our secure proxy. We never store them.
+              {/* D8 fix (PLAN_SYSTEM_TASKS.md Phase D): was "Your keys are
+                  stored in your browser's LocalStorage... We never store
+                  them." — no longer true, and telling users the opposite of
+                  what actually happens with their credentials is worse than
+                  saying nothing. Keys are now encrypted at rest server-side
+                  and never sent back to the browser after you save them. */}
+              We use a <strong>Bring Your Own Key</strong> model. Your keys are encrypted and stored on our servers, and are never sent back to your browser after you save them — only used server-side to call the provider on your behalf.
             </p>
             <div className="space-y-4">
               <div className="bg-[#0B0B10] border border-white/10 rounded-xl p-6">
@@ -163,9 +169,12 @@ export default function GuidePage() {
                   <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer" className="flex items-center justify-between p-3 rounded-lg bg-white/5 hover:bg-white/10 border border-white/5 hover:border-indigo-500/50 transition-all text-sm text-slate-300">
                     <span>Google Gemini</span> <ChevronRight className="w-4 h-4 opacity-50"/>
                   </a>
-                  <a href="https://console.x.ai/" target="_blank" rel="noreferrer" className="flex items-center justify-between p-3 rounded-lg bg-white/5 hover:bg-white/10 border border-white/5 hover:border-indigo-500/50 transition-all text-sm text-slate-300">
-                    <span>xAI (Grok)</span> <ChevronRight className="w-4 h-4 opacity-50"/>
-                  </a>
+                  {/* D8 fix: xAI (Grok) link removed — this provider was
+                      never wired to any backend support (no branch in
+                      CompletionController) and the corresponding input was
+                      just removed from both Settings screens as a dead
+                      field; leaving this link here would send someone to
+                      get a key they'd have nowhere to enter. */}
                 </div>
               </div>
             </div>

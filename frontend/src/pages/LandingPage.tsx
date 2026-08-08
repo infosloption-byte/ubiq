@@ -267,7 +267,14 @@ export default function LandingPage() {
               <ul className="space-y-3 text-sm text-slate-400">
                 <li className="flex items-center gap-2"><CheckCircle2 className="w-4 h-4 text-indigo-500" /> Access GPT-4o, Claude 3.5, Gemini</li>
                 <li className="flex items-center gap-2"><CheckCircle2 className="w-4 h-4 text-indigo-500" /> Direct Billing (Cheapest Rates)</li>
-                <li className="flex items-center gap-2"><CheckCircle2 className="w-4 h-4 text-indigo-500" /> Keys Stored Locally in Browser</li>
+                {/* D8 fix (PLAN_SYSTEM_TASKS.md Phase D): was "Keys Stored
+                    Locally in Browser" — no longer true, keys are encrypted
+                    server-side now. Flagging separately, not fixing here:
+                    "OpenAI, Anthropic, Google, or Grok" above lists two
+                    providers (Anthropic, Grok) the backend has never
+                    actually supported — a pre-existing marketing/reality
+                    mismatch that predates this fix, out of scope for D8. */}
+                <li className="flex items-center gap-2"><CheckCircle2 className="w-4 h-4 text-indigo-500" /> Keys Encrypted &amp; Never Sent Back to Your Browser</li>
               </ul>
             </div>
           </div>
@@ -349,9 +356,15 @@ export default function LandingPage() {
         <div className="max-w-3xl mx-auto px-6">
           <h2 className="text-3xl font-bold text-white mb-12 text-center">Frequently Asked Questions</h2>
           <div className="space-y-6">
+            {/* D8 fix (PLAN_SYSTEM_TASKS.md Phase D): the old answer here
+                ("stored in your browser's LocalStorage and are never saved
+                to our database") became the literal opposite of true once
+                keys moved server-side — this is a public claim about how
+                user credentials are handled, so getting it right matters
+                more than most copy on this page. */}
             <FaqItem 
               question="Is my API Key safe?" 
-              answer="Yes. We use a 'Bring Your Own Key' architecture. Your API keys are stored in your browser's LocalStorage and are never saved to our database. They are only used to proxy requests to the AI providers." 
+              answer="Yes. We use a 'Bring Your Own Key' architecture. Your API keys are encrypted at rest on our servers and are never sent back to your browser after you save them — they're only decrypted server-side, in memory, to proxy your requests to the AI provider you chose." 
             />
             <FaqItem 
               question="Can I use this offline?" 
