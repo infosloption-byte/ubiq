@@ -203,10 +203,17 @@ export default function SettingsPage() {
     }
   };
 
+  // E1 fix (PLAN_SYSTEM_TASKS.md Phase E): was `w-full` unconditionally —
+  // fine in the vertical desktop sidebar (buttons should fill that column),
+  // but on the mobile horizontal pill bar `w-full` would make each button
+  // try to fill the entire row's width, stacking them ugly rather than
+  // sitting side-by-side. `md:w-full` scopes the full-width behavior back
+  // to desktop only; `shrink-0 whitespace-nowrap` keep each pill sized to
+  // its own label on mobile instead of shrinking/wrapping mid-word.
   const TabButton = ({ id, label, icon: Icon }: any) => (
     <button
       onClick={() => setActiveTab(id)}
-      className={`w-full flex items-center gap-3 px-4 py-3 text-sm font-medium transition-all rounded-lg ${
+      className={`shrink-0 whitespace-nowrap md:w-full flex items-center gap-3 px-4 py-3 text-sm font-medium transition-all rounded-lg ${
         activeTab === id
           ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-900/20'
           : 'text-slate-400 hover:text-white hover:bg-white/5'
@@ -280,7 +287,19 @@ export default function SettingsPage() {
           <h1 className="text-3xl font-bold text-white mb-8">Settings</h1>
 
           <div className="flex flex-col md:flex-row gap-8">
-            <div className="w-full md:w-64 flex flex-col gap-2 shrink-0">
+            {/* E1 fix (PLAN_SYSTEM_TASKS.md Phase E): was `flex flex-col
+                gap-2` unconditionally — already vertical on mobile, which
+                was the reported problem (a tall stack of full-width tab
+                buttons pushes all actual tab content below the fold on a
+                phone). Now `flex-row overflow-x-auto` below `md:`, so the
+                4 tabs sit in one horizontally-scrollable pill bar instead —
+                the `-mx-6 px-6` / `md:mx-0 md:px-0` pair lets that scroll
+                region bleed out to the same edges as the page's own outer
+                padding on mobile (so pills can be dragged flush to the
+                screen edge) without affecting the desktop layout at all,
+                where it reverts to the original fixed-width vertical
+                sidebar untouched. */}
+            <div className="flex flex-row md:flex-col gap-2 overflow-x-auto -mx-6 px-6 pb-1 md:mx-0 md:px-0 md:pb-0 md:overflow-visible md:w-64 shrink-0">
               <TabButton id="ai"      label="AI Models (BYOK)"  icon={Key} />
               <TabButton id="editor"  label="Editor Config"      icon={Monitor} />
               <TabButton id="billing" label="Billing & Plan"     icon={CreditCard} />

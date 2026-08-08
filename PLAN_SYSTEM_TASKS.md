@@ -874,7 +874,7 @@ wins first, then a foundational bug fix everything else in Billing depends
 on, then the account-security features (new backend surface, real risk),
 then the net-new Privacy tab last.
 
-- [ ] **E1 — Mobile tab navigation.** The tab list container is
+- [x] **E1 — Mobile tab navigation.** The tab list container is
       `flex flex-col` unconditionally (`w-full md:w-64 flex flex-col gap-2`)
       — it's *already* vertical on mobile today, which is the reported
       problem (a tall stack of full-width buttons pushes all tab content
@@ -1008,7 +1008,41 @@ then the net-new Privacy tab last.
           not scoped into this phase; a genuinely bigger feature than
           anything else listed here.
 
-Open questions before implementation, not yet decided: full_name field
-(E3a), how deep to go on session geolocation (E3b), and password-change
-scope for OAuth-only users (E5) — flagging rather than picking a default
-so implementation doesn't build the wrong thing twice.
+- 2026-08-08 — E1 complete. `SettingsPage.tsx`'s tab container was
+  `flex flex-col gap-2` unconditionally — already vertical on mobile,
+  which was the actual reported problem (a tall stack of full-width
+  buttons pushing tab content below the fold). Now `flex-row
+  overflow-x-auto` below `md:`, reverting to the original fixed-width
+  vertical sidebar unchanged at `md:` and up. Used a negative-margin bleed
+  trick (`-mx-6 px-6`, canceled via `md:mx-0 md:px-0`) so the scrollable
+  pill row can be dragged flush to the screen edges on mobile, matching
+  the page's own `p-6` outer padding exactly rather than leaving dead
+  space on either side. `TabButton` itself changed from unconditional
+  `w-full` to `md:w-full` + `shrink-0 whitespace-nowrap`, since `w-full`
+  inside a `flex-row` parent would have made each pill try to fill the
+  entire row rather than sitting side-by-side. Verified with `tsc
+  --noEmit` — zero errors.
+
+Decisions made 2026-08-08 (previously open questions):
+- **E3a, full_name:** `username` stays the display name. No new column,
+  no registration-form change — proportionate for a coding platform,
+  avoids a migration for marginal benefit.
+- **E3b, session location accuracy:** going with the more accurate option
+  — a real IP → city/region/country lookup (`ip-api.com`, free tier, no
+  API key) called server-side once at login/token-creation time, not
+  per-page-load. Skip the lookup entirely for local/private IPs
+  (127.0.0.1, LAN ranges) during dev — nothing meaningful to resolve
+  there. Must fail gracefully (short timeout + catch) so a slow or dead
+  third-party service can never block login itself; store the IP either
+  way and leave location fields null on lookup failure. Caveat: this
+  specific HTTP call couldn't be executed from the sandbox this was built
+  in (`ip-api.com` isn't on that environment's allowed-domains list) — the
+  code is written and reasoned through, but the actual live call needs a
+  real smoke test once deployed.
+- **E5, password change for Google-only users:** relabel rather than
+  force a false choice, matching how GitHub/Google-linked products handle
+  this. If `google_id` is set and no separate password was ever
+  deliberately chosen, show **"Set a Password"** (adds email/password as
+  a second login method, doesn't touch Google login). Everyone else gets
+  the normal **"Change Password."** Cheap to key off since `google_id`
+  already exists on the model.
