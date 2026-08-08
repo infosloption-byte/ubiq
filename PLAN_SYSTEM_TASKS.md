@@ -927,17 +927,29 @@ then the net-new Privacy tab last.
         "does the user already have *this specific* plan," not making
         the same tier-blind mistake. Left untouched. Verified with `tsc
         --noEmit` (frontend) and `php -l` (migration) — both clean.
-  - [ ] **E2b — Show every plan limit, not just the ones already tracked
+  - [x] **E2b — Show every plan limit, not just the ones already tracked
         as usage.** `PlanUsageWidget`/`StorageUsage` already cover AI
         requests (hour+day), sandbox concurrency, projects, and storage —
         the actual consumable/usage-vs-limit numbers. Completely absent
         from any Settings view today: sandbox CPU/RAM/idle-timeout, max
         model tier, and sharing-enabled — the *static capability* specs
         of the plan, which `GET /user/plan-usage` doesn't return at all
-        right now (checked the controller directly). Needs: extend that
-        endpoint to also return `$planService->limitsFor($user)`'s
-        remaining keys, then render a "Your plan includes" spec panel
-        alongside the existing usage bars.
+        right now (checked the controller directly). Extended that
+        endpoint with a new `limits` object (`sandbox_cpu`,
+        `sandbox_memory_mb`, `sandbox_idle_timeout_minutes`,
+        `max_model_tier`, `sharing_enabled`) — a straight passthrough of
+        `$planService->limitFor()` keyed exactly to `plan_features.
+        feature_key` from `PlanSeeder`, so it can't silently drift from
+        the seeder later. `PlanUsageWidget` renders these as a "Your plan
+        includes" panel, deliberately NOT styled as `UsageBar`s — there's
+        nothing "used" about a CPU allocation, it's a fact about the plan,
+        not a consumable — plus a one-line reminder that BYOK models
+        aren't limited by the max-model-tier cap shown (that only applies
+        to self-hosted Ollama). Made `limits` optional on the frontend
+        type and gated the whole panel on its presence, so an older
+        cached response or a backend that hasn't deployed this yet just
+        omits the panel rather than crashing. Verified with `tsc --noEmit`
+        and `php -l` — both clean.
   - [ ] **E2c — Upgrade path for non-top-tier active subscribers.** Once
         E2a is fixed, a Starter/Creator subscriber will correctly get a
         "Manage Subscription" section — but should *also* still see an

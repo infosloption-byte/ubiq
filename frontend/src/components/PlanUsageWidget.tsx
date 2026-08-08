@@ -20,6 +20,18 @@ interface PlanUsageData {
     sandbox: ConcurrentUsage | null;
     storage: { used_mb: number; limit_mb: number | null; unlimited: boolean; percent: number };
     projects: { count: number; limit: number | null; unlimited: boolean };
+    // E2b fix (PLAN_SYSTEM_TASKS.md Phase E): static plan *capability*
+    // specs — not consumable usage, so no used/limit pairing, just "what
+    // your plan includes." Optional because older cached responses (or a
+    // backend that hasn't deployed this yet) won't have it — handled with
+    // a fallback render below rather than assuming it's always present.
+    limits?: {
+        sandbox_cpu: string | null;
+        sandbox_memory_mb: number | null;
+        sandbox_idle_timeout_minutes: number | null;
+        max_model_tier: string | null;
+        sharing_enabled: boolean | null;
+    };
 }
 
 function UsageBar({ used, total, unlimited }: { used: number; total: number; unlimited: boolean }) {
@@ -150,6 +162,41 @@ export default function PlanUsageWidget() {
                     unlimited={data.projects.unlimited}
                 />
             </div>
+
+            {/* E2b fix: static plan capability specs — sandbox CPU/RAM/idle
+                timeout, max self-hosted model tier, sharing. Deliberately
+                NOT rendered as UsageBars — there's nothing "used" about a
+                CPU allocation, it's just a fact about the plan, so this
+                gets its own small label/value grid instead of borrowing the
+                usage-bar visual language for something that isn't usage. */}
+            {data.limits && (
+                <div className="p-3 rounded-lg bg-white/[0.02] border border-white/5">
+                    <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wide mb-2">Your plan includes</div>
+                    <div className="grid grid-cols-2 gap-y-1.5 text-[11px]">
+                        <span className="text-slate-500">Sandbox CPU</span>
+                        <span className="text-slate-300 font-mono text-right">{data.limits.sandbox_cpu ?? '—'} vCPU</span>
+
+                        <span className="text-slate-500">Sandbox RAM</span>
+                        <span className="text-slate-300 font-mono text-right">{data.limits.sandbox_memory_mb ?? '—'} MB</span>
+
+                        <span className="text-slate-500">Sandbox idle timeout</span>
+                        <span className="text-slate-300 font-mono text-right">{data.limits.sandbox_idle_timeout_minutes ?? '—'} min</span>
+
+                        <span className="text-slate-500">Max self-hosted model</span>
+                        <span className="text-slate-300 font-mono text-right capitalize">{data.limits.max_model_tier ?? '—'}</span>
+
+                        <span className="text-slate-500">Project sharing</span>
+                        <span className={`font-mono text-right ${data.limits.sharing_enabled ? 'text-emerald-400' : 'text-slate-500'}`}>
+                            {data.limits.sharing_enabled ? 'Enabled' : 'Not on this plan'}
+                        </span>
+                    </div>
+                    {/* BYOK models (your own Gemini/OpenAI/OpenRouter/Mistral key) are
+                        never limited by "max self-hosted model" above — that cap only
+                        applies to self-hosted Ollama models. See CompletionController's
+                        hasByoKeyFor()/tier_compare logic. */}
+                    <div className="text-[10px] text-slate-600 mt-2">Bring-your-own-key models aren't limited by the tier above.</div>
+                </div>
+            )}
 
             {!data.ai && !data.sandbox && (
                 <div className="flex items-center gap-2 text-[11px] text-slate-500">

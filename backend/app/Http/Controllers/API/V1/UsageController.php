@@ -50,6 +50,21 @@ class UsageController extends Controller
                 'limit' => $projectsUnlimited ? null : (int) $projectsLimit,
                 'unlimited' => $projectsUnlimited,
             ],
+            // E2b fix (PLAN_SYSTEM_TASKS.md Phase E): these are the plan's
+            // static *capability* specs, not consumable usage counters —
+            // there's no "used/limit" or percent for them, just "what your
+            // plan includes." Previously absent from this endpoint entirely,
+            // so no Settings view could show them regardless of what the
+            // frontend tried to render. Keys match plan_features.feature_key
+            // exactly (see PlanSeeder) so this stays a straight passthrough,
+            // not a re-mapping that could drift from the seeder later.
+            'limits' => [
+                'sandbox_cpu'                  => $planService->limitFor($user, 'sandbox.cpu'),
+                'sandbox_memory_mb'            => $planService->limitFor($user, 'sandbox.memory_mb'),
+                'sandbox_idle_timeout_minutes' => $planService->limitFor($user, 'sandbox.idle_timeout_minutes'),
+                'max_model_tier'               => $planService->limitFor($user, 'ai.max_model_tier'),
+                'sharing_enabled'              => $planService->limitFor($user, 'sharing.enabled'),
+            ],
         ]);
     }
 
