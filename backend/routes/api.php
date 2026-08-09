@@ -99,6 +99,7 @@ Route::prefix('v1')->group(function () {
         });
 
         Route::post('/auth/logout', [AuthController::class, 'logout']);
+        Route::post('/auth/logout-all', [AuthController::class, 'logoutAllDevices']); // E3c fix — PLAN_SYSTEM_TASKS.md Phase E
         Route::get('/auth/user',    [AuthController::class, 'user']);
         Route::get('/auth/me',      [AuthController::class, 'me']);
 

@@ -14,7 +14,7 @@ import {
   User, Key, Monitor, Save, 
   CheckCircle2, Loader2,
   Eye, EyeOff, CreditCard, Calendar, Clock,
-  ShieldCheck, AlertTriangle, XCircle
+  ShieldCheck, AlertTriangle, XCircle, LogOut
 } from 'lucide-react';
 
 // D8 fix (PLAN_SYSTEM_TASKS.md Phase D): the three providers this UI has
@@ -34,7 +34,7 @@ const AI_KEY_PROVIDERS: Array<{ id: 'openrouter' | 'mistral' | 'google'; label: 
 ];
 
 export default function SettingsPage() {
-  const { user, setUser } = useAuthStore();
+  const { user, setUser, logout } = useAuthStore();
   const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState<'ai' | 'editor' | 'billing' | 'general'>('ai');
   const [saving, setSaving] = useState(false);
@@ -221,6 +221,28 @@ export default function SettingsPage() {
       alert('Failed to remove key.');
     } finally {
       setSaving(false);
+    }
+  };
+
+  // E3c fix (PLAN_SYSTEM_TASKS.md Phase E): revokes every Sanctum token for
+  // this account server-side, then clears the client-side auth state and
+  // navigates to /login — this also signs out the session that clicked the
+  // button, matching what "Log Out All Devices" actually says it does.
+  const [loggingOutAll, setLoggingOutAll] = useState(false);
+  const handleLogoutAllDevices = async () => {
+    if (!window.confirm('Log out of all devices, including this one? You\'ll need to sign in again everywhere.')) return;
+    setLoggingOutAll(true);
+    try {
+      await authAPI.logoutAllDevices();
+    } catch (e) {
+      console.error('Failed to revoke all sessions server-side', e);
+      // Proceed with the client-side logout regardless — if the server
+      // call failed (e.g. network blip), leaving the person stuck signed
+      // in on THIS device with no way to log out at all would be worse
+      // than a logout that maybe didn't reach every other device.
+    } finally {
+      logout();
+      navigate('/login');
     }
   };
 
@@ -595,9 +617,28 @@ export default function SettingsPage() {
                     <p className="text-sm text-slate-400">Your personal profile and security.</p>
                   </div>
                   <div className="p-6 bg-white/5 rounded-xl border border-white/10 flex items-center gap-6">
-                    <div className="w-20 h-20 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-3xl font-bold text-white shadow-2xl shrink-0">
-                      {user?.username?.[0].toUpperCase()}
-                    </div>
+                    {/* E3a fix (PLAN_SYSTEM_TASKS.md Phase E): `user.avatar`
+                        already existed on the User model and is populated
+                        for Google OAuth signups, but nothing ever rendered
+                        it — this was always just the initial-letter circle,
+                        even when a real profile picture was sitting right
+                        there in the API response. Falls back to the
+                        initial circle when there's no avatar (email/
+                        password signups, or a Google avatar URL that
+                        fails to load — onError swaps in the fallback
+                        rather than showing a broken image icon). */}
+                    {user?.avatar ? (
+                      <img
+                        src={user.avatar}
+                        alt={user.username}
+                        className="w-20 h-20 rounded-full object-cover shrink-0 shadow-2xl"
+                        onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                      />
+                    ) : (
+                      <div className="w-20 h-20 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-3xl font-bold text-white shadow-2xl shrink-0">
+                        {user?.username?.[0].toUpperCase()}
+                      </div>
+                    )}
                     <div className="flex-1 overflow-hidden">
                       <h3 className="text-xl font-bold text-white truncate">{user?.username}</h3>
                       <p className="text-sm text-slate-400 truncate mb-4">{user?.email}</p>
@@ -607,6 +648,25 @@ export default function SettingsPage() {
                         </span>
                       </div>
                     </div>
+                  </div>
+
+                  {/* E3c fix (PLAN_SYSTEM_TASKS.md Phase E): revokes every
+                      Sanctum token for this user (not just the current
+                      session) — see AuthController::logoutAllDevices().
+                      Deliberately no "except this device" variant; the
+                      button says all devices, so it signs this one out
+                      too rather than a quietly-different actual behavior. */}
+                  <div className="p-6 bg-white/5 rounded-xl border border-white/10">
+                    <h3 className="text-sm font-bold text-white mb-1">Log Out All Devices</h3>
+                    <p className="text-xs text-slate-400 mb-4">Signs you out everywhere, including this device — useful if you suspect a session was left open somewhere you don't recognize.</p>
+                    <button
+                      onClick={handleLogoutAllDevices}
+                      disabled={loggingOutAll}
+                      className="flex items-center gap-2 bg-white/5 hover:bg-red-500/10 border border-white/10 hover:border-red-500/30 text-slate-300 hover:text-red-300 px-4 py-2 rounded-lg text-sm font-bold transition-all disabled:opacity-60"
+                    >
+                      {loggingOutAll ? <Loader2 className="w-4 h-4 animate-spin" /> : <LogOut className="w-4 h-4" />}
+                      Log Out All Devices
+                    </button>
                   </div>
                 </div>
               )}

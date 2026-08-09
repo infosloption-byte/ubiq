@@ -94,6 +94,7 @@ export const authAPI = {
     register: (data: any) => api.post('/auth/register', data),
     login: (data: any) => api.post('/auth/login', data),
     logout: () => api.post('/auth/logout'),
+    logoutAllDevices: () => api.post('/auth/logout-all'), // E3c fix — PLAN_SYSTEM_TASKS.md Phase E
     me: () => api.get('/auth/me'),
     refresh: () => api.post('/auth/refresh'),
 };

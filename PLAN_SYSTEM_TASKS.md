@@ -1062,21 +1062,31 @@ then the net-new Privacy tab last.
 - [ ] **E3 — Account tab**, ordered easy → hard, deliberately saving the
       destructive one for last:
 
-  - [ ] **E3a — Show the real avatar; clarify "full name."** `User.avatar`
-        already exists as a column and is populated for Google OAuth
-        signups (confirmed in the model and the OAuth-columns migration)
-        — but Settings only ever renders a colored circle with the first
-        letter of `username`, never `user.avatar`, even when a real
-        profile picture is sitting right there. Fix: render `user.avatar`
-        when present, fall back to the initial circle otherwise. **Open
-        question, not assumed:** there's no separate `full_name` column
-        on `users` — only `username`. Recommend treating `username` as
-        the display name (no migration needed) unless a real legal/full
-        name field is actually wanted, which would need a new column —
-        your call before this is built.
-  - [ ] **E3c — Log Out All Devices.** Straightforward: `$user->tokens()
-        ->delete()` (Sanctum) behind a confirmation, since it also signs
-        the current session out. Low risk, no new schema.
+  - [x] **E3a — Show the real avatar; clarify "full name."** `User.avatar`
+        already existed as a column and was populated for Google OAuth
+        signups, but Settings only ever rendered a colored circle with
+        the first letter of `username`, never `user.avatar`, even when a
+        real profile picture was sitting right there in the API response.
+        Fixed: renders `user.avatar` when present (with an `onError`
+        fallback in case the URL ever 404s — hides the broken image
+        rather than leaving a broken-image icon), falls back to the
+        initial circle otherwise. `full_name` question already decided
+        earlier in this phase (see "Decisions made 2026-08-08" above):
+        `username` stays the display name, no new column. Verified with
+        `tsc --noEmit` and a full `npm run build` — both clean.
+  - [x] **E3c — Log Out All Devices.** Added `AuthController::
+        logoutAllDevices()` (`$user->tokens()->delete()`, revokes every
+        Sanctum token, not just the caller's own — no "except this
+        device" variant, since that would be a quietly different
+        behavior than what the button says) behind a new route
+        (`POST /auth/logout-all`) and a confirmation dialog on the
+        frontend. If the server call itself fails (network blip, etc.),
+        the client-side logout (clear auth store, navigate to `/login`)
+        still proceeds regardless — leaving someone stuck signed in on
+        the device that just tried to log them out everywhere would be
+        worse than a logout that maybe didn't reach every other device.
+        Verified with `tsc --noEmit`, a full `npm run build`, and
+        `php -l` on both backend files — all clean.
   - [ ] **E3b — Active Sessions (device, location, created, updated).**
         The biggest lift in this phase. Sanctum's stock
         `personal_access_tokens` table (confirmed: this app never

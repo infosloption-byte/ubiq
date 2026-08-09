@@ -160,6 +160,25 @@ class AuthController extends Controller
     }
 
     /**
+     * E3c (PLAN_SYSTEM_TASKS.md Phase E) — revokes every Sanctum token
+     * belonging to this user, not just the one making this request. This
+     * intentionally also signs out the session calling it — there's no
+     * "log out every device except this one" version, since that's not
+     * what "Log Out All Devices" was asked for, and quietly excluding the
+     * caller would be a surprising, undocumented exception to what the
+     * button says it does.
+     */
+    public function logoutAllDevices(Request $request)
+    {
+        try {
+            $request->user()->tokens()->delete();
+            return response()->json(['message' => 'Logged out of all devices successfully'], 200);
+        } catch (\Exception $e) {
+            return response()->json(['error' => 'Logout failed', 'message' => $e->getMessage()], 500);
+        }
+    }
+
+    /**
      * Refresh token
      */
     public function refresh(Request $request)
