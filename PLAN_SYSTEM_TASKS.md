@@ -1087,20 +1087,56 @@ then the net-new Privacy tab last.
         worse than a logout that maybe didn't reach every other device.
         Verified with `tsc --noEmit`, a full `npm run build`, and
         `php -l` on both backend files — all clean.
-  - [ ] **E3b — Active Sessions (device, location, created, updated).**
-        The biggest lift in this phase. Sanctum's stock
-        `personal_access_tokens` table (confirmed: this app never
-        customized it) has no device or IP columns at all — only
-        `name`/`last_used_at`/`created_at`. Needs: a migration adding
-        `user_agent`/`ip_address`, capturing both in
-        `AuthController::login`/`register`/`handleGoogleCallback` at
-        token-creation time, a new endpoint listing the caller's own
-        tokens with that metadata (parsing device/browser from the
-        user-agent string), and a per-row revoke action. **Scoping call
-        on "location":** true city/country geolocation needs a
-        third-party IP-lookup service (e.g. a free tier of ip-api.com) —
-        recommend shipping device + raw IP address first, treating full
-        geolocation as an optional follow-up, not a blocker.
+  - [x] **E3b — Active Sessions (device, location, created, updated).**
+        Biggest lift in this phase, as expected. New migration
+        (`2026_08_09_000001_add_session_metadata_to_personal_access_tokens`)
+        adds `user_agent`/`ip_address`/`city`/`region`/`country` to
+        Sanctum's stock `personal_access_tokens` table, all nullable —
+        every column here is best-effort by design, a lookup failure or a
+        pre-migration token should just show "Unknown," never break
+        anything. Added `AuthController::createTokenWithMetadata()` and
+        routed all 4 existing `createToken()` call sites (register,
+        login, refresh, OAuth exchange) through it, so every login path
+        captures this consistently instead of risking one path silently
+        missing it if done ad-hoc at each site. New
+        `App\Services\IpGeolocationService`: calls `ip-api.com`'s free
+        tier (no key needed, ~45 req/min limit — fine here since this
+        runs once per login, not per request), 2s timeout, skips the
+        lookup entirely for local/private IPs, and returns nulls on
+        *any* failure (timeout, non-200, malformed response) rather than
+        throwing — a geolocation hiccup must never block login itself.
+        **Per the earlier "most accurate" decision** (see "Decisions made
+        2026-08-08" above) this does real city/region/country lookup
+        rather than settling for device+IP only. **Known limitation,
+        stated plainly:** the actual HTTP call to `ip-api.com` could not
+        be executed from the sandbox this was built in — that domain
+        isn't on its allowed outbound list — so this is written and
+        reasoned through carefully (verified the response-shape handling
+        logic, the private-IP detection, the timeout/failure paths) but
+        has NOT been smoke-tested against a real request. Needs an actual
+        test against a real IP once deployed before fully trusting it.
+        New endpoints: `GET /user/sessions` (lists every token for the
+        caller, marks which one `is_current`, parses a device/browser
+        label from the raw stored user-agent on the fly rather than
+        pre-parsing and storing it — verified `parseDeviceLabel()` by
+        actually *running* it against realistic Chrome/Windows, Safari/
+        Mac, Safari/iPhone, and Chrome/Android user-agent strings, not
+        just syntax-checking the `match(true)` comma-arm logic) and
+        `DELETE /user/sessions/{id}` (revokes one session — scoped via
+        `$request->user()->tokens()->where('id', $id)`, not a bare
+        `find()`, specifically so this can't become an IDOR letting
+        someone revoke another user's session by guessing a numeric id).
+        Frontend: new `ActiveSessionsPanel.tsx` component (device,
+        location or raw IP fallback, created/last-active timestamps, a
+        "This device" label with no revoke button on the current
+        session — revoking your own current session from inside a
+        settings list would just log you out confusingly mid-page; "Log
+        Out All Devices" already covers that case explicitly), plus its
+        own manual refresh button matching the one added to
+        `PlanUsageWidget` in the E2b sub-parts. Verified with
+        `tsc --noEmit`, a full `npm run build`, and `php -l` on every
+        touched backend file — all clean, same pre-existing unrelated
+        Rollup warning as before, nothing new.
   - [ ] **E3d — Delete Account.** Highest-risk item in the whole phase —
         build and test this *last*, once the rest of the tab is solid.
         Needs, in order: (1) cancel any active PayPal subscription first

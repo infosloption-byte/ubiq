@@ -95,6 +95,8 @@ export const authAPI = {
     login: (data: any) => api.post('/auth/login', data),
     logout: () => api.post('/auth/logout'),
     logoutAllDevices: () => api.post('/auth/logout-all'), // E3c fix — PLAN_SYSTEM_TASKS.md Phase E
+    getSessions: () => api.get('/user/sessions'), // E3b fix — PLAN_SYSTEM_TASKS.md Phase E
+    revokeSession: (id: number) => api.delete(`/user/sessions/${id}`), // E3b fix
     me: () => api.get('/auth/me'),
     refresh: () => api.post('/auth/refresh'),
 };

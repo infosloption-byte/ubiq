@@ -10,6 +10,7 @@ import PricingGrid from '../components/PricingGrid';
 // anywhere in the app (confirmed via repo-wide grep) — flagged as now-dead
 // code, left in place since deleting files wasn't asked for.
 import PlanUsageWidget from '../components/PlanUsageWidget';
+import ActiveSessionsPanel from '../components/ActiveSessionsPanel';
 import { 
   User, Key, Monitor, Save, 
   CheckCircle2, Loader2,
@@ -649,6 +650,8 @@ export default function SettingsPage() {
                       </div>
                     </div>
                   </div>
+
+                  <ActiveSessionsPanel />
 
                   {/* E3c fix (PLAN_SYSTEM_TASKS.md Phase E): revokes every
                       Sanctum token for this user (not just the current

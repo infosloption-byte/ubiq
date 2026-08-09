@@ -10,6 +10,7 @@ use Laravel\Socialite\Facades\Socialite;
 use App\Models\User;
 use App\Models\UserPreference;
 use App\Models\Plan;
+use App\Services\IpGeolocationService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Validator;
@@ -19,6 +20,40 @@ use App\Http\Controllers\Controller;
 
 class AuthController extends Controller
 {
+    public function __construct(private IpGeolocationService $geo) {}
+
+    /**
+     * E3b (PLAN_SYSTEM_TASKS.md Phase E) — every one of the 4 places this
+     * controller creates a token now goes through here instead of calling
+     * $user->createToken() directly, so device/IP/location metadata is
+     * captured consistently at every login path (register, login, token
+     * refresh, Google OAuth) rather than needing the same few lines
+     * duplicated 4 times and risking one path silently missing it later.
+     *
+     * The geolocation lookup runs synchronously during login — accepted
+     * tradeoff: it's capped at a 2s HTTP timeout (see IpGeolocationService)
+     * and only happens once per token creation, not per request, so the
+     * worst case is a login that takes up to ~2s longer, not a slowdown
+     * that compounds across normal usage.
+     */
+    private function createTokenWithMetadata(User $user, Request $request): string
+    {
+        $newToken = $user->createToken('auth_token');
+
+        $ip = $request->ip();
+        $location = $this->geo->lookup($ip);
+
+        $newToken->accessToken->forceFill([
+            'user_agent' => $request->userAgent(),
+            'ip_address' => $ip,
+            'city' => $location['city'],
+            'region' => $location['region'],
+            'country' => $location['country'],
+        ])->save();
+
+        return $newToken->plainTextToken;
+    }
+
     /**
      * Register a new user
      */
@@ -64,7 +99,7 @@ class AuthController extends Controller
                 'code_suggestions' => true,
             ]);
 
-            $token = $user->createToken('auth_token')->plainTextToken;
+            $token = $this->createTokenWithMetadata($user, $request); // E3b fix — PLAN_SYSTEM_TASKS.md Phase E
 
             return response()->json([
                 'message' => 'User registered successfully',
@@ -97,7 +132,7 @@ class AuthController extends Controller
             return response()->json(['error' => 'Invalid credentials'], 401);
         }
 
-        $token = $user->createToken('auth_token')->plainTextToken;
+        $token = $this->createTokenWithMetadata($user, $request); // E3b fix — PLAN_SYSTEM_TASKS.md Phase E
 
         return response()->json([
             'message' => 'Login successful',
@@ -179,6 +214,86 @@ class AuthController extends Controller
     }
 
     /**
+     * E3b (PLAN_SYSTEM_TASKS.md Phase E) — lists every active session
+     * (Sanctum token) for the authenticated user: device (parsed from the
+     * stored user_agent on the fly, not pre-parsed and stored, so a future
+     * parsing improvement doesn't need a backfill), IP, best-effort
+     * city/region/country, created_at, last_used_at, and whether this is
+     * the session making the current request.
+     */
+    public function sessions(Request $request)
+    {
+        $currentTokenId = $request->user()->currentAccessToken()?->id;
+
+        $sessions = $request->user()->tokens()
+            ->orderByDesc('last_used_at')
+            ->get()
+            ->map(fn ($token) => [
+                'id' => $token->id,
+                'is_current' => $token->id === $currentTokenId,
+                'device' => $this->parseDeviceLabel($token->user_agent),
+                'ip_address' => $token->ip_address,
+                'location' => trim(implode(', ', array_filter([$token->city, $token->region, $token->country]))) ?: null,
+                'created_at' => $token->created_at,
+                'last_used_at' => $token->last_used_at,
+            ]);
+
+        return response()->json(['sessions' => $sessions]);
+    }
+
+    /**
+     * E3b — revokes a single session by token id. Scoped via
+     * `$request->user()->tokens()->where('id', $id)` rather than a bare
+     * `PersonalAccessToken::find($id)` — this is the difference between
+     * "delete my own session" and an IDOR letting anyone revoke anyone
+     * else's session just by guessing a numeric id. The where() only ever
+     * matches a row that's actually in this user's own tokens relation.
+     */
+    public function revokeSession(Request $request, $id)
+    {
+        $deleted = $request->user()->tokens()->where('id', $id)->delete();
+
+        if (!$deleted) {
+            return response()->json(['error' => 'Session not found'], 404);
+        }
+
+        return response()->json(['message' => 'Session revoked'], 200);
+    }
+
+    /**
+     * E3b — lightweight device/browser label parsed from a raw user-agent
+     * string. Deliberately not a full UA-parsing library dependency for
+     * what's ultimately a "nice to have" display label — covers the
+     * common browsers/platforms, falls back to a generic label rather
+     * than guessing wrong for anything unusual.
+     */
+    private function parseDeviceLabel(?string $userAgent): string
+    {
+        if (!$userAgent) return 'Unknown device';
+
+        $browser = match (true) {
+            str_contains($userAgent, 'Edg/') => 'Edge',
+            str_contains($userAgent, 'OPR/') => 'Opera',
+            str_contains($userAgent, 'Firefox/') => 'Firefox',
+            str_contains($userAgent, 'Chrome/') => 'Chrome',
+            str_contains($userAgent, 'Safari/') => 'Safari',
+            default => 'Browser',
+        };
+
+        $os = match (true) {
+            str_contains($userAgent, 'iPhone') => 'iPhone',
+            str_contains($userAgent, 'iPad') => 'iPad',
+            str_contains($userAgent, 'Android') => 'Android',
+            str_contains($userAgent, 'Windows') => 'Windows',
+            str_contains($userAgent, 'Macintosh'), str_contains($userAgent, 'Mac OS X') => 'Mac',
+            str_contains($userAgent, 'Linux') => 'Linux',
+            default => null,
+        };
+
+        return $os ? "{$browser} on {$os}" : $browser;
+    }
+
+    /**
      * Refresh token
      */
     public function refresh(Request $request)
@@ -186,7 +301,7 @@ class AuthController extends Controller
         try {
             $user = $request->user();
             $request->user()->currentAccessToken()->delete();
-            $token = $user->createToken('auth_token')->plainTextToken;
+            $token = $this->createTokenWithMetadata($user, $request); // E3b fix — PLAN_SYSTEM_TASKS.md Phase E
 
             return response()->json([
                 'message' => 'Token refreshed successfully',
@@ -308,7 +423,7 @@ class AuthController extends Controller
             }
 
             // 4. Create Token
-            $token = $user->createToken('auth_token')->plainTextToken;
+            $token = $this->createTokenWithMetadata($user, $request); // E3b fix — PLAN_SYSTEM_TASKS.md Phase E
 
             // 5. Create Default Preferences if missing
             if (!$user->preferences) {
