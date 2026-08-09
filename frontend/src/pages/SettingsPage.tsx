@@ -368,7 +368,9 @@ export default function SettingsPage() {
                 padding on mobile (so pills can be dragged flush to the
                 screen edge) without affecting the desktop layout at all,
                 where it reverts to the original fixed-width vertical
-                sidebar untouched. */}
+                sidebar untouched. (5 tabs as of the Privacy tab added
+                later in this same phase — the layout doesn't care how
+                many there are.) */}
             <div className="flex flex-row md:flex-col gap-2 overflow-x-auto -mx-6 px-6 pb-1 md:mx-0 md:px-0 md:pb-0 md:overflow-visible md:w-64 shrink-0">
               <TabButton id="ai"      label="AI Models (BYOK)"  icon={Key} />
               <TabButton id="editor"  label="Editor Config"      icon={Monitor} />

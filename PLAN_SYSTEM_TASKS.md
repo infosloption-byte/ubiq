@@ -1259,6 +1259,23 @@ then the net-new Privacy tab last.
           phase, unchanged from the original note; a genuinely bigger
           feature than anything else listed here.
 
+- 2026-08-09 — Post-Phase-E gap audit (no new phase, just verification):
+  walked every route/controller/frontend-service/component path added in
+  the E3d/E4/E5 session for breaks. Everything wired correctly except one
+  real bug: `PrivacyPanel.tsx`'s "Export My Data" reads
+  `res.headers['content-disposition']` to get the server-generated
+  filename from `AuthController::exportData()`, but
+  `backend/config/cors.php` had `'exposed_headers' => []` — browsers strip
+  any response header not on that list for cross-origin requests (frontend
+  and backend are different origins here), so the header was always empty
+  and every export silently used the generic client-side fallback filename
+  instead. Not a crash, just a silently-broken filename. Fixed by adding
+  `'Content-Disposition'` to `exposed_headers`. Also fixed a stale comment
+  in `SettingsPage.tsx` still saying "4 tabs" after Privacy became the
+  5th. No other gaps found — `database/schema.sql` is a pre-existing stale
+  snapshot from before Phase A (migrations are the real source of truth),
+  left untouched as out of scope for this audit.
+
 - 2026-08-09 — Bookkeeping only, no code change: checked the whole file
   for anything still open after the E3d/E4/E5 session above and found
   exactly one — **E2**'s own parent checkbox was still `[ ]` even though
