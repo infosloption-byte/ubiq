@@ -120,8 +120,6 @@ export const privacyApi = {
 };
 
 export const userAPI = {
-    getProfile: () => api.get('/user/profile'),
-    updateProfile: (data: any) => api.put('/user/profile', data),
     getPreferences: () => api.get('/user/preferences'),
     updatePreferences: (data: any) => api.put('/user/preferences', data),
     getUsage: (days?: number) => api.get('/user/usage', { params: { days } }),
