@@ -6,6 +6,11 @@ scope from what was originally planned.
 
 Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 
+**Status as of 2026-08-09: Phases A–E all complete.** No open items
+remain in this tracker. See the dated log entries below each phase for
+implementation notes, and "Decisions made" sections for anything that
+required a judgment call along the way.
+
 ---
 
 ## Phase A — Database Migrations
@@ -884,7 +889,7 @@ then the net-new Privacy tab last.
       at `md:` and above. Frontend-only, no backend, lowest risk in this
       phase — good first task.
 
-- [ ] **E2 — Billing & Plan tab**, split into three because (b) and (c)
+- [x] **E2 — Billing & Plan tab**, split into three because (b) and (c)
       depend on (a) being correct first:
 
   - [x] **E2a — Fix subscription-tier-blind status logic — turned out to be
@@ -1253,6 +1258,18 @@ then the net-new Privacy tab last.
         - **Two-factor authentication** — still out of scope for this
           phase, unchanged from the original note; a genuinely bigger
           feature than anything else listed here.
+
+- 2026-08-09 — Bookkeeping only, no code change: checked the whole file
+  for anything still open after the E3d/E4/E5 session above and found
+  exactly one — **E2**'s own parent checkbox was still `[ ]` even though
+  all 5 of its sub-items (E2a, E2b, E2b sub-part, E2b sub-part 2, E2c)
+  have read `[x]` since 2026-08-08. Nothing left to build; just the
+  checkbox was never flipped. Marked `[x]`. Also double-checked the one
+  other loose thread in this file — the B3d model-tier policy question
+  raised on 2026-07-30 — and confirmed it was already answered in the
+  entry immediately below it that same day. With that, every phase in
+  this tracker (A through E) is complete and there are no remaining
+  open items.
 
 - 2026-08-09 — E3d, E4, E5 complete — Phase E done. Also fixed the
   production-breaking regression this session started from: the E3b
