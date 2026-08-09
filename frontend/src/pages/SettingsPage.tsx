@@ -11,11 +11,15 @@ import PricingGrid from '../components/PricingGrid';
 // code, left in place since deleting files wasn't asked for.
 import PlanUsageWidget from '../components/PlanUsageWidget';
 import ActiveSessionsPanel from '../components/ActiveSessionsPanel';
+import PasswordPanel from '../components/PasswordPanel';
+import ConnectedAccountsPanel from '../components/ConnectedAccountsPanel';
+import DeleteAccountPanel from '../components/DeleteAccountPanel';
+import PrivacyPanel from '../components/PrivacyPanel';
 import { 
   User, Key, Monitor, Save, 
   CheckCircle2, Loader2,
   Eye, EyeOff, CreditCard, Calendar, Clock,
-  ShieldCheck, AlertTriangle, XCircle, LogOut
+  ShieldCheck, AlertTriangle, XCircle, LogOut, Lock
 } from 'lucide-react';
 
 // D8 fix (PLAN_SYSTEM_TASKS.md Phase D): the three providers this UI has
@@ -37,7 +41,7 @@ const AI_KEY_PROVIDERS: Array<{ id: 'openrouter' | 'mistral' | 'google'; label: 
 export default function SettingsPage() {
   const { user, setUser, logout } = useAuthStore();
   const navigate = useNavigate();
-  const [activeTab, setActiveTab] = useState<'ai' | 'editor' | 'billing' | 'general'>('ai');
+  const [activeTab, setActiveTab] = useState<'ai' | 'editor' | 'billing' | 'general' | 'privacy'>('ai');
   const [saving, setSaving] = useState(false);
   const [successMsg, setSuccessMsg] = useState('');
 
@@ -370,6 +374,7 @@ export default function SettingsPage() {
               <TabButton id="editor"  label="Editor Config"      icon={Monitor} />
               <TabButton id="billing" label="Billing & Plan"     icon={CreditCard} />
               <TabButton id="general" label="Account"            icon={User} />
+              <TabButton id="privacy" label="Privacy"            icon={Lock} />
             </div>
 
             <div className="flex-1 bg-[#0B0B10] border border-white/10 rounded-xl p-6 md:p-8 relative min-h-[550px]">
@@ -653,6 +658,10 @@ export default function SettingsPage() {
 
                   <ActiveSessionsPanel />
 
+                  <PasswordPanel />
+
+                  <ConnectedAccountsPanel />
+
                   {/* E3c fix (PLAN_SYSTEM_TASKS.md Phase E): revokes every
                       Sanctum token for this user (not just the current
                       session) — see AuthController::logoutAllDevices().
@@ -671,7 +680,17 @@ export default function SettingsPage() {
                       Log Out All Devices
                     </button>
                   </div>
+
+                  {/* E3d — Delete Account. Deliberately built and placed
+                      last in the Account tab, per the "build/test this
+                      last, once the rest of the tab is solid" plan note. */}
+                  <DeleteAccountPanel />
                 </div>
+              )}
+
+              {/* ── PRIVACY TAB ───────────────────────────────────────────── */}
+              {activeTab === 'privacy' && (
+                <PrivacyPanel onGoToAccount={() => setActiveTab('general')} />
               )}
 
             </div>

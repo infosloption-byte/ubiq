@@ -11,16 +11,20 @@ use App\Models\User;
 use App\Models\UserPreference;
 use App\Models\Plan;
 use App\Services\IpGeolocationService;
+use App\Services\PayPalService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Str;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Process;
 use App\Http\Controllers\Controller;
 
 class AuthController extends Controller
 {
-    public function __construct(private IpGeolocationService $geo) {}
+    public function __construct(private IpGeolocationService $geo, private PayPalService $paypal) {}
 
     /**
      * E3b (PLAN_SYSTEM_TASKS.md Phase E) — every one of the 4 places this
@@ -81,6 +85,11 @@ class AuthController extends Controller
                 // day one; existing users are backfilled separately.
                 'plan_id' => Plan::where('key', 'free')->value('id'),
             ]);
+
+            // E5 — this is a real, user-chosen password (as opposed to the
+            // random throwaway one Google OAuth signups get), so mark it.
+            // Not in $fillable, set directly via forceFill for clarity.
+            $user->forceFill(['password_set_at' => now()])->save();
 
             // Default preferences setup...
             $prefs = UserPreference::create([
@@ -162,7 +171,14 @@ class AuthController extends Controller
             'is_admin' => $user->is_admin,
             'avatar' => $user->avatar,
             'created_at' => $user->created_at,
-            'preferences' => $prefs
+            'preferences' => $prefs,
+            // E5 — drives "Change Password" vs "Set a Password" and the
+            // connected-accounts indicator in Settings > Account. Raw
+            // google_id itself is never exposed, only whether it's set.
+            'has_password' => $user->has_password,
+            'google_connected' => $user->google_id !== null,
+            // E4 — Privacy tab default-visibility setting.
+            'default_project_visibility' => $user->default_project_visibility,
         ];
     }
 
@@ -291,6 +307,216 @@ class AuthController extends Controller
         };
 
         return $os ? "{$browser} on {$os}" : $browser;
+    }
+
+    /**
+     * E5 (PLAN_SYSTEM_TASKS.md Phase E) — change or set the account
+     * password. Two modes off the same endpoint, keyed off
+     * `$user->has_password` (see User::getHasPasswordAttribute()):
+     *   - Already has a real password: `current_password` is required and
+     *     verified before allowing the change.
+     *   - Google-only account with no password yet ("Set a Password"):
+     *     no current password to check, since there isn't one the user
+     *     actually knows — this ADDS email/password as a second login
+     *     method without touching the Google login.
+     * Either way, `password_set_at` is (re)stamped to now() so a
+     * newly-set password is immediately recognized as "real."
+     */
+    public function changePassword(Request $request)
+    {
+        $user = $request->user();
+
+        $rules = [
+            'new_password' => 'required|string|min:8|confirmed',
+        ];
+        if ($user->has_password) {
+            $rules['current_password'] = 'required|string';
+        }
+
+        $validator = Validator::make($request->all(), $rules);
+        if ($validator->fails()) {
+            return response()->json(['error' => 'Validation failed', 'messages' => $validator->errors()], 422);
+        }
+
+        if ($user->has_password && !Hash::check($request->current_password, $user->password)) {
+            return response()->json(['error' => 'Current password is incorrect'], 401);
+        }
+
+        $wasSettingForFirstTime = !$user->has_password;
+
+        $user->forceFill([
+            'password' => Hash::make($request->new_password),
+            'password_set_at' => now(),
+        ])->save();
+
+        return response()->json([
+            'message' => $wasSettingForFirstTime ? 'Password set successfully' : 'Password changed successfully',
+        ], 200);
+    }
+
+    /**
+     * E4 (PLAN_SYSTEM_TASKS.md Phase E) — set the visibility newly-created
+     * projects default to when the create form doesn't explicitly pass
+     * one. See ProjectController::store(), which now falls back to this
+     * instead of a hardcoded 'private'.
+     */
+    public function updateDefaultVisibility(Request $request)
+    {
+        $validator = Validator::make($request->all(), [
+            'default_project_visibility' => 'required|in:private,public',
+        ]);
+        if ($validator->fails()) {
+            return response()->json(['error' => 'Validation failed', 'messages' => $validator->errors()], 422);
+        }
+
+        $user = $request->user();
+        $user->update(['default_project_visibility' => $request->default_project_visibility]);
+
+        return response()->json(['default_project_visibility' => $user->default_project_visibility], 200);
+    }
+
+    /**
+     * E4 — "Export My Data." A GDPR-style self-service export of
+     * everything this user actually owns: account info, projects (with
+     * file contents), and AI chat history. Streamed as a single JSON
+     * attachment rather than built into a variable first — projects can
+     * contain a lot of file content, no reason to hold it all in memory
+     * twice.
+     */
+    public function exportData(Request $request)
+    {
+        $user = $request->user();
+
+        $payload = [
+            'exported_at' => now()->toIso8601String(),
+            'account' => [
+                'id' => $user->id,
+                'username' => $user->username,
+                'email' => $user->email,
+                'created_at' => $user->created_at,
+                'subscription_tier' => $user->subscription_tier,
+                'google_connected' => $user->google_id !== null,
+            ],
+            'projects' => $user->projects()
+                ->with(['files' => function ($q) {
+                    $q->where('is_deleted', false);
+                }])
+                ->get()
+                ->map(fn ($project) => [
+                    'id' => $project->id,
+                    'name' => $project->name,
+                    'description' => $project->description,
+                    'visibility' => $project->visibility,
+                    'created_at' => $project->created_at,
+                    'files' => $project->files->map(fn ($file) => [
+                        'name' => $file->name,
+                        'path' => $file->path,
+                        'content' => $file->content,
+                        'size_bytes' => $file->size_bytes,
+                    ]),
+                ]),
+            'chat_sessions' => $user->chatSessions()
+                ->with('messages')
+                ->get()
+                ->map(fn ($session) => [
+                    'title' => $session->title,
+                    'model_used' => $session->model_used,
+                    'created_at' => $session->created_at,
+                    'messages' => $session->messages->map(fn ($m) => [
+                        'role' => $m->role,
+                        'content' => $m->content,
+                        'created_at' => $m->created_at,
+                    ]),
+                ]),
+        ];
+
+        $filename = 'ubiq-export-' . $user->username . '-' . now()->format('Y-m-d') . '.json';
+
+        return response()->json($payload, 200, [
+            'Content-Disposition' => "attachment; filename=\"{$filename}\"",
+        ], JSON_PRETTY_PRINT);
+    }
+
+    /**
+     * E4 — "Clear AI Chat History." Deletes every chat session belonging
+     * to this user, across all projects. `chat_messages` cascades via its
+     * `session_id` FK (onDelete cascade, see the base schema migration),
+     * so a single delete on chat_sessions is enough — no separate message
+     * cleanup needed.
+     */
+    public function clearChatHistory(Request $request)
+    {
+        $count = $request->user()->chatSessions()->count();
+        $request->user()->chatSessions()->delete();
+
+        return response()->json(['message' => "Cleared {$count} chat session(s)."], 200);
+    }
+
+    /**
+     * E3d (PLAN_SYSTEM_TASKS.md Phase E) — irreversible account deletion.
+     * Deliberately the last thing built in this phase, and the most
+     * cautious method in this controller. Order matters here:
+     *
+     *   1. Typed confirmation FIRST, before touching anything — the
+     *      literal word "DELETE" or the account's own email address.
+     *   2. Cancel any active PayPal subscription. If PayPal's API call
+     *      fails, STOP and return an error rather than deleting the
+     *      account anyway — leaving a recurring charge running against a
+     *      now-deleted account would be worse than making the user retry.
+     *   3. Stop/remove this user's sandbox Docker containers. DB cascade
+     *      deletes (step 5) don't touch live containers — they'd leak and
+     *      keep running orphaned otherwise.
+     *   4. Revoke every Sanctum token explicitly. personal_access_tokens
+     *      is a polymorphic table (tokenable_type/id), not a real FK, so
+     *      it would NOT be caught by the user row's cascade deletes.
+     *   5. Delete the user row itself. Every other user-owned table
+     *      (projects, files, chat_sessions, usage_counters,
+     *      plan_action_logs, user_ai_keys, etc.) has a real FK with
+     *      cascadeOnDelete() — verified against every migration — so this
+     *      one delete is genuinely enough to take the rest with it.
+     */
+    public function deleteAccount(Request $request)
+    {
+        $validator = Validator::make($request->all(), [
+            'confirmation' => 'required|string',
+        ]);
+        if ($validator->fails()) {
+            return response()->json(['error' => 'Validation failed', 'messages' => $validator->errors()], 422);
+        }
+
+        $user = $request->user();
+        $confirmation = trim($request->input('confirmation'));
+
+        if (strcasecmp($confirmation, 'DELETE') !== 0 && strcasecmp($confirmation, $user->email) !== 0) {
+            return response()->json(['error' => 'Type DELETE or your account email to confirm.'], 422);
+        }
+
+        if ($user->paypal_subscription_id && $user->subscription_status !== 'canceled') {
+            $canceled = $this->paypal->cancelSubscription($user->paypal_subscription_id, 'Account deletion');
+            if (!$canceled) {
+                Log::error("[Account Deletion] Failed to cancel PayPal subscription for user {$user->id} — aborting deletion.");
+                return response()->json([
+                    'error' => 'Could not cancel your active subscription with PayPal. Please try again or contact support before deleting your account.',
+                ], 502);
+            }
+        }
+
+        foreach ($user->projects()->pluck('id') as $projectId) {
+            $containerName = "ubiq_project_{$projectId}";
+            Process::run("docker rm -f {$containerName} 2>/dev/null || true");
+        }
+
+        try {
+            DB::transaction(function () use ($user) {
+                $user->tokens()->delete();
+                $user->delete();
+            });
+        } catch (\Exception $e) {
+            Log::error('Account deletion failed: ' . $e->getMessage());
+            return response()->json(['error' => 'Account deletion failed. Please try again or contact support.'], 500);
+        }
+
+        return response()->json(['message' => 'Account deleted.'], 200);
     }
 
     /**

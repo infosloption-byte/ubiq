@@ -105,6 +105,19 @@ Route::prefix('v1')->group(function () {
         Route::get('/auth/user',    [AuthController::class, 'user']);
         Route::get('/auth/me',      [AuthController::class, 'me']);
 
+        // E5 — password change/set, not gated behind 'subscribed' since
+        // account security shouldn't require an active subscription.
+        Route::put('/user/password', [AuthController::class, 'changePassword']);
+
+        // E4 — Privacy tab. Same reasoning: these are account-level data
+        // rights, not paid features, so they sit outside 'subscribed' too.
+        Route::get('/user/export', [AuthController::class, 'exportData']);
+        Route::put('/user/default-visibility', [AuthController::class, 'updateDefaultVisibility']);
+        Route::post('/user/chat-history/clear', [AuthController::class, 'clearChatHistory']);
+
+        // E3d — irreversible account deletion.
+        Route::delete('/user/account', [AuthController::class, 'deleteAccount']);
+
         // ── Subscribed users only ─────────────────────────────────────────
         Route::middleware('subscribed')->group(function () {
 

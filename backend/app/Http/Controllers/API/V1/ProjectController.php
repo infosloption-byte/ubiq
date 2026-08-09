@@ -384,7 +384,10 @@ class ProjectController extends Controller
         // public visibility at creation time but their plan doesn't allow
         // it, silently fall back to private rather than blocking project
         // creation entirely over a secondary field.
-        $visibility = $request->visibility ?? 'private';
+        // E4 fix (PLAN_SYSTEM_TASKS.md Phase E): falls back to the user's
+        // own Privacy-tab default instead of a hardcoded 'private' when
+        // the create form doesn't pass an explicit visibility.
+        $visibility = $request->visibility ?? $user->default_project_visibility ?? 'private';
         if ($visibility === 'public' && !$this->planGuard->check($user, 'sharing.enable')) {
             $visibility = 'private';
         }

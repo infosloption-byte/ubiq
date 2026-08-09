@@ -24,7 +24,13 @@ class User extends Authenticatable
         'plan_id',
         'trial_ends_at',
         'subscription_ends_at',
+        'default_project_visibility',
     ];
+
+    // `password_set_at` is intentionally excluded from $fillable — it must
+    // only ever be set programmatically (register(), changePassword()),
+    // never from raw request input. See migration
+    // 2026_08_09_000002_add_account_privacy_settings_to_users.php.
 
     protected $hidden = [
         'password',
@@ -33,7 +39,8 @@ class User extends Authenticatable
 
     protected $appends = [
         'storage_used_human',
-        'trial_days_left'
+        'trial_days_left',
+        'has_password',
     ];
 
     protected $casts = [
@@ -44,6 +51,7 @@ class User extends Authenticatable
         'updated_at'        => 'datetime',
         'password'          => 'hashed',
         'is_admin'          => 'boolean',
+        'password_set_at'   => 'datetime',
     ];
 
     // --- RELATIONSHIPS ---
@@ -124,5 +132,16 @@ class User extends Authenticatable
             return max(0, now()->diffInDays($this->trial_ends_at, false));
         }
         return 0;
+    }
+
+    /**
+     * E5 (PLAN_SYSTEM_TASKS.md Phase E) — whether this account has a
+     * password the user actually knows, as opposed to the random
+     * throwaway one Google OAuth signups get. Drives whether Settings
+     * shows "Change Password" or "Set a Password".
+     */
+    public function getHasPasswordAttribute(): bool
+    {
+        return $this->password_set_at !== null;
     }
 }

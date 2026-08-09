@@ -14,6 +14,10 @@ interface User {
   extra_storage_gb: number;
   avatar?: string;
   api_key?: string;
+  // E5/E4 fixes — PLAN_SYSTEM_TASKS.md Phase E
+  has_password?: boolean;
+  google_connected?: boolean;
+  default_project_visibility?: 'private' | 'public';
   preferences?: {
     preferred_model: string;
     theme: string;

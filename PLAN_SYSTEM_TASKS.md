@@ -1059,7 +1059,7 @@ then the net-new Privacy tab last.
         `tsc --noEmit` and a full `npm run build` — both clean, same
         pre-existing unrelated warning as before, nothing new.
 
-- [ ] **E3 — Account tab**, ordered easy → hard, deliberately saving the
+- [x] **E3 — Account tab**, ordered easy → hard, deliberately saving the
       destructive one for last:
 
   - [x] **E3a — Show the real avatar; clarify "full name."** `User.avatar`
@@ -1137,62 +1137,148 @@ then the net-new Privacy tab last.
         `tsc --noEmit`, a full `npm run build`, and `php -l` on every
         touched backend file — all clean, same pre-existing unrelated
         Rollup warning as before, nothing new.
-  - [ ] **E3d — Delete Account.** Highest-risk item in the whole phase —
-        build and test this *last*, once the rest of the tab is solid.
-        Needs, in order: (1) cancel any active PayPal subscription first
-        via the existing `subscriptionApi` (deleting the account must not
-        leave an active recurring charge behind), (2) stop/clean up any
-        running sandbox Docker containers — DB cascade deletes won't
-        touch live containers, they'd leak, (3) delete the user row —
-        checked every migration's FK definitions, cascade deletes are
-        already correctly set up on every user-owned table (projects,
-        files, chat sessions, usage counters, plan action logs,
-        `user_ai_keys` from Phase D, etc.), so the DB side is actually
-        low-risk once 1–2 are handled, (4) require typed confirmation
-        (email or literal "DELETE") given this is irreversible.
+  - [x] **E3d — Delete Account.** Highest-risk item in the whole phase —
+        built and tested last, once the rest of the tab was solid, as
+        planned. Implemented exactly the 4-step order laid out below:
+        (1) `AuthController::deleteAccount()` cancels any active PayPal
+        subscription via `PayPalService::cancelSubscription()` — if that
+        call fails, deletion is **aborted** with a 502 asking the user to
+        retry or contact support, specifically so a recurring charge can
+        never outlive the account; (2) loops the user's project ids and
+        runs `docker rm -f ubiq_project_{id}` for each, since DB cascades
+        don't touch live containers; (3) explicitly deletes
+        `$user->tokens()` before deleting the user row — Sanctum's
+        `personal_access_tokens` is a polymorphic table with no real FK,
+        so it would NOT have been caught by cascade deletes otherwise —
+        then deletes the user row itself inside a `DB::transaction()`,
+        which cascades through every other user-owned table (verified
+        against every migration's FK definitions during the E3d
+        planning note); (4) typed confirmation — literal `DELETE` or the
+        account's own email, checked both server-side (`deleteAccount()`)
+        and client-side (`DeleteAccountPanel.tsx` disables the button
+        until it matches, so there's no "looked right but the server
+        rejected it" gap). New route: `DELETE /user/account`, sitting
+        outside the `subscribed` middleware group alongside
+        `/user/sessions` and `/auth/logout` — account deletion shouldn't
+        require an active subscription to use. Frontend: new
+        `DeleteAccountPanel.tsx`, collapsed by default behind a "Delete
+        My Account" button so the danger zone doesn't sit open on page
+        load, plus a native `confirm()` as a second guard before the
+        actual request fires. On success, clears the local auth store and
+        navigates to `/`. **Known limitation, stated plainly:** the
+        PayPal-cancellation branch of this flow could not be exercised
+        against a real PayPal subscription from the sandbox this was
+        built in (no PayPal credentials/network access there) — the code
+        is written and reasoned through (mirrors the existing, already-
+        working `PayPalController::cancel()` pattern exactly), but needs
+        a real smoke test against an active sandbox/live subscription
+        once deployed. Verified with `tsc --noEmit`, a full
+        `npm run build`, and a brace/paren balance check on every touched
+        backend file — all clean.
 
-- [ ] **E4 — New Privacy tab.** Checked what actually exists first,
+- [x] **E4 — New Privacy tab.** Checked what actually exists first,
       specifically to avoid shipping another decoy field (the `grok`
       lesson from Phase D) — **this app has no email/marketing
       notification system at all, and nothing tracks analytics inside the
       authenticated editor** (the one `analytics` hit in the whole
       frontend is an unrelated try/catch comment on the public landing
       page). So "email preferences" and "analytics opt-out" toggles would
-      control nothing real today — not proposing either. Grounded
-      suggestions instead, everything below maps to data/features that
-      actually exist:
-        - **Export My Data** — download a JSON/zip of the user's own
-          projects, files, and chat history plus account info. Standard
-          GDPR-style request, genuinely buildable against existing tables.
-        - **Default project visibility** — public/private default applied
-          to newly created projects; ties into the `sharing.enabled` plan
-          feature that already exists rather than inventing a new concept.
-        - **Clear AI Chat History** — delete all `chat_sessions`/messages
-          across every project. Real privacy-hygiene action against data
-          that already exists.
-        - **Link to Delete Account** — cross-reference to E3d rather than
-          duplicating it in two tabs.
-        - Explicitly **not** in v1, and why: new-device login email alerts
-          (no mail system exists to send them), marketing email opt-out
-          (nothing sends marketing email yet), analytics opt-out (nothing
-          tracked in the authenticated app today).
+      control nothing real today — not proposing either. Built exactly
+      the 4 grounded items from the audit, nothing more:
+        - **Export My Data** — `GET /user/export`
+          (`AuthController::exportData()`) returns a single JSON
+          attachment: account info, every project with its files
+          (including content), and full chat session/message history.
+          Built directly off Eloquent relations (`$user->projects()`,
+          `$user->chatSessions()`) rather than assembled ad hoc, so it
+          stays correct if those relations change. Frontend
+          (`PrivacyPanel.tsx`) fetches it as a blob and triggers a
+          browser download, reading the filename back out of the
+          `Content-Disposition` header the backend sets.
+        - **Default project visibility** — new `default_project_visibility`
+          column on `users` (migration
+          `2026_08_09_000002_add_account_privacy_settings_to_users.php`),
+          settable via `PUT /user/default-visibility`.
+          `ProjectController::store()` now falls back to it instead of a
+          hardcoded `'private'` when a create request doesn't pass an
+          explicit `visibility` — the existing `sharing.enable` plan gate
+          right below it is untouched, so a Starter-tier user can still
+          only get a private project even if their stored default says
+          public.
+        - **Clear AI Chat History** — `POST /user/chat-history/clear`
+          deletes every row in `$user->chatSessions()`; `chat_messages`
+          cascades via its existing `session_id` FK, so no separate
+          message cleanup was needed.
+        - **Link to Delete Account** — `PrivacyPanel.tsx` ends with a
+          "Go to Account" button that switches `SettingsPage`'s
+          `activeTab` to `'general'` rather than duplicating
+          `DeleteAccountPanel` in two tabs.
+        - Confirmed still **not** in v1, unchanged from the original
+          audit: new-device login email alerts, marketing email opt-out,
+          analytics opt-out — none of the underlying systems exist yet.
+        All 3 new endpoints sit outside the `subscribed` middleware
+        group — these are data-rights/preferences, not paid features.
+        Verified with `tsc --noEmit` and a full `npm run build` — clean.
 
-- [ ] **E5 — Other gaps found during this audit** (the "what else is
-      missing" ask), flagged for a decision rather than assumed:
-        - **No password-change flow anywhere.** Relevant mainly for
-          email/password signups; Google OAuth users technically have a
-          password too (`Hash::make(Str::random(24))` set at signup, per
-          `AuthController`) but never see or use it, so "change password"
-          is a little conceptually odd for them specifically — worth
-          deciding whether Google-only users should even see this option,
-          or get a "Set a password" flow instead of "Change."
-        - **No "connected accounts" indicator.** Nothing in Settings shows
-          whether a given account is linked to Google OAuth or is a plain
-          email/password account — relevant context for the password
-          item above and generally useful on its own.
-        - **Two-factor authentication** — flagging for awareness only,
-          not scoped into this phase; a genuinely bigger feature than
-          anything else listed here.
+- [x] **E5 — Other gaps found during this audit** (the "what else is
+      missing" ask). Both flagged items resolved and shipped; 2FA
+      confirmed still out of scope:
+        - **Password-change flow — done.** New `password_set_at`
+          (nullable timestamp) column on `users`, set at registration and
+          re-stamped whenever a password is (re)set — deliberately left
+          out of `User::$fillable` so it's never settable from raw
+          request input, only programmatically. `User::has_password`
+          accessor is `password_set_at !== null`. Existing accounts were
+          backfilled in the same migration: email/password signups
+          (no `google_id`) get `password_set_at = created_at`;
+          Google-only accounts are left `null`, matching the definition
+          of "no password the user actually knows." Single endpoint,
+          `PUT /user/password` (`AuthController::changePassword()`),
+          serves both modes off that one flag — Google-only users get
+          **"Set a Password"** (no `current_password` required, since
+          there isn't one to check — this *adds* email/password login
+          without touching Google), everyone else gets **"Change
+          Password"** (`current_password` required and verified via
+          `Hash::check()`), exactly the 2026-08-08 decision. Frontend:
+          new `PasswordPanel.tsx`, label and required fields driven by
+          `user.has_password`.
+        - **Connected-accounts indicator — done.** New
+          `ConnectedAccountsPanel.tsx` in the Account tab shows two rows,
+          Email & Password (green "Connected" whenever `has_password` is
+          true — including a Google-only account that later set one) and
+          Google (green "Connected" whenever `google_connected` is true).
+          The raw `google_id` itself is never sent to the frontend — only
+          the boolean `google_connected`, computed server-side in
+          `AuthController::formatUserResponse()`.
+        - **Two-factor authentication** — still out of scope for this
+          phase, unchanged from the original note; a genuinely bigger
+          feature than anything else listed here.
+
+- 2026-08-09 — E3d, E4, E5 complete — Phase E done. Also fixed the
+  production-breaking regression this session started from: the E3b
+  commit (`a22c44d`) refactored token creation into
+  `createTokenWithMetadata(User $user, Request $request)` and updated 3
+  of 4 call sites, but missed `handleGoogleCallback()`, whose signature
+  had no `$request` parameter at all — every Google sign-in was throwing
+  `Undefined variable $request`, caught by the method's own
+  `catch (\Exception $e)`, and silently redirecting to
+  `/login?error=Google login failed`. Fixed by adding `Request $request`
+  to the method signature (Laravel injects it automatically); no other
+  changes needed. New migration
+  `2026_08_09_000002_add_account_privacy_settings_to_users.php` adds
+  `password_set_at` and `default_project_visibility` to `users`. 5 new
+  routes, all outside the `subscribed` middleware group (account
+  security/data-rights, not paid features): `PUT /user/password`,
+  `DELETE /user/account`, `GET /user/export`,
+  `PUT /user/default-visibility`, `POST /user/chat-history/clear`. 4 new
+  frontend components (`PasswordPanel`, `ConnectedAccountsPanel`,
+  `DeleteAccountPanel`, `PrivacyPanel`) plus a new "Privacy" tab in
+  `SettingsPage.tsx`. Verified with `tsc --noEmit`, a full
+  `npm run build`, and a brace/paren balance check on every touched
+  backend file — all clean. Known gap carried forward: the PayPal-
+  cancellation branch inside `deleteAccount()` needs a real smoke test
+  against an actual subscription once deployed (see E3d note above) —
+  same sandbox-network limitation as E3b's `ip-api.com` call.
 
 - 2026-08-08 — E1 complete. `SettingsPage.tsx`'s tab container was
   `flex flex-col gap-2` unconditionally — already vertical on mobile,

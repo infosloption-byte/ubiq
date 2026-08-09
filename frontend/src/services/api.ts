@@ -99,6 +99,24 @@ export const authAPI = {
     revokeSession: (id: number) => api.delete(`/user/sessions/${id}`), // E3b fix
     me: () => api.get('/auth/me'),
     refresh: () => api.post('/auth/refresh'),
+    // E5 fix — PLAN_SYSTEM_TASKS.md Phase E. Same endpoint handles both
+    // "Change Password" (current_password required) and "Set a Password"
+    // (Google-only accounts, no current_password) — server decides which
+    // based on user.has_password.
+    changePassword: (data: { current_password?: string; new_password: string; new_password_confirmation: string }) =>
+        api.put('/user/password', data),
+    // E3d fix — irreversible. `confirmation` is either the literal word
+    // "DELETE" or the account's own email.
+    deleteAccount: (confirmation: string) =>
+        api.delete('/user/account', { data: { confirmation } }),
+};
+
+// E4 fix — PLAN_SYSTEM_TASKS.md Phase E. New Privacy tab endpoints.
+export const privacyApi = {
+    exportData: () => api.get('/user/export', { responseType: 'blob' }),
+    clearChatHistory: () => api.post('/user/chat-history/clear'),
+    updateDefaultVisibility: (visibility: 'private' | 'public') =>
+        api.put('/user/default-visibility', { default_project_visibility: visibility }),
 };
 
 export const userAPI = {
