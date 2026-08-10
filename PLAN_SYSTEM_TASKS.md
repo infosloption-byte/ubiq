@@ -217,12 +217,12 @@ team plan that doesn't exist yet).
         just dropping the WHERE clause.)*
 
 - [ ] **F1 — Full-stack sandbox parity + portable export**
-  - [ ] F1a — Externalize the real Dockerfile: generate it from the
+  - [x] F1a — Externalize the real Dockerfile: generate it from the
         same framework-detection logic currently only living as an
         in-memory PHP array in `runProject()`, write it into the
         project's own workspace directory (alongside `ubiq.json`) so
         the existing `download()` zip ships it automatically. No
-        changes needed to `download()` itself.
+        changes needed to `download()` itself. — 2026-08-10, see notes
   - [ ] F1b — Multi-service sandboxes: move project execution from a
         single `docker run` to a generated `docker-compose.yml`
         (drop-in equivalent for the single-container case first).
@@ -482,6 +482,50 @@ feature_key gets renamed, a limit default changes, a phase gets reordered.)
   more detail/rationale than duplicated here — check the roadmap doc
   itself before starting a task, this list is deliberately the short
   form. Next action: start F0a/F0b (the sandbox slot leak).
+
+- 2026-08-10 — F1a (externalize the real Dockerfile) complete. Added
+  `writeDockerfile()` right beside `selectDockerImage()` in
+  `ProjectController`, called from `runProject()` immediately after
+  image selection (step 4, before the port claim) — same
+  `$dockerConfig` the live sandbox itself just used for this run, so
+  the two can't drift apart into two different sources of truth for
+  "what image does this project actually use." Writes `Dockerfile` to
+  the workspace directory and persists it via `$project->files()`
+  `updateOrCreate`, the identical pattern `startup.sh` already uses a
+  few lines earlier — same idempotent-every-run approach, not a new
+  pattern.
+    - **Deliberately not a bind-mount recreation of the live sandbox.**
+      The sandbox itself mounts the workspace into a stock image for a
+      fast dev loop (no rebuild per keystroke); a `docker run -v
+      {ubiq's own host path}:/app` command means nothing on someone
+      else's server. The generated Dockerfile is `FROM {image}` / `COPY
+      . .` / `CMD ["sh", "startup.sh"]` instead — a real, standalone,
+      buildable image. `docker build && docker run` should work
+      anywhere Docker is installed, with zero Ubiq-specific assumptions
+      baked in.
+    - **No changes needed to `download()`** — confirmed it already just
+      zips the workspace directory wholesale, so writing the Dockerfile
+      to disk is sufficient; it ships in the existing export
+      automatically, exactly as scoped.
+    - **Left the sandbox's own resource flags (`--memory`, `--cpus`,
+      `--network=ubiq_sandbox`, etc.) out of the Dockerfile entirely,
+      on purpose** — those are `docker run` runtime flags specific to
+      how Ubiq schedules containers on its own infra, not something
+      that belongs baked into an image definition someone's taking to
+      their own server.
+    - Added a comment at the top of the generated file itself (not just
+      here) telling the user editing this Dockerfile has no effect on
+      how their live Ubiq sandbox runs — it's the exported artifact,
+      not the thing driving the preview — so nobody edits it expecting
+      their sandbox to change and gets confused when it doesn't.
+    - Same caveat as F0/F3/G1: no PHP/Docker available in this sandbox
+      to actually run `docker build` against the generated file — code
+      review only, needs a real smoke test (build one of each runtime
+      type — node/php/python/static — and confirm the image actually
+      runs and serves) before this ships to users.
+  F1b (multi-service `docker-compose` sandboxes) is next — F1a was
+  scoped to be independent of it specifically so it could ship first
+  without waiting.
 
 - 2026-07-28 — Phase A complete. Sentinel convention: `-1` means "unlimited"
   for numeric `plan_features` values (used by `projects.max_count` on Pro).
