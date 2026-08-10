@@ -16,6 +16,7 @@ use App\Http\Controllers\API\V1\GitController;
 use App\Http\Controllers\API\V1\TerminalController;
 use App\Http\Controllers\API\V1\PayPalController;
 use App\Http\Controllers\API\V1\AiKeyController; // D8 fix — PLAN_SYSTEM_TASKS.md Phase D
+use App\Http\Controllers\API\V1\GithubOAuthController; // F3 — PLAN_SYSTEM_TASKS.md Phase F
 use App\Http\Controllers\OllamaProxyController;
 
 // ── Unauthenticated fallback ───────────────────────────────────────────────
@@ -51,6 +52,15 @@ Route::prefix('v1')->group(function () {
 
     Route::get('/auth/google',          [AuthController::class, 'redirectToGoogle']);
     Route::get('/auth/google/callback', [AuthController::class, 'handleGoogleCallback']);
+
+    // F3 — GitHub OAuth callback only. The *initiating* endpoint
+    // (POST /auth/github/connect) is authenticated and lives in the
+    // Sanctum group below — this one has to be public because GitHub
+    // lands the browser here directly, with no bearer token available
+    // on that request. See GithubOAuthController's docblock for why
+    // this is safe (identity comes from the single-use `state` ticket,
+    // not from this route being public).
+    Route::get('/auth/github/callback', [GithubOAuthController::class, 'callback']);
 
     // PayPal Webhook — must be public; PayPalController::webhook() verifies
     // the signature itself against PayPal's verify-webhook-signature API.
@@ -199,6 +209,15 @@ Route::prefix('v1')->group(function () {
             Route::get('/ai-keys',             [AiKeyController::class, 'index']);
             Route::put('/ai-keys/{provider}',  [AiKeyController::class, 'update']);
             Route::delete('/ai-keys/{provider}', [AiKeyController::class, 'destroy']);
+
+            // F3 (PLAN_SYSTEM_TASKS.md Phase F): GitHub OAuth connection —
+            // replaces the old pasted-PAT flow. /connect is the only one
+            // of these four gated behind auth:sanctum; the actual GitHub
+            // redirect target (/auth/github/callback, above) is public
+            // by necessity. See GithubOAuthController.
+            Route::post('/auth/github/connect', [GithubOAuthController::class, 'connect']);
+            Route::get('/user/github',          [GithubOAuthController::class, 'status']);
+            Route::delete('/user/github',       [GithubOAuthController::class, 'disconnect']);
         });
     });
 });

@@ -1,9 +1,9 @@
 import { useState, useEffect } from 'react';
-import { gitAPI } from '../../services/api';
+import { gitAPI, githubAuthAPI } from '../../services/api';
 import InputDialog from '../InputDialog';
 import { 
   GitPullRequest, RefreshCw, Loader2, CheckCircle, FileText, 
-  X, ExternalLink 
+  X, ExternalLink, Github 
 } from 'lucide-react';
 
 interface SourceControlPanelProps {
@@ -21,6 +21,20 @@ export default function SourceControlPanel({ projectId }: SourceControlPanelProp
   const [isGenerating, setIsGenerating] = useState(false);
   const [showTokenDialog, setShowTokenDialog] = useState(false);
 
+  // F3 (PLAN_SYSTEM_TASKS.md Phase F): GitHub OAuth connection state.
+  // null while status hasn't loaded yet, so the button doesn't flash
+  // "Connect GitHub" for a moment before we know the real answer.
+  const [githubConnected, setGithubConnected] = useState<boolean | null>(null);
+  const [githubUsername, setGithubUsername] = useState<string | null>(null);
+  const [connectingGithub, setConnectingGithub] = useState(false);
+
+  // F3d (PLAN_SYSTEM_TASKS.md Phase F): migration path off the old
+  // localStorage-PAT flow. If we find one, we clear it immediately
+  // (it should never have lived in the browser) and, once we know the
+  // account isn't already connected via OAuth, nudge the user to
+  // reconnect the supported way instead of silently losing PR access.
+  const [legacyTokenMigrated, setLegacyTokenMigrated] = useState(false);
+
   // Success Dialog State
   const [prSuccess, setPrSuccess] = useState<{ isOpen: boolean; url: string; branch: string } | null>(null);
 
@@ -35,7 +49,33 @@ export default function SourceControlPanel({ projectId }: SourceControlPanelProp
     finally { setLoading(false); }
   };
 
-  useEffect(() => { refreshStatus(); }, [projectId]);
+  const refreshGithubStatus = async () => {
+    try {
+      const res = await githubAuthAPI.status();
+      setGithubConnected(res.data.connected);
+      setGithubUsername(res.data.connected ? res.data.username : null);
+    } catch (e) {
+      console.error(e);
+      setGithubConnected(false);
+    }
+  };
+
+  useEffect(() => { refreshStatus(); refreshGithubStatus(); }, [projectId]);
+
+  // F3d: one-time cleanup of any pre-OAuth localStorage token. Runs once
+  // per mount, independent of the projectId-scoped effect above.
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem('ubiq_api_keys');
+      if (!stored) return;
+      const keys = JSON.parse(stored);
+      if (keys.github) {
+        delete keys.github;
+        localStorage.setItem('ubiq_api_keys', JSON.stringify(keys));
+        setLegacyTokenMigrated(true);
+      }
+    } catch (e) { /* malformed localStorage value — nothing to migrate */ }
+  }, []);
 
   const generatePrMessage = async () => {
       if (changes.length === 0) return;
@@ -47,25 +87,36 @@ export default function SourceControlPanel({ projectId }: SourceControlPanelProp
       }, 600);
   };
 
+  // F3c/F3d (PLAN_SYSTEM_TASKS.md Phase F): the pasted-PAT flow is now
+  // the fallback, only reachable if the user explicitly isn't connected
+  // via OAuth (or chooses "use a token instead"). A connected account
+  // never sees the token dialog — the backend already has what it needs.
+  const handleConnectGithub = async () => {
+      setConnectingGithub(true);
+      try {
+          const res = await githubAuthAPI.connect();
+          // Full page navigation — this has to actually leave the SPA
+          // and land on github.com, an axios/fetch call can't do that.
+          window.location.href = res.data.redirect_url;
+      } catch (e: any) {
+          alert("Couldn't start GitHub connection: " + (e.response?.data?.error || e.message));
+          setConnectingGithub(false);
+      }
+  };
+
   const handlePrClick = () => {
-      const stored = localStorage.getItem('ubiq_api_keys');
-      if (stored) {
-          try {
-              const keys = JSON.parse(stored);
-              if (keys.github) {
-                  executeCreatePr(keys.github);
-                  return;
-              }
-          } catch(e) {}
+      if (githubConnected) {
+          executeCreatePr(); // token omitted — backend uses the connected account's stored token
+          return;
       }
       setShowTokenDialog(true);
   };
 
-  const executeCreatePr = async (token: string) => {
+  const executeCreatePr = async (token?: string) => {
       setPrLoading(true);
       try {
           const res = await gitAPI.createPr(projectId, {
-              token,
+              ...(token ? { token } : {}),
               title: prTitle || "Update from Ubiq",
               description: prDesc || "Automated update."
           });
@@ -81,10 +132,6 @@ export default function SourceControlPanel({ projectId }: SourceControlPanelProp
               url: res.data.pr_url,
               branch: res.data.branch || 'unknown-branch'
           });
-          
-          const stored = localStorage.getItem('ubiq_api_keys');
-          const keys = stored ? JSON.parse(stored) : {};
-          localStorage.setItem('ubiq_api_keys', JSON.stringify({ ...keys, github: token }));
 
       } catch (e: any) {
           // Use a simple alert for errors, or you can add an Error Dialog state too
@@ -136,6 +183,30 @@ export default function SourceControlPanel({ projectId }: SourceControlPanelProp
 
       {/* PR Form Area */}
       <div className="p-4 border-t border-white/5 bg-ubiq-900/30 space-y-3">
+          {/* F3 (PLAN_SYSTEM_TASKS.md Phase F): connection status/CTA. */}
+          <div className="flex items-center justify-between text-[10px]">
+              <span className="text-slate-500 uppercase font-bold flex items-center gap-1.5">
+                  <Github className="w-3 h-3" />
+                  {githubConnected === null ? 'Checking GitHub…'
+                    : githubConnected ? `Connected as ${githubUsername}`
+                    : 'GitHub not connected'}
+              </span>
+              {githubConnected === false && (
+                  <button
+                    onClick={handleConnectGithub}
+                    disabled={connectingGithub}
+                    className="text-indigo-400 hover:text-indigo-300 font-bold transition-colors disabled:opacity-50"
+                  >
+                    {connectingGithub ? 'Redirecting…' : 'Connect GitHub'}
+                  </button>
+              )}
+          </div>
+          {legacyTokenMigrated && githubConnected === false && (
+              <p className="text-[10px] text-yellow-500/80 -mt-1">
+                  We removed an old saved GitHub token for security — reconnect above to keep one-click PRs.
+              </p>
+          )}
+
           <div className="flex justify-between items-center">
              <label className="text-[10px] font-bold text-slate-500 uppercase">PR Details</label>
              <button 
@@ -173,13 +244,18 @@ export default function SourceControlPanel({ projectId }: SourceControlPanelProp
 
       {/* --- MODALS --- */}
 
-      {/* 1. Token Input */}
+
+      {/* 1. Token Input — fallback only now (F3c/F3d): shown when the
+          user isn't connected via GitHub OAuth. A one-off PAT entered
+          here is used for this PR only and is never stored anywhere —
+          connecting the account (button above) is the supported path
+          for anything recurring. */}
       <InputDialog 
         isOpen={showTokenDialog}
         onClose={() => setShowTokenDialog(false)}
         onSubmit={(token) => executeCreatePr(token)}
         title="GitHub Token Required"
-        message="Enter a Personal Access Token (classic) with 'repo' scope."
+        message="Connect your GitHub account above for one-click PRs — or enter a one-off Personal Access Token (classic) with 'repo' scope to use just this once."
         placeholder="ghp_xxxxxxxxxxxx"
         isPassword={true}
       />

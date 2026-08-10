@@ -242,8 +242,18 @@ export const adminAPI = {
 
 export const gitAPI = {
     getStatus: (projectId: number) => api.get(`/projects/${projectId}/git/status`),
-    createPr: (projectId: number, data: { token: string; title: string; description: string }) =>
+    createPr: (projectId: number, data: { token?: string; title: string; description: string }) =>
         api.post(`/projects/${projectId}/git/create-pr`, data),
+};
+
+// F3 (PLAN_SYSTEM_TASKS.md Phase F): GitHub OAuth connection status/flow.
+// connect() returns a URL the caller must do a full `window.location.href =`
+// navigation to (not fetch/axios) — it has to actually leave the SPA and
+// land on github.com. See GithubOAuthController for the server side.
+export const githubAuthAPI = {
+    status: () => api.get('/user/github'),
+    connect: () => api.post('/auth/github/connect'),
+    disconnect: () => api.delete('/user/github'),
 };
 
 // --- HELPER FUNCTIONS ---

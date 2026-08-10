@@ -41,6 +41,18 @@ return [
         'redirect' => 'https://api.ubiq-editor.space/api/v1/auth/google/callback',
     ],
 
+    // F3 (PLAN_SYSTEM_TASKS.md Phase F): GitHub OAuth App, used to connect
+    // a user's GitHub account for Source Control (createPr/importFromGithub)
+    // instead of asking them to paste a Personal Access Token. Distinct
+    // GitHub OAuth App from any used for "Login with GitHub" (there isn't
+    // one here) — this app only ever needs 'repo' scope, requested in
+    // GithubOAuthController::redirect().
+    'github' => [
+        'client_id' => env('GITHUB_CLIENT_ID'),
+        'client_secret' => env('GITHUB_CLIENT_SECRET'),
+        'redirect' => env('GITHUB_REDIRECT_URI', 'https://api.ubiq-editor.space/api/v1/auth/github/callback'),
+    ],
+
     'paddle' => [
         'vendor_id' => env('PADDLE_VENDOR_ID'),
         'vendor_auth_code' => env('PADDLE_VENDOR_AUTH_CODE'),

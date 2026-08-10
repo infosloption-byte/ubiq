@@ -4,6 +4,7 @@ namespace App\Http\Controllers\API\V1;
 
 use App\Http\Controllers\Controller;
 use App\Models\Project;
+use App\Models\UserGithubToken;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Process;
 use Illuminate\Support\Facades\File;
@@ -52,8 +53,17 @@ class GitController extends Controller
     public function createPr(Request $request, Project $project)
     {
         $this->authorizeOwner($request, $project);
-        $token = $request->input('token');
-        if (!$token) return response()->json(['error' => 'Token required'], 400);
+
+        // F3c (PLAN_SYSTEM_TASKS.md Phase F): prefer the connected
+        // GitHub OAuth token over a client-supplied one — the pasted-PAT
+        // param is kept only as a fallback for anyone who hasn't gone
+        // through Connect GitHub yet (see F3d's migration path). Once a
+        // token is used from the connection, stamp last_used_at so
+        // Settings can show it wasn't just connected and forgotten.
+        $githubToken = UserGithubToken::where('user_id', $request->user()->id)->first();
+        $token = $githubToken?->access_token ?? $request->input('token');
+        if (!$token) return response()->json(['error' => 'Connect your GitHub account (or provide a token) first'], 400);
+        $githubToken?->update(['last_used_at' => now()]);
 
         $repoPath = $this->getRepoPath($project);
         $branchName = "feature/update-" . date('Ymd-His');

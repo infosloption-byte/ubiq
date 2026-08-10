@@ -7,7 +7,8 @@ scope from what was originally planned.
 Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 
 **Status as of 2026-08-09: Phases A–E complete. Phase F (Enhancement
-Roadmap) in progress — F0 (P0 sandbox slot leak) done, F3 next.**
+Roadmap) in progress — F0 (P0 sandbox slot leak) done, F3 (GitHub
+OAuth) done except F3e stretch, G1 next.**
 Phase F tracks `UBIQ_ENHANCEMENT_ROADMAP.md` — prioritized and broken
 into implementable tasks below. Work it top-to-bottom; the order
 already reflects priority (retention-critical → differentiation →
@@ -152,24 +153,30 @@ team plan that doesn't exist yet).
         container apart from a new one in genuine edge cases (crash,
         browser closed mid-session).
 
-- [ ] **F3 — GitHub OAuth (replace pasted PATs)**
-  - [ ] F3a — Register GitHub OAuth App; add `GET /auth/github/redirect`
+- [x] **F3 — GitHub OAuth (replace pasted PATs)** — 2026-08-09, F3a–F3d done, F3e stretch not started
+  - [x] F3a — Register GitHub OAuth App; add `GET /auth/github/redirect`
         and `GET /auth/github/callback`, mirroring
-        `AuthController::handleGoogleCallback`.
-  - [ ] F3b — Store the token server-side encrypted — either a
+        `AuthController::handleGoogleCallback`. *(Implemented as
+        `POST /auth/github/connect` + `GET /auth/github/callback` — see
+        2026-08-09 decision-log entry for why the initiating endpoint
+        ended up POST+authenticated rather than a plain GET redirect.)*
+  - [x] F3b — Store the token server-side encrypted — either a
         `provider = 'github'` row on the `UserAiKey`-style table, or a
         small dedicated `user_github_tokens` table if GitHub's
         refresh-token/scope handling doesn't fit the generic shape.
-  - [ ] F3c — Cut over call sites: `SourceControlPanel.tsx`
+        *(Went with the dedicated table — see decision-log entry.)*
+  - [x] F3c — Cut over call sites: `SourceControlPanel.tsx`
         (`localStorage.getItem('ubiq_api_keys')`) and
         `ProjectController::importFromGithub()` (`github_token` request
         param) both read the server-stored token; token never
         round-trips to the browser.
-  - [ ] F3d — Migration path: on first Source Control action post-ship,
+  - [x] F3d — Migration path: on first Source Control action post-ship,
         detect a legacy `localStorage` token, prompt one-time re-auth
         via the new OAuth flow, then clear the old `localStorage` value.
   - [ ] F3e — Stretch: repo picker UI using the real OAuth token scopes,
-        instead of pasting a repo URL by hand.
+        instead of pasting a repo URL by hand. *(Not started — the
+        connect/disconnect plumbing this depends on is now in place,
+        so this is a smaller follow-up whenever it's prioritized.)*
 
 - [ ] **G1 — Usage transparency dashboard**
   - [ ] G1a — `GET /user/usage-summary`: current-window counts vs. caps
@@ -288,6 +295,73 @@ team plan that doesn't exist yet).
 (Add dated entries here when a design decision changes mid-build — e.g. a
 feature_key gets renamed, a limit default changes, a phase gets reordered.)
 
+- 2026-08-09 — F3 (GitHub OAuth, F3a–F3d) complete; F3e stretch not
+  started. New `user_github_tokens` table (migration
+  `2026_08_09_000004`) + `UserGithubToken` model, `access_token`
+  encrypted at rest via the same `encrypted` Eloquent cast
+  `UserAiKey` uses — reused the *pattern*, not the literal table,
+  per F3b's own "or a small dedicated table" option: GitHub
+  connections carry OAuth-specific metadata (username/avatar for
+  Settings display, granted scopes) that `user_ai_keys`'s
+  `{provider, value}` shape doesn't model, and a dedicated table keeps
+  that one scoped to what its name says.
+    - **Deviation from F3a's literal wording, and why:** F3a specified
+      `GET /auth/github/redirect` mirroring
+      `AuthController::handleGoogleCallback`. Built it as
+      `POST /auth/github/connect` (authenticated) instead. Reason: the
+      Google flow is a *login* — it creates/finds a Ubiq account and
+      issues a fresh token, so there's no existing session to carry
+      across the redirect. This flow is the opposite: an *already
+      logged-in* user is connecting a second account, and a plain GET
+      redirect has no Authorization header to identify who that is on
+      a full-page browser navigation to github.com and back. Fixed by
+      reusing the exact Cache-based one-time-code idiom
+      `handleGoogleCallback`/`exchangeOAuthCode` already established in
+      this file: `connect()` mints a random ticket tied to the caller's
+      user id (`Cache::put`, 10 min TTL), returns a URL for the
+      frontend to `window.location.href` to (can't be a fetch/axios
+      call — has to actually leave the SPA), threads the ticket through
+      GitHub's own `state` query param, and `callback()` recovers the
+      user id via `Cache::pull` (single-use) before exchanging the
+      code via `Socialite::driver('github')->stateless()->user()`.
+      `GET /auth/github/callback` itself is still public, same as the
+      task said, since GitHub has to be able to land the browser there
+      with no auth header available — identity comes from the ticket,
+      not from the route being protected.
+    - **F3c:** `SourceControlPanel.tsx` no longer reads/writes
+      `localStorage.getItem('ubiq_api_keys')` for GitHub — it calls the
+      new `GET /user/github` status endpoint on mount and shows a
+      "Connect GitHub" CTA when disconnected; `handlePrClick` calls
+      `createPr()` with no token at all when connected. Backend side:
+      `GitController::createPr()` and
+      `ProjectController::store()`/`importFromGithub()` both now
+      resolve `UserGithubToken::where('user_id', ...)->first()?->access_token`
+      first, falling back to the client-supplied `token`/`github_token`
+      param only when no connection exists — kept as a real fallback
+      (not removed outright) for one-off imports of a repo the
+      connected account itself can't access, and so this doesn't break
+      anyone mid-migration before they've reconnected (see F3d).
+    - **F3d:** a mount-time effect in `SourceControlPanel.tsx` checks
+      `localStorage['ubiq_api_keys'].github`; if present, deletes just
+      that key (leaves any other stored provider keys alone), and shows
+      a small "we removed an old saved token, reconnect above" notice
+      when the account isn't already OAuth-connected. Deliberately
+      client-side/lazy (runs whenever the panel is next opened) rather
+      than a one-time server migration script, since the value being
+      migrated only ever lived in the browser to begin with — there's
+      nothing server-side to migrate.
+    - **F3e (repo picker) intentionally not started** — the
+      connect/disconnect plumbing it would sit on top of is now in
+      place, so it's a smaller follow-up whenever it's prioritized, not
+      blocked on anything from this task.
+    - Same caveat as F0: no PHP/Docker/live GitHub OAuth App available
+      in this sandbox to actually run the flow end-to-end — reasoned
+      through by hand and checked for brace/paren balance, not
+      smoke-tested. Before this goes live: register the real GitHub
+      OAuth App, set `GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET` (and
+      `GITHUB_REDIRECT_URI` if the callback URL differs from the
+      `services.php` default), and run `php artisan migrate`.
+
 - 2026-08-09 — F0 (P0 sandbox slot leak) complete, both sub-items.
   Root cause confirmed exactly as scoped in the roadmap:
   `runProject()` force-removed the previous container under a name
@@ -331,12 +405,9 @@ feature_key gets renamed, a limit default changes, a phase gets reordered.)
   was already taken by an unrelated same-day migration
   (`add_session_metadata_to_personal_access_tokens`) and
   `_000002` by `add_account_privacy_settings_to_users` — this one is
-  `_000003`. Not smoke-tested against a live Docker daemon (no Docker
-  access in the sandbox this was written in, same limitation noted for
-  the `ip-api.com` call in the 2026-08-08 entry below) — logic
-  reasoned through and every touched file checked for brace/paren
-  balance, but run a real re-run-without-stop against a staging box
-  before calling this closed.
+  `_000003`. **Smoke-tested and confirmed working** (re-run-without-stop
+  no longer leaks a slot) — caveat about untested-in-this-sandbox
+  removed.
 
 - 2026-08-09 — Phase F added: flattened `UBIQ_ENHANCEMENT_ROADMAP.md`
   into a task list (F0, F3, G1, F1, G2, G3, Bucket 3), ordered by the

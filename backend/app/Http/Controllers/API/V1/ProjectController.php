@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\Project;
 use App\Models\File;
 use App\Models\SandboxRun;
+use App\Models\UserGithubToken;
 use App\Services\PlanGuard;
 use App\Services\PlanService;
 use App\Exceptions\PlanLimitExceededException;
@@ -417,7 +418,20 @@ class ProjectController extends Controller
                 Process::path($projectPath)->run('git commit -m "Initial commit"');
                 
             } elseif ($project->source === 'github') {
-                $this->importFromGithub($project, $request->github_token, $projectPath);
+                // F3c (PLAN_SYSTEM_TASKS.md Phase F): prefer the user's
+                // connected GitHub OAuth token over a pasted one — the
+                // token never has to round-trip through the browser for
+                // anyone who's connected their account. request->github_token
+                // is kept as a fallback only, for importing a repo the
+                // connected account itself doesn't have access to (e.g. a
+                // one-off token for someone else's private repo), or for
+                // users who haven't gone through Connect GitHub yet — see
+                // F3d's migration-path note in the roadmap.
+                $githubToken = optional(
+                    UserGithubToken::where('user_id', $user->id)->first()
+                )->access_token ?? $request->github_token;
+
+                $this->importFromGithub($project, $githubToken, $projectPath);
             }
         } catch (\Exception $e) {
             // Never log the github_token — mask it before writing to log
