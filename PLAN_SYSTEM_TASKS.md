@@ -6,10 +6,15 @@ scope from what was originally planned.
 
 Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 
-**Status as of 2026-08-09: Phases A–E all complete.** No open items
-remain in this tracker. See the dated log entries below each phase for
-implementation notes, and "Decisions made" sections for anything that
-required a judgment call along the way.
+**Status as of 2026-08-09: Phases A–E complete. Phase F (Enhancement
+Roadmap) in progress — F0 (P0 sandbox slot leak) done, F3 next.**
+Phase F tracks `UBIQ_ENHANCEMENT_ROADMAP.md` — prioritized and broken
+into implementable tasks below. Work it top-to-bottom; the order
+already reflects priority (retention-critical → differentiation →
+self-hosted → later/earn-it), so don't reorder without a
+decisions-log entry explaining why. See the dated log entries below
+each phase for implementation notes, and "Decisions made" sections
+for anything that required a judgment call along the way.
 
 ---
 
@@ -92,10 +97,258 @@ first) and security, not by discovery order.
 
 ---
 
+## Phase F — Enhancement Roadmap (`UBIQ_ENHANCEMENT_ROADMAP.md`)
+
+Source doc: `UBIQ_ENHANCEMENT_ROADMAP.md` (prepared 2026-08-09). That
+file is the rationale/spec; this section is the flattened,
+priority-ordered task list derived from it, following its own
+"Suggested build order" exactly. Each task below cites the roadmap
+section it comes from (F1a, G2c, etc.) — read that section in the
+roadmap before starting the task for the full reasoning, file-level
+detail, and sequencing notes; this tracker intentionally doesn't
+duplicate all of it.
+
+**Priority order (why this order, not roadmap document order):**
+1. **F0 — P0 sandbox-slot leak.** Live bug actively costing Pro
+   conversions today. Ahead of every feature below, no exceptions —
+   fix bugs bleeding revenue before building anything new.
+2. **F3 — GitHub OAuth.** Smallest, cleanest lift (reuses the existing
+   Google OAuth + `UserAiKey` encryption pattern), and the one item
+   with an active, verified security hole (plaintext PAT in
+   `localStorage`) rather than just a missing feature.
+3. **G1 — Usage dashboard.** Best effort-to-trust payoff on the whole
+   list — data already exists (`usage_counters`, `plan_action_logs`),
+   this is a read/UI layer over it. Can ship while F1 is in progress.
+4. **F1 — Full-stack sandbox parity + portable export.** The real
+   engineering lift. Internally sequenced a→b→c→d per the roadmap
+   (a is small and standalone; b is the real work everything else
+   depends on; c depends on b; d can run parallel to b/c).
+5. **G2 — Multi-file diff review + autonomy modes.** The headline
+   differentiator, deliberately sequenced *after* the retention-critical
+   items above so it's not competing for time against things actively
+   losing customers right now. Internal order a→b→c→d is load-bearing
+   (see sequencing note under G2) — do not start G2c before G2a/b ship.
+6. **G3 — Self-hosted/on-prem tier.** Sales-and-docs-heavy, wants a
+   track record from 1–5 behind it first.
+7. **Bucket 3 — Later/earn it** (collab, SSO, admin analytics). No
+   task breakdown yet on purpose — revisit once a team/enterprise plan
+   exists to sell them into. Admin analytics is the one item that can
+   move earlier opportunistically since G1a's aggregation makes it
+   nearly free once G1 ships.
+
+Explicitly *not* front-loaded, per the roadmap: custom domains / full
+production hosting (deliberately cut from F1, not deferred — see the
+correction note in the roadmap's F1 intro), and SSO/collab (gated on a
+team plan that doesn't exist yet).
+
+- [x] **F0 — Fix concurrent sandbox slot leak on re-run** *(P0, do first)* — 2026-08-09, commit `<fill in after commit>`
+  - [x] F0a — In `runProject()` (`ProjectController`), close out any
+        existing open `SandboxRun` for the same project before
+        `authorize()` — reuse `stopProject()`'s close-out logic so
+        re-running a project always self-releases its own previous
+        slot atomically.
+  - [x] F0b — Include the run ID (not just project ID) in the sandbox
+        container name, so `reapStaleSandboxes()` can tell an old run's
+        container apart from a new one in genuine edge cases (crash,
+        browser closed mid-session).
+
+- [ ] **F3 — GitHub OAuth (replace pasted PATs)**
+  - [ ] F3a — Register GitHub OAuth App; add `GET /auth/github/redirect`
+        and `GET /auth/github/callback`, mirroring
+        `AuthController::handleGoogleCallback`.
+  - [ ] F3b — Store the token server-side encrypted — either a
+        `provider = 'github'` row on the `UserAiKey`-style table, or a
+        small dedicated `user_github_tokens` table if GitHub's
+        refresh-token/scope handling doesn't fit the generic shape.
+  - [ ] F3c — Cut over call sites: `SourceControlPanel.tsx`
+        (`localStorage.getItem('ubiq_api_keys')`) and
+        `ProjectController::importFromGithub()` (`github_token` request
+        param) both read the server-stored token; token never
+        round-trips to the browser.
+  - [ ] F3d — Migration path: on first Source Control action post-ship,
+        detect a legacy `localStorage` token, prompt one-time re-auth
+        via the new OAuth flow, then clear the old `localStorage` value.
+  - [ ] F3e — Stretch: repo picker UI using the real OAuth token scopes,
+        instead of pasting a repo URL by hand.
+
+- [ ] **G1 — Usage transparency dashboard**
+  - [ ] G1a — `GET /user/usage-summary`: current-window counts vs. caps
+        per `counter_key`, plus last N `plan_action_logs` denials for
+        the authenticated user. Pull cap values through `PlanGuard`'s
+        own lookup (never duplicate limit numbers elsewhere) — and
+        write the aggregation so it generalizes to instance-wide later
+        (see G1d / Bucket 3 admin analytics), not as a strictly
+        per-user query.
+  - [ ] G1b — Frontend "Usage" panel (Settings or its own nav item):
+        one bar/ring per `counter_key`, hour/day windows shown
+        separately, plain-language line when at/recently hit a cap.
+        Map `reason` enum values (`concurrent_limit_exceeded`,
+        `plan_lookup_failed`, etc.) to real sentences.
+  - [ ] G1c — Surface the same human-readable reason at the point of
+        failure (chat input, "start sandbox" button), not only in the
+        dashboard.
+  - [ ] G1d — (stretch, low priority) Confirm G1a's aggregation query
+        generalizes cleanly instance-wide, to save rework when Bucket
+        3's admin analytics gets picked up.
+
+- [ ] **F1 — Full-stack sandbox parity + portable export**
+  - [ ] F1a — Externalize the real Dockerfile: generate it from the
+        same framework-detection logic currently only living as an
+        in-memory PHP array in `runProject()`, write it into the
+        project's own workspace directory (alongside `ubiq.json`) so
+        the existing `download()` zip ships it automatically. No
+        changes needed to `download()` itself.
+  - [ ] F1b — Multi-service sandboxes: move project execution from a
+        single `docker run` to a generated `docker-compose.yml`
+        (drop-in equivalent for the single-container case first).
+        Capacity accounting: one compose stack = one slot against
+        `SANDBOX_GLOBAL_CONCURRENT_LIMIT`, same as today — don't invent
+        new capacity math.
+  - [ ] F1c — DB service in the sandbox: add a `db` service (F1b) with
+        a project-scoped Docker volume (survives stop/start, never a
+        standing service); include it in the generated
+        `docker-compose.yml` so export (F1a) reproduces the exact
+        multi-container setup that was tested. Replaces the old
+        schema-per-project-on-shared-MySQL idea entirely — do not
+        build a shared multi-tenant DB or storage-quota system.
+  - [ ] F1d — Ephemeral preview links: signed token derived from a
+        running `SandboxRun` row, resolving
+        `preview-{token}.ubiq-editor.space` proxied to that run's
+        allocated port; link dies the moment existing reaping logic
+        marks the run stopped. Needs one-time wildcard cert
+        (`*.ubiq-editor.space` via certbot DNS-01). Can be built in
+        parallel with F1b/F1c — only depends on existing `SandboxRun`
+        tracking. No deploy history/rollback/uptime story by design.
+
+- [ ] **G2 — Multi-file diff review screen + user-controlled autonomy**
+  - [ ] G2a — Build the batch review screen: file list with
+        +added/−removed stat and New/Modified/Deleted badge per file;
+        click opens diff in the existing Monaco `DiffEditor` (reused,
+        not rebuilt); per-file Accept/Reject plus Accept All/Reject
+        All; protected-scaffold files (`getProtectedPaths()`) visually
+        flagged and blocked from silent overwrite regardless of
+        autonomy mode. Nothing writes to disk until confirmed. Prove
+        this on the already-safe single-file chat Apply path before
+        touching `generate()`.
+  - [ ] G2b — Rewire `CompletionController::generate()`'s final step
+        from immediate `file_put_contents()` to "return proposed file
+        set to frontend, open G2a with it." Extend `chat()` so
+        multi-file-implying responses also return a structured
+        multi-file payload routed through G2a, instead of only ever
+        offering one Apply button for the currently-open file.
+  - [ ] G2c — User-controlled autonomy setting (per-project + global
+        default in Settings), three modes: **Always review** (default;
+        only mode on Free/Starter), **Auto-apply except protected/
+        user-marked-sensitive files** (`.env`, migrations,
+        `package.json`, plus framework protected-scaffold list always
+        stop for review), **Fully autonomous** (Creator/Pro only,
+        no review screen). Store on `UserPreference.editor_settings`
+        (extend existing JSON column, no new table) with per-project
+        override. Log every AI-initiated write to `plan_action_logs`
+        with before/after content references in every mode, including
+        fully-autonomous.
+  - [ ] G2d — UX polish (after a–c are functionally solid): AI
+        activity indicator during multi-file generation (extend the
+        existing single-file "Reading: App.jsx" pattern); one-click
+        revert for an already-accepted change using G2c's before/after
+        log; short natural-language change summary above the G2a file
+        list.
+
+- [ ] **G3 — Self-hosted / on-prem tier** *(after 1–5 above are live with real users)*
+  - [ ] G3a — Audit the existing `docker-compose.yml` end to end for
+        anything fine on a trusted single-operator dev box but not an
+        arbitrary customer's production environment (default
+        passwords, open ports, missing resource limits).
+  - [ ] G3b — Turn hardcoded infra values into a first-run setup step:
+        `nginx.conf`'s `server_name ubiq-editor.space`, the CORS
+        `allowed_origins` in `backend/config/cors.php`, and the
+        wildcard-subdomain preview assumption from F1d — interactive
+        script or documented `.env` pass, not hand-edited config files.
+  - [ ] G3c — Lightweight license-key check (signed token, checked
+        periodically) against a licensing endpoint on your own infra —
+        no heavyweight DRM.
+  - [ ] G3d — Decide and document support/SLA terms for self-hosted
+        customers before the first sales conversation (response-time
+        SLA, support channel, what "supported version" means).
+
+- [ ] **Bucket 3 — Later / earn it** *(no task breakdown yet — revisit once a team/enterprise plan exists)*
+  - [ ] Real-time collaborative editing (Yjs + sync server, presence,
+        conflict handling) — gated on a team/multi-seat plan existing;
+        none does today (`Plan` model has no multi-seat concept).
+  - [ ] SSO (SAML/OIDC) — bundle with G3 (self-hosted); same buyer
+        segment.
+  - [ ] Admin analytics UI — builds on G1a's aggregation (G1d) once
+        live; instance-wide view over the same `usage_counters`/
+        `plan_action_logs` data. Can move earlier opportunistically.
+
+---
+
 ## Notes / decisions log
 
 (Add dated entries here when a design decision changes mid-build — e.g. a
 feature_key gets renamed, a limit default changes, a phase gets reordered.)
+
+- 2026-08-09 — F0 (P0 sandbox slot leak) complete, both sub-items.
+  Root cause confirmed exactly as scoped in the roadmap:
+  `runProject()` force-removed the previous container under a name
+  shared by every run of the same project (`ubiq_project_{id}`)
+  without ever telling that old run's `SandboxRun` row it was done —
+  the new container was genuinely alive under that same name, so
+  every later state check (`reapStaleSandboxes`, the cron) believed
+  the *old* row's container was still running too and never released
+  its slot. Two changes, matching F0a/F0b:
+    - **F0a:** new `closeOpenRunForProject()` in `ProjectController`,
+      called right after `reapStaleSandboxes($user)` and before
+      `planGuard->authorize()` in `runProject()`. Finds the project's
+      current open `SandboxRun` (if any), force-removes its container,
+      verifies removal, stamps `stopped_at`, and releases the
+      `active_sandboxes` counter — reusing the same kill → verify →
+      stamp → release sequence `stopProject()` already had, not a
+      second copy of it. Deliberately unconditional on whether the
+      container is genuinely still alive (unlike `reapStaleSandboxes`,
+      which only reaps dead ones) — a re-run always intends to replace
+      it regardless.
+    - **F0b:** new nullable `container_name` column on `sandbox_runs`
+      (migration `2026_08_09_000003`), stamped in
+      `claimPortAndReserve()` right after the row is created as
+      `ubiq_project_{project_id}_run{run_id}` — unique per row by
+      construction instead of shared per-project. Added
+      `SandboxRun::getDockerNameAttribute()` (`$run->docker_name`) as
+      the one place the "use container_name, fall back to the legacy
+      project-scoped name for pre-migration rows" logic lives, and
+      switched every call site that names/inspects/removes a specific
+      run's container to use it: `reapStaleSandboxes()`,
+      `stopProject()`, `destroy()`, `getBuildLog()`, `runProject()`'s
+      post-claim container name and both its failure/exception cleanup
+      branches, and `CleanupSandboxes` (the idle-timeout cron).
+      `runProject()`'s pre-claim "CONTAINER PREP" sweep (the step that
+      used to derive the container name directly) is now explicitly
+      defense-in-depth for *untracked* leftovers only — matches both
+      the legacy and run-scoped naming pattern via one regex filter,
+      since F0a already closes out the tracked case before this point
+      is ever reached.
+  No new migration conflicts: found the date slot `2026_08_09_000001`
+  was already taken by an unrelated same-day migration
+  (`add_session_metadata_to_personal_access_tokens`) and
+  `_000002` by `add_account_privacy_settings_to_users` — this one is
+  `_000003`. Not smoke-tested against a live Docker daemon (no Docker
+  access in the sandbox this was written in, same limitation noted for
+  the `ip-api.com` call in the 2026-08-08 entry below) — logic
+  reasoned through and every touched file checked for brace/paren
+  balance, but run a real re-run-without-stop against a staging box
+  before calling this closed.
+
+- 2026-08-09 — Phase F added: flattened `UBIQ_ENHANCEMENT_ROADMAP.md`
+  into a task list (F0, F3, G1, F1, G2, G3, Bucket 3), ordered by the
+  roadmap's own "Suggested build order" — P0 bug fix first, then
+  smallest/safest lifts (F3 GitHub OAuth, G1 usage dashboard) before
+  the bigger builds (F1 full-stack sandboxes, G2 diff review +
+  autonomy), self-hosted (G3) after those have real usage behind them,
+  Bucket 3 deferred until a team/enterprise plan exists to sell it
+  into. No tasks started yet. Each roadmap section (F1a, G2c, etc.) has
+  more detail/rationale than duplicated here — check the roadmap doc
+  itself before starting a task, this list is deliberately the short
+  form. Next action: start F0a/F0b (the sandbox slot leak).
 
 - 2026-07-28 — Phase A complete. Sentinel convention: `-1` means "unlimited"
   for numeric `plan_features` values (used by `projects.max_count` on Pro).

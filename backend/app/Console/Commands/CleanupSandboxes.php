@@ -76,7 +76,12 @@ class CleanupSandboxes extends Command
         $this->info("Found {$stale->count()} stale sandbox(es):");
 
         foreach ($stale as $run) {
-            $containerName = "ubiq_project_{$run->project_id}";
+            // P0 fix (F0b): use this run's own container name (falls back
+            // to the old project-scoped name for pre-migration rows via
+            // the docker_name accessor) — otherwise this cron could kill
+            // a *different*, currently-active run of the same project
+            // that happens to share the old naming scheme.
+            $containerName = $run->docker_name;
             $age           = $run->started_at->diffForHumans(now(), true);
             $tierNote      = $run->user
                 ? ' (plan: ' . (optional($this->planService->planFor($run->user))->key ?? 'unknown') . ')'

@@ -488,7 +488,16 @@ class ProjectController extends Controller
             return response()->json(['error' => 'Unauthorized'], 403);
         }
 
-        $containerName = "ubiq_project_{$project->id}";
+        // P0 fix (F0b): stop the specific run's own container, not a
+        // shared project-wide name — matters once concurrent/overlapping
+        // runs for the same project are possible without stomping each
+        // other's names.
+        $openRun = SandboxRun::where('project_id', $project->id)
+            ->whereNull('stopped_at')
+            ->latest('started_at')
+            ->first();
+        $containerName = $openRun?->docker_name ?? "ubiq_project_{$project->id}";
+
         // -f so this can never hang behind a graceful-stop timeout and
         // leave the port held — same reasoning as in runProject().
         Process::run("docker rm -f {$containerName} 2>/dev/null || true");
@@ -506,11 +515,7 @@ class ProjectController extends Controller
         }
 
         // Stamp the most recent open audit run for this project
-        SandboxRun::where('project_id', $project->id)
-            ->whereNull('stopped_at')
-            ->latest('started_at')
-            ->first()
-            ?->update(['stopped_at' => now()]);
+        $openRun?->update(['stopped_at' => now()]);
 
         $this->planGuard->release($request->user(), 'active_sandboxes');
 
@@ -975,10 +980,18 @@ class ProjectController extends Controller
     { 
         if ($project->user_id !== $request->user()->id) abort(403);
 
-        // Kill sandbox container first — prevents orphaned containers
-        $containerName = "ubiq_project_{$project->id}";
-        Process::run("docker stop {$containerName}");
-        Process::run("docker rm {$containerName}");
+        // Kill sandbox container(s) first — prevents orphaned containers.
+        // P0 fix (F0b): stop every still-open run's own container by its
+        // stored name, not one shared project-wide name — plus the same
+        // legacy-name sweep runProject() uses, to catch anything left
+        // over from before container_name existed.
+        $openRuns = \App\Models\SandboxRun::where('project_id', $project->id)
+            ->whereNull('stopped_at')
+            ->get();
+        foreach ($openRuns as $openRun) {
+            Process::run("docker rm -f {$openRun->docker_name} 2>/dev/null || true");
+        }
+        Process::run("docker rm -f ubiq_project_{$project->id} 2>/dev/null || true");
 
         // Stamp any open audit run as stopped
         \App\Models\SandboxRun::where('project_id', $project->id)
@@ -1140,6 +1153,16 @@ class ProjectController extends Controller
                     'framework'    => $framework,
                 ]);
 
+                // P0 fix (F0b): stamp a container name unique to THIS run,
+                // not just this project — "ubiq_project_{id}_run{run->id}"
+                // instead of the old shared "ubiq_project_{id}". Has to
+                // happen after create() since it needs the row's own id.
+                // This is what lets reapStaleSandboxes() (and every other
+                // container-state check) tell an old run's container apart
+                // from a brand-new run's container instead of the two
+                // being indistinguishable by name.
+                $run->update(['container_name' => "ubiq_project_{$project->id}_run{$run->id}"]);
+
                 return [$port, $run];
             }
 
@@ -1168,7 +1191,13 @@ class ProjectController extends Controller
         $openRuns = SandboxRun::where('user_id', $user->id)->whereNull('stopped_at')->get();
 
         foreach ($openRuns as $run) {
-            $containerName = "ubiq_project_{$run->project_id}";
+            // P0 fix (F0b): per-run name (docker_name accessor falls back
+            // to the old project-scoped name for pre-migration rows). Before
+            // this, every row for the same project shared one container
+            // name, so a genuinely-alive *new* run's container made this
+            // check report "still running" for an *old*, already-replaced
+            // row too — that row's slot then never got reaped.
+            $containerName = $run->docker_name;
             $state = Process::run("docker inspect -f '{{.State.Running}}' {$containerName}");
 
             if (trim($state->output()) === 'true') {
@@ -1216,6 +1245,70 @@ class ProjectController extends Controller
     }
 
     /**
+     * P0 fix (F0a) — see UBIQ_ENHANCEMENT_ROADMAP.md "concurrent sandbox
+     * slots leak on every re-run" and PLAN_SYSTEM_TASKS.md F0.
+     *
+     * Root cause this closes: clicking Run again on a project that's
+     * already running (the ordinary edit → Run loop) never told the
+     * *previous* run's SandboxRun row it was done. runProject() would go
+     * on to force-remove that project's container and start a fresh one
+     * under a name Docker considered "new" but our own bookkeeping still
+     * associated with the old, now-replaced row — so the old row's
+     * concurrent-sandbox slot leaked permanently, once per re-run.
+     *
+     * This runs BEFORE planGuard->authorize(), same reasoning as
+     * reapStaleSandboxes() running before authorize(): a re-run should
+     * self-release its own previous slot first, so the plan check that
+     * follows sees accurate usage instead of double-counting a run that's
+     * about to be replaced anyway.
+     *
+     * Deliberately unconditional on whether the container is genuinely
+     * still alive — unlike reapStaleSandboxes(), which only reaps rows
+     * whose container has actually died. A re-run always intends to
+     * replace whatever's currently running for this project, dead or
+     * alive, so there's no need for (and no point in) a docker inspect
+     * check first here.
+     *
+     * Reuses the same kill → verify → stamp → release sequence
+     * stopProject() already has, rather than inventing a second version
+     * of that logic.
+     */
+    private function closeOpenRunForProject(Project $project, $user): void
+    {
+        $openRun = SandboxRun::where('project_id', $project->id)
+            ->whereNull('stopped_at')
+            ->latest('started_at')
+            ->first();
+
+        if (!$openRun) {
+            return; // nothing running for this project — normal first run
+        }
+
+        $containerName = $openRun->docker_name;
+
+        // -f so this can never hang behind a graceful-stop timeout —
+        // same reasoning as stopProject()/reapStaleSandboxes().
+        Process::run("docker rm -f {$containerName} 2>/dev/null || true");
+
+        $stillThere = Process::run("docker ps -a --filter name=^/{$containerName}\$ --format '{{.Names}}'");
+        if (trim($stillThere->output()) !== '') {
+            // Don't mark it closed if it didn't actually go away — same
+            // "leave it open and visibly stuck rather than silently
+            // wrong" reasoning used everywhere else this pattern appears.
+            // The pre-run cleanup a few lines later in runProject() gets
+            // one more attempt at removing it before the new container
+            // starts.
+            Log::error("[Sandbox] closeOpenRunForProject: failed to remove {$containerName} for project {$project->id} (run #{$openRun->id}). Leaving that run open.");
+            return;
+        }
+
+        $openRun->update(['stopped_at' => now()]);
+        $this->planGuard->release($user, 'active_sandboxes');
+
+        Log::info("[Sandbox] Self-released previous run #{$openRun->id} for project {$project->id} before starting a new one.");
+    }
+
+    /**
      * Start a Docker Sandbox container to run the project.
      *
      * FIX #12: Two additional problems found after FIX #11 shipped, both
@@ -1255,6 +1348,14 @@ class ProjectController extends Controller
         // check, not after — otherwise a user already stuck at their limit
         // from stale entries can never reach the code that would fix it.
         $this->reapStaleSandboxes($user);
+
+        // P0 fix (F0a): self-release THIS project's own previous run, if
+        // any, before the plan check — the ordinary "edit code, click Run
+        // again" loop must never cost a permanent slot. See
+        // closeOpenRunForProject()'s docblock for the full root-cause
+        // reasoning; this is what actually fixes the reported bug, reap
+        // above only ever helped with already-dead containers.
+        $this->closeOpenRunForProject($project, $user);
 
         // Check BEFORE any file writes / docker stop-rm / docker run — no
         // point doing expensive work for a request we're about to deny.
@@ -1328,16 +1429,29 @@ class ProjectController extends Controller
         chmod($workspacePath, 0777);
  
         // --- 3. CONTAINER PREP ---
+        // P0 fix (F0b): closeOpenRunForProject() above already closed out
+        // this project's *tracked* previous run, so under normal
+        // operation there's nothing left here to remove. This sweep is
+        // now defense-in-depth only, for a container that exists without
+        // a matching open SandboxRun row (crash between docker run and
+        // row bookkeeping, or a container left over from before this fix
+        // shipped) — matches both the legacy shared name and any
+        // run-scoped name for this project, since we don't know which
+        // form an untracked leftover would be using.
         // -f forces removal even if the container is in a stuck/"Removing"
         // state, and we verify it's actually gone rather than trusting the
         // exit code — a lingering container here would hold its old port
         // hostage regardless of what claimPortAndReserve() decides next.
-        $containerName = "ubiq_project_{$project->id}";
-        Process::run("docker rm -f {$containerName} 2>/dev/null || true");
+        $namePattern = "^/ubiq_project_{$project->id}(\$|_run[0-9]+\$)";
+        $strayIds = trim(Process::run("docker ps -aq --filter \"name={$namePattern}\"")->output());
+        if ($strayIds !== '') {
+            $strayIds = str_replace("\n", ' ', $strayIds);
+            Process::run("docker rm -f {$strayIds} 2>/dev/null || true");
+        }
 
-        $stillThere = Process::run("docker ps -a --filter name=^/{$containerName}\$ --format '{{.Names}}'");
+        $stillThere = Process::run("docker ps -aq --filter \"name={$namePattern}\"");
         if (trim($stillThere->output()) !== '') {
-            Log::error("[Sandbox] Could not remove stale container {$containerName} before restart.");
+            Log::error("[Sandbox] Could not remove a stale container for project {$project->id} before restart.");
             $this->planGuard->release($request->user(), 'active_sandboxes');
             return response()->json(['error' => 'A previous instance of this sandbox could not be cleaned up. Please try again in a moment.'], 500);
         }
@@ -1354,6 +1468,15 @@ class ProjectController extends Controller
             $this->planGuard->release($request->user(), 'active_sandboxes');
             return response()->json(['error' => 'No free ports available. Try again later.'], 503);
         }
+
+        // P0 fix (F0b): the container this run actually starts is named
+        // after $sandboxRun's own id (stamped in claimPortAndReserve),
+        // not the shared per-project name used above for the pre-run
+        // sweep — this is what makes every check downstream of this
+        // point (reapStaleSandboxes, stopProject, getBuildLog) able to
+        // tell this specific run's container apart from any other run of
+        // the same project.
+        $containerName = $sandboxRun->docker_name;
 
         // Angular CLI + esbuild needs ~700-900MB RAM during build.
         // Node containers get 1GB; PHP/Python stay at 512MB.
@@ -1441,7 +1564,10 @@ class ProjectController extends Controller
 
             if ($sandboxRun !== null) {
                 $sandboxRun->update(['stopped_at' => now()]);
-                Process::run("docker rm -f ubiq_project_{$project->id} 2>/dev/null || true");
+                // P0 fix (F0b): use this run's own container name, not
+                // the shared per-project one — the run-scoped container
+                // is what actually exists (or was about to) at this point.
+                Process::run("docker rm -f {$sandboxRun->docker_name} 2>/dev/null || true");
             }
 
             $this->planGuard->release($user, 'active_sandboxes');
@@ -1495,7 +1621,8 @@ class ProjectController extends Controller
             ]);
         }
 
-        $containerName = "ubiq_project_{$project->id}";
+        // P0 fix (F0b): use this specific run's own container name.
+        $containerName = $run->docker_name;
         $inspect = Process::run("docker inspect -f '{{.State.Status}}' {$containerName}");
         $dockerStatus = trim($inspect->output());
 

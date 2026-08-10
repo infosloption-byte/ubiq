@@ -10,7 +10,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  *
  * Columns:
  *   id, user_id, project_id, ip_address, user_agent,
- *   started_at, stopped_at, port, runtime, framework
+ *   started_at, stopped_at, port, container_name, runtime, framework
  */
 class SandboxRun extends Model
 {
@@ -25,6 +25,7 @@ class SandboxRun extends Model
         'heartbeat_at',
         'stopped_at',
         'port',
+        'container_name',
         'runtime',
         'framework',
     ];
@@ -50,5 +51,20 @@ class SandboxRun extends Model
     {
         if (!$this->stopped_at) return null;
         return $this->started_at->diffInSeconds($this->stopped_at);
+    }
+
+    /**
+     * P0 fix (see migration 2026_08_09_000003): the actual Docker
+     * container name for this run. Rows created after F0b ship have a
+     * unique-per-run `container_name` stamped in claimPortAndReserve();
+     * rows from before that (or before the migration ran) fall back to
+     * the old shared project-scoped name. Every call site that needs a
+     * container name for a specific run should read this accessor
+     * instead of re-deriving "ubiq_project_{$id}" inline, so there's one
+     * place this fallback lives.
+     */
+    public function getDockerNameAttribute(): string
+    {
+        return $this->container_name ?? "ubiq_project_{$this->project_id}";
     }
 }
