@@ -313,6 +313,32 @@ team plan that doesn't exist yet).
 (Add dated entries here when a design decision changes mid-build — e.g. a
 feature_key gets renamed, a limit default changes, a phase gets reordered.)
 
+- 2026-08-10 — Panel-fix, not part of the roadmap: Source Control panel
+  overflowed into the center editor when the sidebar was resized
+  narrower than 288px. Root cause: `SourceControlPanel.tsx`'s own root
+  div had a hardcoded `w-72` (288px), completely ignoring the parent
+  sidebar's actual `sidebarWidth` (freely resizable 150–600px per
+  `ProjectEditorPage.tsx`'s resize handler) — the Files tab never has
+  this problem because `FileTree`'s wrapper has no fixed width at all,
+  it just fills whatever the parent gives it. Below 288px, the fixed
+  width overflowed past its parent, and since the sidebar container had
+  no `overflow-hidden`, that overflow visually bled into the editor
+  pane instead of being clipped.
+    - Fix: removed the hardcoded `w-72` (now `w-full`, filling the
+      parent like the Files tab does) and the redundant `border-r`
+      already provided one level up by the sidebar container itself.
+    - Defense in depth: added `overflow-hidden` to the sidebar
+      container so any future panel with the same mistake clips
+      instead of bleeding into the editor.
+    - Checked for other usage sites before removing `w-72` —
+      `SourceControlPanel` is only ever rendered from
+      `ProjectEditorPage.tsx`, so no other layout context depended on
+      the fixed width.
+    - `tsc -b --noEmit` clean on both touched files. Not yet manually
+      tested by dragging the resize handle in a real browser — same
+      caveat as everything else built in a sandbox without a live
+      preview.
+
 - 2026-08-09 — G1 (usage transparency dashboard) complete except the
   G1d stretch. Worth flagging clearly: most of G1's scope turned out to
   already exist, built under Phase C1 ("consolidated usage widget"),

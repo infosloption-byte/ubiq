@@ -732,7 +732,7 @@ export default function ProjectEditorPage() {
                 </div>
 
                 {/* SIDEBAR */}
-                <div ref={sidebarRef} className="bg-ubiq-900 border-r border-white/5 flex flex-col shrink-0 relative transition-none" style={{ width: sidebarWidth }}>
+                <div ref={sidebarRef} className="bg-ubiq-900 border-r border-white/5 flex flex-col shrink-0 relative transition-none overflow-hidden" style={{ width: sidebarWidth }}>
 
                     {activeSideTab === 'files' ? (
                         <div className="flex flex-col h-full">

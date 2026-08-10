@@ -143,7 +143,7 @@ export default function SourceControlPanel({ projectId }: SourceControlPanelProp
   };
 
   return (
-    <div className="flex flex-col h-full bg-ubiq-950 border-r border-white/5 w-72 select-none relative">
+    <div className="flex flex-col h-full bg-ubiq-950 w-full select-none relative">
       
       {/* Header */}
       <div className="p-4 border-b border-white/5 flex items-center justify-between bg-ubiq-900/50">
