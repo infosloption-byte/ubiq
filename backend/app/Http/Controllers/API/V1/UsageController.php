@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\API\V1;
 
 use App\Http\Controllers\Controller;
+use App\Models\PlanActionLog;
 use App\Models\SiteVisit; 
 use App\Models\UsageLog;
 use App\Services\PlanGuard;
@@ -18,6 +19,11 @@ class UsageController extends Controller
      * live "how much of my CURRENT limit have I used right now" data,
      * reusing PlanGuard::remaining() rather than duplicating its counter
      * logic here.
+     *
+     * G1a (PLAN_SYSTEM_TASKS.md Phase F) added `recent_denials` — the
+     * last 10 plan_action_logs rows where this user was denied, raw
+     * reason codes and all. See the field's own inline comment below for
+     * why this stays untranslated at the API layer.
      */
     public function planUsage(Request $request, PlanGuard $planGuard, PlanService $planService)
     {
@@ -32,6 +38,31 @@ class UsageController extends Controller
         $projectsLimit = $planService->limitFor($user, 'projects.max_count') ?? 3;
         $projectsUnlimited = is_int($projectsLimit) && $projectsLimit === -1;
 
+        // G1a (PLAN_SYSTEM_TASKS.md Phase F): recent denials, so the
+        // Usage panel can show "here's what you actually hit and when"
+        // instead of just current live totals. Deliberately raw here —
+        // action_key/reason are returned as PlanGuard's own enum values,
+        // not pre-translated to copy. Frontend maps them through the
+        // same REASON_COPY table the point-of-failure modal already
+        // uses (see planLimitStore.ts) so the two surfaces can never say
+        // different things about the same reason code. Capped at 10 and
+        // scoped to denials only (allowed = false) — this endpoint isn't
+        // trying to be a general audit log, just "what recently blocked
+        // me."
+        $recentDenials = PlanActionLog::where('user_id', $user->id)
+            ->where('allowed', false)
+            ->orderByDesc('created_at')
+            ->limit(10)
+            ->get(['action_key', 'reason', 'limit_value', 'current_usage', 'created_at'])
+            ->map(fn (PlanActionLog $log) => [
+                'action_key'    => $log->action_key,
+                'reason'        => $log->reason,
+                'limit_value'   => $log->limit_value,
+                'current_usage' => $log->current_usage,
+                'created_at'    => $log->created_at,
+            ])
+            ->values();
+
         return response()->json([
             'plan' => [
                 'key' => $plan?->key ?? 'free',
@@ -39,6 +70,7 @@ class UsageController extends Controller
             ],
             'ai' => $planGuard->remaining($user, 'ai.request'),
             'sandbox' => $planGuard->remaining($user, 'sandbox.start'),
+            'recent_denials' => $recentDenials,
             'storage' => [
                 'used_mb' => round($usedBytes / 1048576, 2),
                 'limit_mb' => $storageUnlimited ? null : (int) $storageLimitMb,

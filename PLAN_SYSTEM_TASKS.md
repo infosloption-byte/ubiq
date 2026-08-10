@@ -8,7 +8,8 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 
 **Status as of 2026-08-09: Phases A–E complete. Phase F (Enhancement
 Roadmap) in progress — F0 (P0 sandbox slot leak) done, F3 (GitHub
-OAuth) done except F3e stretch, G1 next.**
+OAuth) done except F3e stretch, G1 (usage dashboard) done except G1d
+stretch, F1 next.**
 Phase F tracks `UBIQ_ENHANCEMENT_ROADMAP.md` — prioritized and broken
 into implementable tasks below. Work it top-to-bottom; the order
 already reflects priority (retention-critical → differentiation →
@@ -178,25 +179,42 @@ team plan that doesn't exist yet).
         connect/disconnect plumbing this depends on is now in place,
         so this is a smaller follow-up whenever it's prioritized.)*
 
-- [ ] **G1 — Usage transparency dashboard**
-  - [ ] G1a — `GET /user/usage-summary`: current-window counts vs. caps
+- [x] **G1 — Usage transparency dashboard** — 2026-08-09. Most of this
+      turned out to already be built under Phase C1/C2/E2b, before the
+      roadmap was written — see the 2026-08-09 decision-log entry for
+      what was found already in place vs. what was actually new work.
+  - [x] G1a — `GET /user/usage-summary`: current-window counts vs. caps
         per `counter_key`, plus last N `plan_action_logs` denials for
         the authenticated user. Pull cap values through `PlanGuard`'s
         own lookup (never duplicate limit numbers elsewhere) — and
         write the aggregation so it generalizes to instance-wide later
         (see G1d / Bucket 3 admin analytics), not as a strictly
-        per-user query.
-  - [ ] G1b — Frontend "Usage" panel (Settings or its own nav item):
+        per-user query. *(The counts-vs-caps half already existed as
+        `GET /user/plan-usage`, built in Phase C1/E2b — not a new
+        endpoint. Only the denials list was actually added here.)*
+  - [x] G1b — Frontend "Usage" panel (Settings or its own nav item):
         one bar/ring per `counter_key`, hour/day windows shown
         separately, plain-language line when at/recently hit a cap.
         Map `reason` enum values (`concurrent_limit_exceeded`,
-        `plan_lookup_failed`, etc.) to real sentences.
-  - [ ] G1c — Surface the same human-readable reason at the point of
+        `plan_lookup_failed`, etc.) to real sentences. *(The bars/
+        rings/hour-day split already existed as `PlanUsageWidget.tsx`
+        — Phase C1/E2b again. Only the "Recent limits hit" denials
+        list is new; it reuses the same `REASON_COPY` mapping G1c
+        already had, exported for that purpose.)*
+  - [x] G1c — Surface the same human-readable reason at the point of
         failure (chat input, "start sandbox" button), not only in the
-        dashboard.
+        dashboard. *(Already fully done — Phase C2's global axios
+        interceptor + `REASON_COPY` in `planLimitStore.ts` catches
+        every 429/403 with a `reason` field and shows a mapped message
+        via a shared modal, regardless of which action triggered it.
+        Nothing added here; G1b above now reuses this same table.)*
   - [ ] G1d — (stretch, low priority) Confirm G1a's aggregation query
         generalizes cleanly instance-wide, to save rework when Bucket
-        3's admin analytics gets picked up.
+        3's admin analytics gets picked up. *(Not re-verified — the
+        recent-denials query added for G1a is a plain per-user
+        `WHERE user_id = ?`, would need an instance-wide variant with
+        its own pagination/limits when Bucket 3 gets picked up, not
+        just dropping the WHERE clause.)*
 
 - [ ] **F1 — Full-stack sandbox parity + portable export**
   - [ ] F1a — Externalize the real Dockerfile: generate it from the
@@ -294,6 +312,50 @@ team plan that doesn't exist yet).
 
 (Add dated entries here when a design decision changes mid-build — e.g. a
 feature_key gets renamed, a limit default changes, a phase gets reordered.)
+
+- 2026-08-09 — G1 (usage transparency dashboard) complete except the
+  G1d stretch. Worth flagging clearly: most of G1's scope turned out to
+  already exist, built under Phase C1 ("consolidated usage widget"),
+  C2 (the reason→copy interceptor), and E2b — apparently before
+  `UBIQ_ENHANCEMENT_ROADMAP.md` was written, since the roadmap
+  describes G1 as if none of it existed yet. Checked what was actually
+  there before writing anything:
+    - `GET /user/plan-usage` (Phase C1/E2b) already returned live
+      hour/day AI usage, sandbox concurrency, storage, and project
+      counts, all sourced through `PlanGuard::remaining()` — exactly
+      what G1a asked for as a *new* `GET /user/usage-summary` endpoint.
+      Did not build a second endpoint; extended this one instead so
+      there's still exactly one source of truth for "current usage."
+    - `PlanUsageWidget.tsx` (Phase C1/E2b) already rendered all of that
+      as bars with live "resets in Xh Ym" countdowns — G1b's "one bar/
+      ring per counter_key, hour/day windows shown separately" was
+      already built.
+    - The axios response interceptor + `REASON_COPY` table in
+      `planLimitStore.ts` (Phase C2) already caught every 429/403 with
+      a `reason` field, from any action, and showed a mapped
+      human-readable message via a shared modal — G1c was already
+      fully done, nothing added for it.
+  What was actually new, then, was just the piece none of that covered
+  — a *history* of recent denials, not just live current totals:
+    - `UsageController::planUsage()` now also returns `recent_denials`:
+      the last 10 `plan_action_logs` rows for this user where
+      `allowed = false`, raw `action_key`/`reason`/`limit_value`/
+      `current_usage`/`created_at`, deliberately untranslated at the
+      API layer.
+    - `PlanUsageWidget.tsx` renders those under a new "Recent limits
+      hit" section, mapping `reason` through the *same* `REASON_COPY`
+      table G1c already relies on — exported it from
+      `planLimitStore.ts` for that reuse, rather than writing a second
+      reason→sentence table that could drift from the modal's wording
+      over time.
+  G1d (confirm the aggregation generalizes instance-wide) intentionally
+  left unchecked: the new `recent_denials` query is a plain per-user
+  `WHERE user_id = ?`, and an instance-wide version for Bucket 3's
+  admin analytics would need its own pagination/limits, not just
+  dropping that clause — flagged rather than silently assumed done.
+  Same caveat as F0/F3: no PHP available in this sandbox to run this
+  live — reasoned through by hand, brace/paren-checked, not
+  smoke-tested.
 
 - 2026-08-09 — F3 (GitHub OAuth, F3a–F3d) complete; F3e stretch not
   started. New `user_github_tokens` table (migration

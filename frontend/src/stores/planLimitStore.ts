@@ -12,7 +12,13 @@ import { create } from 'zustand';
  * so no upgrade prompt there; plan_lookup_failed etc. are backend errors,
  * not limits, so also no upgrade prompt).
  */
-const REASON_COPY: Record<string, { title: string; message: string; showUpgrade: boolean }> = {
+/**
+ * G1b (PLAN_SYSTEM_TASKS.md Phase F): exported so PlanUsageWidget can
+ * reuse this exact table to render recent-denials history — one
+ * reason-to-copy mapping, not two that could drift apart between the
+ * point-of-failure modal and the Usage panel's history list.
+ */
+export const REASON_COPY: Record<string, { title: string; message: string; showUpgrade: boolean }> = {
     concurrent_limit_exceeded: {
         title: 'Sandbox limit reached',
         message: "You've reached the maximum number of sandboxes running at once on your plan. Stop a running sandbox, or upgrade for more concurrent sandboxes.",

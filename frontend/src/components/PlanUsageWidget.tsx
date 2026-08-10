@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { userAPI } from '../services/api';
-import { Cpu, Boxes, FolderKanban, Sparkles, HardDrive, RefreshCw } from 'lucide-react';
+import { REASON_COPY } from '../stores/planLimitStore';
+import { Cpu, Boxes, FolderKanban, Sparkles, HardDrive, RefreshCw, AlertTriangle } from 'lucide-react';
 
 interface RateUsage {
     hour_limit: number;
@@ -16,10 +17,23 @@ interface ConcurrentUsage {
     remaining: number | null; // null = unlimited
 }
 
+// G1a (PLAN_SYSTEM_TASKS.md Phase F): raw plan_action_logs denial rows —
+// reason is PlanGuard's own enum value (e.g. 'hourly_limit_exceeded'),
+// mapped through REASON_COPY below for display, same table the
+// point-of-failure modal (planLimitStore.ts) uses.
+interface RecentDenial {
+    action_key: string;
+    reason: string | null;
+    limit_value: string | null;
+    current_usage: string | null;
+    created_at: string;
+}
+
 interface PlanUsageData {
     plan: { key: string; name: string };
     ai: RateUsage | null;      // null = plan resolution failed, not "unlimited"
     sandbox: ConcurrentUsage | null;
+    recent_denials?: RecentDenial[]; // optional — older cached responses won't have it
     storage: { used_mb: number; limit_mb: number | null; unlimited: boolean; percent: number };
     projects: { count: number; limit: number | null; unlimited: boolean };
     // E2b fix (PLAN_SYSTEM_TASKS.md Phase E): static plan *capability*
@@ -34,6 +48,23 @@ interface PlanUsageData {
         max_model_tier: string | null;
         sharing_enabled: boolean | null;
     };
+}
+
+/**
+ * G1a/b (PLAN_SYSTEM_TASKS.md Phase F): coarse relative time for the
+ * denials list — this doesn't need ResetCountdown's live-ticking
+ * precision (a past event doesn't move), just "how long ago," computed
+ * once per render.
+ */
+function timeAgo(isoString: string): string {
+    const ms = Date.now() - new Date(isoString).getTime();
+    const minutes = Math.floor(ms / 60000);
+    if (minutes < 1) return 'just now';
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h ago`;
+    const days = Math.floor(hours / 24);
+    return `${days}d ago`;
 }
 
 function UsageBar({ used, total, unlimited }: { used: number; total: number; unlimited: boolean }) {
@@ -270,6 +301,33 @@ export default function PlanUsageWidget() {
                     unlimited={data.projects.unlimited}
                 />
             </div>
+
+            {/* G1a/b (PLAN_SYSTEM_TASKS.md Phase F): recent-denials
+                history — same REASON_COPY mapping the point-of-failure
+                modal uses (planLimitStore.ts), so a user sees the exact
+                same wording here as they saw in the moment. Hidden
+                entirely when there's nothing to show (no denials, or an
+                older cached response without the field) rather than
+                rendering an empty "Recent limits hit" shell. */}
+            {data.recent_denials && data.recent_denials.length > 0 && (
+                <div className="p-3 rounded-lg bg-white/[0.02] border border-white/5">
+                    <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wide mb-2 flex items-center gap-1.5">
+                        <AlertTriangle className="w-3 h-3 text-orange-400" />
+                        Recent limits hit
+                    </div>
+                    <div className="space-y-2">
+                        {data.recent_denials.slice(0, 5).map((denial, i) => {
+                            const copy = denial.reason ? REASON_COPY[denial.reason] : undefined;
+                            return (
+                                <div key={i} className="text-[11px] text-slate-400 flex items-start justify-between gap-2">
+                                    <span>{copy?.title ?? denial.action_key}</span>
+                                    <span className="text-slate-600 font-mono whitespace-nowrap">{timeAgo(denial.created_at)}</span>
+                                </div>
+                            );
+                        })}
+                    </div>
+                </div>
+            )}
 
             {/* Sub-part 2: explicit divider + heading spacing so this reads
                 as its own section AFTER Plan Usage, not just one more row
