@@ -533,13 +533,6 @@ class ProjectController extends Controller
 
         $this->planGuard->release($request->user(), 'active_sandboxes');
 
-        // F1b: same cleanup as the other confirmed-removal call sites —
-        // pre-F0b rows have no id-backed compose file to find, so guard
-        // against the null case rather than passing a bare fallback name.
-        if ($openRun) {
-            $this->cleanupRuntimeCompose($openRun);
-        }
-
         return response()->json(['message' => 'Container stopped.']);
     }
 
@@ -1249,7 +1242,6 @@ class ProjectController extends Controller
 
             $run->update(['stopped_at' => now()]);
             $this->planGuard->release($user, 'active_sandboxes');
-            $this->cleanupRuntimeCompose($run);
         }
 
         // FIX #16: hard backstop after the per-row pass above. That pass
@@ -1326,7 +1318,6 @@ class ProjectController extends Controller
 
         $openRun->update(['stopped_at' => now()]);
         $this->planGuard->release($user, 'active_sandboxes');
-        $this->cleanupRuntimeCompose($openRun);
 
         Log::info("[Sandbox] Self-released previous run #{$openRun->id} for project {$project->id} before starting a new one.");
     }
@@ -1546,60 +1537,44 @@ class ProjectController extends Controller
         // Angular also spawns more processes (tsc, esbuild workers)
         $pidsLimit   = ($runtime === 'node') ? 200 : 100;
 
-        // F1b (PLAN_SYSTEM_TASKS.md Phase F): moved off a single `docker
-        // run` string to a generated `docker-compose.yml`, per-run, so a
-        // future `db:` service (F1c) has somewhere to live alongside the
-        // app service without inventing a second execution path. Deliberately
-        // a drop-in equivalent for now — same image, same bind mount, same
-        // resource limits/security flags as the old `docker run` command,
-        // just expressed as one compose service. Every downstream cleanup
-        // path (stopProject, reapStaleSandboxes, closeOpenRunForProject,
-        // the pre-run stray sweep above) still works completely unchanged:
-        // they all operate on `docker rm -f <container_name>` / `docker ps
-        // --filter name=...`, and a container compose creates is a perfectly
-        // ordinary container by that name — nothing about those call sites
-        // needed to know compose exists.
-        //
-        // Two infra constraints shaped this, found while implementing (not
-        // guesses — checked the actual files):
-        //   1. The root docker-compose.yml's socket-proxy sidecar has
-        //      NETWORKS:0 and VOLUMES:0 — it rejects POST /networks/create
-        //      and /volumes/create over the proxied Docker API. Compose
-        //      normally tries to create its own default network per
-        //      project, which would silently fail against that proxy. Fixed
-        //      by declaring `ubiq_sandbox` as `external: true` below, the
-        //      same pre-existing network `--network=ubiq_sandbox` already
-        //      just attached to — compose never asks to create it.
-        //   2. backend/Dockerfile only ever installed `docker-ce-cli`, never
-        //      `docker-compose-plugin` — `docker compose` would have been
-        //      "unknown command" with no other change. Added to the apt
-        //      install line in the same commit as this.
-        $composeYaml = $this->buildRuntimeComposeYaml(
-            containerName: $containerName,
-            image: $image,
-            port: $port,
-            internalPort: $internalPort,
-            hostMountPath: $hostMountPath,
-            memoryLimit: $memoryLimit,
-            memorySwap: $memorySwap,
-            tierCpu: $tierCpu,
-            pidsLimit: $pidsLimit,
-        );
-
-        $composePath = $this->runtimeComposePath($sandboxRun);
-        FileSystem::makeDirectory(dirname($composePath), 0755, true, true);
-        file_put_contents($composePath, $composeYaml);
-
-        // Unique per run (not per project) — avoids two rapid-fire runs of
-        // the same project ever sharing compose's own project-scoped state
-        // even for the instant before the earlier run's row is closed.
-        $composeProjectName = "ubiq-run{$sandboxRun->id}";
-
+        // F1b REVERTED (see PLAN_SYSTEM_TASKS.md notes, 2026-08-11): moving
+        // execution to `docker compose up` needs a `GET /networks` call
+        // for compose's own project-state reconciliation — this happens
+        // unconditionally on every `up`, even for a single service using
+        // `network_mode` with no top-level `networks:` section at all.
+        // Confirmed on the actual box: manual curl to /networks 403'd,
+        // and `docker compose up` still 403'd even after switching to
+        // network_mode. The proxy's NETWORKS:0 blocks GET, not just
+        // POST/DELETE, and there's no read-only variant of that toggle —
+        // enabling it also permits creating/deleting arbitrary Docker
+        // networks through the proxy, which is a real widening of what a
+        // Laravel bug or compromise could do to the host, not a formality.
+        // Not worth trading away for a capability (F1c's db service)
+        // nothing needs yet. Back to plain `docker run`, unchanged from
+        // before this file's F1b attempt.
         $cmd = implode(' ', [
-            'docker compose',
-            '-f', escapeshellarg($composePath),
-            '-p', escapeshellarg($composeProjectName),
-            'up -d',
+            'docker run -d',
+            '--name',   escapeshellarg($containerName),
+            '-p',       "{$port}:{$internalPort}",
+            '-e',       "PORT={$internalPort}",
+            '-v',       escapeshellarg($hostMountPath) . ':/app',
+            '-w',       '/app',
+            "--memory={$memoryLimit}",
+            "--memory-swap={$memorySwap}",
+            "--cpus={$tierCpu}",
+            "--pids-limit={$pidsLimit}",
+            '--ulimit', 'nofile=1024:1024',
+            '--ulimit', 'nproc=100:100',
+            '--network=ubiq_sandbox',
+            '--cap-drop=ALL',
+            '--cap-add=NET_BIND_SERVICE',
+            '--security-opt', 'no-new-privileges:true',
+            '--log-driver=json-file',
+            '--log-opt', 'max-size=10m',
+            '--log-opt', 'max-file=1',
+            '--restart=no',
+            $image,
+            "sh -c 'sh startup.sh > /app/startup.log 2>&1 || tail -f /dev/null'",
         ]);
 
         $result = Process::timeout(120)->run($cmd);
@@ -1609,10 +1584,9 @@ class ProjectController extends Controller
             // reserved in our own DB before this call), so a failure here
             // is a genuine Docker/image/resource problem — release the
             // reservation and the plan slot and surface it as-is.
-            Log::error("[Sandbox] docker compose up failed for project {$project->id}: " . $result->errorOutput());
+            Log::error("[Sandbox] Docker run failed for project {$project->id}: " . $result->errorOutput());
             $sandboxRun->update(['stopped_at' => now()]);
             Process::run("docker rm -f {$containerName} 2>/dev/null || true");
-            @unlink($composePath);
             $this->planGuard->release($request->user(), 'active_sandboxes');
             return response()->json(['error' => 'Docker failed to start the sandbox.', 'details' => $result->errorOutput()], 500);
         }
@@ -1857,130 +1831,6 @@ class ProjectController extends Controller
     }
 
     /**
-     * F1b: where the ephemeral, per-run compose file used to actually
-     * launch a sandbox lives. Deliberately outside the project's workspace
-     * directory — the workspace's own docker-compose.yml (see
-     * writeDockerComposeExport()) is the *portable* version someone takes
-     * with them, built from the Dockerfile with no bind mount, and this is
-     * not that file. Keeping them physically separate means the export
-     * one can never accidentally get overwritten by, or confused with,
-     * this Ubiq-infra-specific one.
-     */
-    private function runtimeComposePath(SandboxRun $sandboxRun): string
-    {
-        return storage_path("app/sandbox-runtime/run-{$sandboxRun->id}.yml");
-    }
-
-    /**
-     * F1b: delete a run's ephemeral compose file once its container is
-     * confirmed gone. Every call site below already verifies removal
-     * before calling this — no point deleting the file description of a
-     * container that might still be alive. Not calling this anywhere isn't
-     * a correctness bug (buildRuntimeComposeYaml() always regenerates
-     * before the next run reads it), just an unbounded-growth one in
-     * storage/app/sandbox-runtime/, so it's cheap to be thorough here.
-     */
-    private function cleanupRuntimeCompose(SandboxRun $run): void
-    {
-        @unlink($this->runtimeComposePath($run));
-    }
-
-    /**
-     * F1b: build the compose YAML for one run. Single `app` service today —
-     * a deliberate drop-in equivalent for the `docker run` command this
-     * replaces, not a redesign. F1c adds a `db:` service alongside this one
-     * in the same file; nothing here needs to change for that to happen.
-     *
-     * Hand-built string rather than symfony/yaml (not already a dependency)
-     * — same approach writeDockerfile() already uses for its generated
-     * file, so this stays consistent with existing style rather than
-     * introducing a new pattern for one generator.
-     */
-    private function buildRuntimeComposeYaml(
-        string $containerName,
-        string $image,
-        int $port,
-        int $internalPort,
-        string $hostMountPath,
-        string $memoryLimit,
-        string $memorySwap,
-        string $tierCpu,
-        int $pidsLimit,
-    ): string {
-        // startup.sh already writes its own output to startup.log inside
-        // /app (see the writeStartupScript step above); the `|| tail -f
-        // /dev/null` fallback keeps the container alive for build-log
-        // inspection even if startup.sh itself exits non-zero, exactly as
-        // the old `docker run` command's command string did.
-        $command = "sh startup.sh > /app/startup.log 2>&1 || tail -f /dev/null";
-
-        // Corrected after a real deploy test: the socket-proxy's
-        // NETWORKS:0 blocks GET on /networks/* too, not just POST — a
-        // plain `docker network inspect ubiq_sandbox` through the proxy
-        // returns 403. Compose does exactly that GET to resolve an
-        // `external: true` network before attaching a container to it,
-        // even though it never tries to create one — so the `networks:`
-        // block this originally used would have failed at `docker compose
-        // up`, not just at network-create time as assumed.
-        //
-        // `network_mode` sidesteps this entirely: it's a raw pass-through
-        // onto the container's own HostConfig.NetworkMode field at create
-        // time, the identical mechanism `docker run --network=ubiq_sandbox`
-        // already used successfully through this same proxy (CONTAINERS/
-        // POST are allowed) — no /networks/* call of any kind, GET or
-        // POST, is ever made for it.
-        return <<<YAML
-        # Generated by Ubiq at run time (F1b) — NOT the portable
-        # docker-compose.yml in the project's own files. This one is
-        # Ubiq-infra-specific (bind mount, tier-based resource limits,
-        # the pre-existing `ubiq_sandbox` network) and is never shipped
-        # in a download. Regenerated fresh on every run; safe to delete
-        # between runs.
-        services:
-          app:
-            image: {$image}
-            container_name: {$containerName}
-            working_dir: /app
-            ports:
-              - "{$port}:{$internalPort}"
-            environment:
-              PORT: "{$internalPort}"
-            volumes:
-              - {$hostMountPath}:/app
-            command: ["sh", "-c", "{$command}"]
-            mem_limit: {$memoryLimit}
-            memswap_limit: {$memorySwap}
-            cpus: "{$tierCpu}"
-            pids_limit: {$pidsLimit}
-            ulimits:
-              nofile:
-                soft: 1024
-                hard: 1024
-              nproc:
-                soft: 100
-                hard: 100
-            cap_drop:
-              - ALL
-            cap_add:
-              - NET_BIND_SERVICE
-            security_opt:
-              - no-new-privileges:true
-            logging:
-              driver: json-file
-              options:
-                max-size: "10m"
-                max-file: "1"
-            restart: "no"
-            # See the docblock above: network_mode, not `networks:` +
-            # external:true — the latter needs a /networks GET the
-            # socket-proxy's NETWORKS:0 setting rejects, confirmed by an
-            # actual `docker network inspect` 403 during deploy testing.
-            network_mode: ubiq_sandbox
-
-        YAML;
-    }
-
-    /**
      * F1a (PLAN_SYSTEM_TASKS.md Phase F): write a real, standalone
      * Dockerfile into the project workspace and persist it as a project
      * file — the same pattern generateStartupScript()'s caller already
@@ -2043,20 +1893,22 @@ class ProjectController extends Controller
     }
 
     /**
-     * F1b: the *portable* docker-compose.yml — written into the project's
-     * own workspace (tracked as a project file, shipped automatically by
-     * the existing download() zip, same mechanism writeDockerfile() above
-     * already uses). This is NOT the file the live Ubiq sandbox actually
-     * runs from — see buildRuntimeComposeYaml()'s docblock for why those
-     * are deliberately two different files. This one builds from the
+     * F1b (revised, see PLAN_SYSTEM_TASKS.md 2026-08-11): the *portable*
+     * docker-compose.yml — written into the project's own workspace
+     * (tracked as a project file, shipped automatically by the existing
+     * download() zip, same mechanism writeDockerfile() above already
+     * uses). The live Ubiq sandbox does NOT run from this file — it's
+     * back on plain `docker run` (the compose-as-execution-engine attempt
+     * hit a real infra wall on the socket-proxy and was reverted; see the
+     * notes log). This file is purely an export artifact: builds from the
      * Dockerfile (`build: .`, no bind mount) so `docker compose up` works
      * standalone on any machine with Docker installed, independent of
-     * Ubiq's own network/volume/tier setup — none of which would mean
-     * anything on someone else's server anyway.
+     * Ubiq's own network/tier setup — none of which would mean anything
+     * on someone else's server anyway.
      *
-     * F1c adds a `db:` service into this same generated file — that's the
-     * "the generated docker-compose.yml includes the db service" line in
-     * the roadmap. Nothing here needs to change for F1c to build on it.
+     * F1c can still add a `db:` service into this same generated file for
+     * export/portability purposes even though the live sandbox won't run
+     * multi-container via compose — see the re-scoped F1c note.
      */
     private function writeDockerComposeExport(Project $project, string $workspacePath, int $internalPort): void
     {

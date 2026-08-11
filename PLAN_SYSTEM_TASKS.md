@@ -223,19 +223,35 @@ team plan that doesn't exist yet).
         project's own workspace directory (alongside `ubiq.json`) so
         the existing `download()` zip ships it automatically. No
         changes needed to `download()` itself. — 2026-08-10, see notes
-  - [x] F1b — Multi-service sandboxes: move project execution from a
-        single `docker run` to a generated `docker-compose.yml`
-        (drop-in equivalent for the single-container case first).
-        Capacity accounting: one compose stack = one slot against
-        `SANDBOX_GLOBAL_CONCURRENT_LIMIT`, same as today — don't invent
-        new capacity math. — 2026-08-11, see notes
-  - [ ] F1c — DB service in the sandbox: add a `db` service (F1b) with
-        a project-scoped Docker volume (survives stop/start, never a
-        standing service); include it in the generated
-        `docker-compose.yml` so export (F1a) reproduces the exact
-        multi-container setup that was tested. Replaces the old
-        schema-per-project-on-shared-MySQL idea entirely — do not
-        build a shared multi-tenant DB or storage-quota system.
+  - [~] F1b — Multi-service sandboxes via `docker-compose`: attempted,
+        hit a real infra wall on the socket-proxy (NETWORKS:0 blocks GET
+        too, and compose needs that regardless of `network_mode`),
+        reverted live execution back to plain `docker run`. Re-scoped:
+        see F1c below for the actual path to "app + db together"
+        that doesn't need compose as the execution engine. Portable
+        *export* `docker-compose.yml` (written into the workspace,
+        shipped via download) kept — that part never touched the
+        socket-proxy and is still useful on its own. — 2026-08-11,
+        see notes for the full story
+  - [ ] F1c — DB service in the sandbox, re-scoped: NOT via
+        `docker compose` (see F1b above — the socket-proxy makes
+        compose-as-execution-engine a real security trade-off for no
+        current benefit). Instead: a second `docker run
+        --network=ubiq_sandbox ...` for the `db` container, same
+        mechanism the existing `app` container already uses
+        successfully — no Networks-API call either way, so no proxy
+        change needed. Both containers tracked under the same
+        `SandboxRun`/project; still one slot against
+        `SANDBOX_GLOBAL_CONCURRENT_LIMIT` regardless of container
+        count, per the original scoping. Storage: almost certainly hits
+        the same `VOLUMES:0` GET-is-blocked-too problem a named Docker
+        volume would — plan a bind-mount into a project-scoped host
+        directory from the start (same approach the app's own source
+        files already use) rather than `docker volume create`. The
+        *exported* `docker-compose.yml` (F1b's export half) can still
+        gain a `db:` service for portability even though live execution
+        stays on two `docker run` calls — export and live execution are
+        already two different code paths, so this isn't a new split.
   - [ ] F1d — Ephemeral preview links: signed token derived from a
         running `SandboxRun` row, resolving
         `preview-{token}.ubiq-editor.space` proxied to that run's
@@ -313,100 +329,82 @@ team plan that doesn't exist yet).
 (Add dated entries here when a design decision changes mid-build — e.g. a
 feature_key gets renamed, a limit default changes, a phase gets reordered.)
 
-- 2026-08-11 — F1b (multi-service `docker-compose` sandboxes) complete.
-  Replaced the single `docker run ...` string in `runProject()` with a
-  generated, per-run `docker-compose.yml` + `docker compose -f ... -p ...
-  up -d`. Deliberately a drop-in equivalent for the single-container
-  case — same image, bind mount, memory/cpu/pids limits, ulimits,
-  cap-drop/cap-add, security-opt, log driver, and `ubiq_sandbox` network
-  attachment the old `docker run` command used, just expressed as one
-  compose service (`app`) instead of CLI flags. Nothing else needed to
-  change: `stopProject`, `reapStaleSandboxes`, `closeOpenRunForProject`,
-  and the pre-run stray-container sweep all still work by `docker rm -f
-  <container_name>` / `docker ps --filter name=...`, and a container
-  compose creates is an ordinary container by that name — those call
-  sites don't need to know compose exists.
-    - **Two infra constraints found while implementing, not guessed at
-      — checked the actual files:**
-      1. Root `docker-compose.yml`'s socket-proxy sidecar has
-         `NETWORKS: 0` and `VOLUMES: 0` — it rejects `POST
-         /networks/create` and `/volumes/create` over the proxied
-         Docker API. Plain compose usually creates its own default
-         network per project on first `up`, which would silently fail
-         against that proxy. Fixed by declaring `ubiq_sandbox` (the
-         same pre-existing network the old `--network=ubiq_sandbox`
-         flag just attached to) as `external: true` in the generated
-         file, so compose never asks to create anything.
-      2. `backend/Dockerfile` only ever installed `docker-ce-cli`, never
-         `docker-compose-plugin` — `docker compose` would have failed
-         with "unknown command" even though every other `docker ...`
-         call already worked. Added `docker-compose-plugin` to the same
-         apt install line docker-ce-cli was already on. **This means
-         `ubiq_api` needs a rebuild (`docker compose build api` on the
-         EC2 host) before F1b can actually run — a plain code deploy
-         isn't enough by itself.**
-    - **Two separate compose files, on purpose, not one:** the runtime
-      one (`buildRuntimeComposeYaml()`, written to
-      `storage/app/sandbox-runtime/run-{id}.yml`, outside the
-      workspace, never shipped) uses the stock image + bind mount for
-      Ubiq's own fast dev loop; the portable one
-      (`writeDockerComposeExport()`, written into the workspace as
-      `docker-compose.yml`, tracked as a project file, shipped by the
-      existing `download()` zip) uses `build: .` against the Dockerfile
-      F1a already generates, no bind mount. This mirrors the split F1a
-      already established between the live sandbox and the exported
-      Dockerfile — same reasoning, applied to compose.
-    - **Correction, found during real deploy testing on the EC2 box
-      (2026-08-11, later same day):** the runtime compose file
-      originally used `networks: { default: { external: true, name:
-      ubiq_sandbox } }`. A manual `docker network inspect ubiq_sandbox`
-      through the socket-proxy came back `403 Forbidden` — turns out
-      `NETWORKS: 0` on the proxy blocks `GET` on `/networks/*` too, not
-      only `POST`. Compose does exactly that `GET` to resolve an
-      `external: true` network before attaching a container to it, so
-      `docker compose up` would have hit the same 403 the manual
-      inspect did — the original "external:true avoids the create
-      call" reasoning was right about the create call and wrong about
-      compose never needing to look the network up at all. Switched to
-      `network_mode: ubiq_sandbox` at the service level instead — a
-      raw `HostConfig.NetworkMode` pass-through on the container-create
-      call itself, the same mechanism the old `docker run
-      --network=ubiq_sandbox` flag already used successfully through
-      this proxy. No `/networks/*` call, GET or POST, happens for it at
-      all. **Flag for F1c:** the same `VOLUMES: 0` restriction almost
-      certainly blocks `GET` on `/volumes/*` too, by the same pattern —
-      worth assuming a named Docker volume won't work at all (not just
-      "won't auto-create") and planning the bind-mount approach from
-      the start rather than discovering this the same way.
-    - Runtime compose file is regenerated fresh every run and deleted
-      once its container's removal is confirmed (`cleanupRuntimeCompose()`,
-      called from `stopProject`, `reapStaleSandboxes`, and
-      `closeOpenRunForProject` right after each one's existing
-      removal-verification step) — otherwise `sandbox-runtime/` grows by
-      one small file per run forever. Not calling it anywhere wouldn't
-      have been a correctness bug, just an unbounded-disk-growth one.
-    - Capacity accounting untouched, as scoped: one compose stack still
-      costs exactly one slot against `SANDBOX_GLOBAL_CONCURRENT_LIMIT`,
-      since it's still one `SandboxRun` row and one container either
-      way. No new capacity math introduced.
-    - Same caveat as F0/F1a/F3/G1: no PHP or Docker available in this
-      sandbox to actually run `docker compose up` against the generated
-      file — code review + brace-balance check only. **Needs a real
-      smoke test after the `ubiq_api` image rebuild** — run a project of
-      each runtime type, confirm the container still starts/serves/stops
-      exactly as it did under plain `docker run`, and confirm
-      `docker compose ps` / `docker ps` agree on what's running.
-  F1c (DB service in the sandbox) is next — it slots a `db:` service
-  into the same `buildRuntimeComposeYaml()` / `writeDockerComposeExport()`
-  pair this added, so neither generator needs restructuring for it.
-  Worth flagging now: F1c's "project-scoped Docker volume" will hit the
-  same `VOLUMES: 0` socket-proxy restriction found above — a named
-  Docker volume can't be created through that proxy either, so F1c
-  likely wants a host bind-mount into a project-scoped directory
-  instead of an actual `docker volume`, the same approach the app's own
-  source files already use. Worth confirming against the roadmap
-  wording before starting, since "Docker volume" there may have meant
-  "persistent storage," not literally the Docker Volumes API.
+- 2026-08-11 — F1b (multi-service `docker-compose` sandboxes) attempted
+  and reverted. Full story below because the reasoning matters more than
+  the result here — same "why," not just "what," standard as the rest of
+  this log.
+    - **What was tried:** replaced the single `docker run ...` string in
+      `runProject()` with a generated, per-run `docker-compose.yml` +
+      `docker compose -f ... -p ... up -d`. Deliberately a drop-in
+      equivalent for the single-container case — same image, bind mount,
+      resource limits, security flags, and `ubiq_sandbox` network
+      attachment as the old `docker run` command, just expressed as one
+      compose service instead of CLI flags.
+    - **First blocker, found by checking the actual proxy config, not
+      guessed:** the root `docker-compose.yml`'s socket-proxy sidecar has
+      `NETWORKS: 0` and `VOLUMES: 0` — it rejects `POST /networks/create`.
+      Worked around by declaring `ubiq_sandbox` (the same pre-existing
+      network `--network=ubiq_sandbox` already used) as `external: true`,
+      so compose wouldn't try to create anything.
+    - **Second blocker, found during real deploy testing on the EC2 box:**
+      a manual `docker network inspect ubiq_sandbox` through the proxy
+      came back `403 Forbidden`. Turns out `NETWORKS: 0` blocks `GET` on
+      `/networks/*` too, not only `POST` — and compose does exactly that
+      `GET` to resolve an `external: true` network before attaching a
+      container to it, so `docker compose up` hit the same wall. Switched
+      to `network_mode: ubiq_sandbox` at the service level (a raw
+      `HostConfig.NetworkMode` pass-through, same mechanism `docker run
+      --network=` already used successfully) — still `403`.
+    - **Third check, this time via direct `curl` against the proxy
+      instead of guessing again:** `GET /networks` (plain and with a
+      compose-project label filter) both `403`'d; `/containers/json`
+      `200`'d fine. Conclusion: `docker compose up` does an unconditional
+      `GET /networks` for its own project-state reconciliation on every
+      `up` — independent of whether any service actually declares a
+      `networks:` block or uses `network_mode` instead. There is no way
+      to make `docker compose up` work against this proxy without
+      enabling `NETWORKS` on it.
+    - **Why this stopped here instead of just flipping the setting:**
+      the proxy's `POST` and `DELETE` toggles are already globally `1`.
+      There's no read-only variant of the `NETWORKS` toggle — enabling it
+      to permit the `GET` compose needs would *also* permit
+      `POST /networks/create` and `DELETE /networks/{id}` through the
+      same proxy. That's a real widening of what a Laravel bug or
+      compromise could do to the host (arbitrary network
+      creation/deletion, not just sandbox-container management), directly
+      contradicting the least-privilege reasoning FIX #9 built this proxy
+      for in the first place. Trading that away to unlock a capability
+      (F1c's db-in-sandbox) that isn't blocking anything today isn't a
+      reasonable trade — reverted rather than making it.
+    - **What got reverted:** `runProject()` back to plain `docker run`,
+      byte-for-byte the same flags as before this attempt.
+      `buildRuntimeComposeYaml()`, `runtimeComposePath()`,
+      `cleanupRuntimeCompose()`, and their three call sites
+      (`stopProject`, `reapStaleSandboxes`, `closeOpenRunForProject`)
+      removed entirely — they only ever existed to support the
+      compose-as-execution-engine path.
+    - **What was kept, since it never touched the socket-proxy at all:**
+      `writeDockerComposeExport()` — the portable, `build`-based
+      `docker-compose.yml` written into the workspace and shipped via
+      `download()`. That one only ever runs on someone else's machine,
+      never against Ubiq's own proxy, so none of the above applies to it.
+      Docblock updated to stop referencing the now-deleted runtime
+      generator. `docker-compose-plugin` left installed in
+      `backend/Dockerfile` (harmless on its own, and removing it would
+      cost another image rebuild for zero benefit) even though nothing
+      server-side calls `docker compose` anymore.
+    - **F1c re-scoped as a direct result** (see its checklist entry
+      above): not via `docker compose`, but a second `docker run
+      --network=ubiq_sandbox ...` for the `db` container — the exact
+      same mechanism the `app` container already uses, which never
+      touches the Networks API either way. Gets the actual product goal
+      (frontend + backend + db together in one sandbox) without the
+      security trade-off that killed the compose approach. The export
+      `docker-compose.yml` can still grow a `db:` service for portability
+      independent of this — export and live execution were already two
+      separate code paths before this happened.
+    - Net effect on `runProject()` today: none. Byte-for-byte the same
+      `docker run` command that ran before this entire attempt started.
 
 - 2026-08-10 — Panel-fix, not part of the roadmap: Source Control panel
   overflowed into the center editor when the sidebar was resized
@@ -644,8 +642,8 @@ feature_key gets renamed, a limit default changes, a phase gets reordered.)
       review only, needs a real smoke test (build one of each runtime
       type — node/php/python/static — and confirm the image actually
       runs and serves) before this ships to users.
-  F1b (multi-service `docker-compose` sandboxes) shipped next — see the
-  2026-08-11 entry above.
+  F1b (multi-service `docker-compose` sandboxes) was attempted next —
+  see the 2026-08-11 entry above for why it was reverted.
 
 - 2026-07-28 — Phase A complete. Sentinel convention: `-1` means "unlimited"
   for numeric `plan_features` values (used by `projects.max_count` on Pro).
