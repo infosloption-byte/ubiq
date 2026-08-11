@@ -7,9 +7,10 @@ scope from what was originally planned.
 Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 
 **Status as of 2026-08-11: Phases A–E complete. Phase F (Enhancement
-Roadmap) in progress — F0 (P0 sandbox slot leak) done, F3 (GitHub
-OAuth) done except F3e stretch, G1 (usage dashboard) done except G1d
-stretch, F1a/F1c done, F1b reverted (see notes), F1d next.**
+Roadmap) in progress — F0 (P0 sandbox slot leak) done, F0c (Terminal
+panel using stale pre-F0b container name) done, F3 (GitHub OAuth) done
+except F3e stretch, G1 (usage dashboard) done except G1d stretch,
+F1a/F1c done, F1b reverted (see notes), F1d next.**
 Phase F tracks `UBIQ_ENHANCEMENT_ROADMAP.md` — prioritized and broken
 into implementable tasks below. Work it top-to-bottom; the order
 already reflects priority (retention-critical → differentiation →
@@ -153,6 +154,22 @@ team plan that doesn't exist yet).
         container name, so `reapStaleSandboxes()` can tell an old run's
         container apart from a new one in genuine edge cases (crash,
         browser closed mid-session).
+
+- [x] **F0c — Fix `TerminalController` using the pre-F0b container name** *(found 2026-08-11, same class of bug as F0)* — see 2026-08-11 decision-log entry.
+  - [x] Resolve the container name from the project's open `SandboxRun`
+        (`$run->docker_name`) instead of the hardcoded, pre-F0b
+        `"ubiq_project_{$project->id}"` string that F0b already made
+        stale everywhere else.
+  - [x] Verify the resolved container is actually `docker ps` alive
+        before exec'ing into it, and return a clear, actionable message
+        ("click RUN" / "click RESTART") instead of silently trying to
+        exec into a nonexistent container.
+  - [x] Remove the controller's own separate `startContainer()`
+        auto-heal fallback (generic base images, no Dockerfile, no
+        `SandboxRun` bookkeeping — a second, drifting reimplementation
+        of sandbox boot that predates F1a/F1c and was the root cause
+        pattern here). Starting a sandbox now stays the sole
+        responsibility of `ProjectController::runProject()`.
 
 - [x] **F3 — GitHub OAuth (replace pasted PATs)** — 2026-08-09, F3a–F3d done, F3e stretch not started
   - [x] F3a — Register GitHub OAuth App; add `GET /auth/github/redirect`
@@ -331,6 +348,60 @@ team plan that doesn't exist yet).
 
 (Add dated entries here when a design decision changes mid-build — e.g. a
 feature_key gets renamed, a limit default changes, a phase gets reordered.)
+
+- 2026-08-11 — F0c (Terminal panel exec'ing into a nonexistent
+  container) found and fixed. Reported as: "Sandbox is running (Live
+  Server Logs shows it serving fine), but the Terminal panel says
+  `Error response from daemon: No such container: ubiq_project_16`
+  for every command."
+    - **Root cause:** `TerminalController::execute()` still hardcoded
+      `$containerName = "ubiq_project_{$project->id}"` — the
+      project-scoped (not run-scoped) naming scheme from *before* F0b
+      (2026-08-09) switched every other container-touching call site
+      over to `SandboxRun::docker_name`. After F0b shipped, a project's
+      real running container is named
+      `ubiq_project_{id}_run{run_id}`; nothing is ever named the bare
+      `ubiq_project_{id}` form for an active run anymore (that string
+      only still means anything as `docker_name`'s legacy fallback for
+      rows created before the F0b migration). `TerminalController` was
+      the one call site F0b's cleanup pass missed, so it was — and
+      always would be, for any project run after 2026-08-09 — checking
+      for a container name nothing is ever given.
+    - **Compounding factor, not the root cause but worth recording:**
+      on a cache miss, the controller tried to "auto-heal" by booting a
+      *replacement* container via its own `startContainer()` — a
+      second, independent reimplementation of sandbox boot (generic
+      `node:20-alpine`/`composer:2.7`/`python:3.11-alpine` images, no
+      `BoilerplateManager`/Dockerfile involvement, no framework
+      detection beyond a crude file-existence check, and critically no
+      `SandboxRun` row created or updated at all). This predates F1a's
+      Dockerfile externalization and F1c's db-companion work entirely,
+      and had clearly drifted out of sync with the real boot pipeline
+      in `ProjectController::runProject()` — exactly the failure mode
+      "two copies of boot logic" tends to produce. Even if the naming
+      bug hadn't existed, this fallback would have started an
+      untracked container the rest of the platform (usage counters,
+      concurrency limits, stop/cleanup, F1c's db pairing) has no
+      knowledge of.
+    - **Fix:** `TerminalController::execute()` now looks up the
+      project's currently open `SandboxRun`
+      (`whereNull('stopped_at')->latest('id')->first()`) and uses its
+      `docker_name` accessor — the same pattern every other call site
+      already uses post-F0b. If no open run exists, or `docker ps`
+      shows the resolved container isn't actually alive, it returns a
+      clear 409 with an actionable message ("click RUN" / "click
+      RESTART") instead of guessing or silently exec'ing into nothing.
+      The old `startContainer()` auto-heal method (both the live
+      version and the larger dead, commented-out first draft above it)
+      was deleted outright — starting a sandbox stays the sole
+      responsibility of `runProject()`, so there's only ever one place
+      that logic can drift from.
+    - **Not yet done:** a real smoke test against a live Docker host
+      (no Docker in this sandbox to run one) — before shipping, start a
+      project, open the Terminal panel, confirm a command actually
+      reaches the running container, then stop the sandbox and confirm
+      the panel now returns the "click RUN" message instead of a raw
+      Docker error.
 
 - 2026-08-11 — F1c (opt-in real DB in the sandbox) complete, built on
   top of F1b's revert (see that entry immediately below — read it
