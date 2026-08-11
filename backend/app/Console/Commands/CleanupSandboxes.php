@@ -108,6 +108,11 @@ class CleanupSandboxes extends Command
             // charged against the user's counter, still visible here on
             // the next cron pass) rather than silently losing track of it.
             Process::run("docker rm -f {$containerName} 2>/dev/null || true");
+            // F1c (PLAN_SYSTEM_TASKS.md Phase F): same no-op-if-absent
+            // companion removal every other cleanup site has — this cron
+            // doesn't know (or need to know) whether this particular run
+            // ever had a db container.
+            Process::run("docker rm -f {$containerName}-db 2>/dev/null || true");
 
             $stillThere = Process::run("docker ps -a --filter name=^/{$containerName}\$ --format '{{.Names}}'");
             if (trim($stillThere->output()) !== '') {

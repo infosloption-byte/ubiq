@@ -20,6 +20,17 @@ use Illuminate\Support\Facades\Cache;
 
 class ProjectController extends Controller
 {
+    // F1c (PLAN_SYSTEM_TASKS.md Phase F): fixed dev credentials for the
+    // opt-in `db` sandbox container. Fine as fixed/shared values — this
+    // container is never published to a host port, only reachable from
+    // the app container over the internal `ubiq_sandbox` network, same
+    // trust boundary as all the other container-to-container traffic on
+    // that network already.
+    private const DB_DEV_USER = 'ubiq';
+    private const DB_DEV_PASSWORD = 'ubiq_dev_pw';
+    private const DB_DEV_DATABASE = 'app';
+    private const DB_DEV_ROOT_PASSWORD = 'ubiq_dev_root_pw';
+
     public function __construct(private PlanGuard $planGuard, private PlanService $planService)
     {
     }
@@ -515,6 +526,11 @@ class ProjectController extends Controller
         // -f so this can never hang behind a graceful-stop timeout and
         // leave the port held — same reasoning as in runProject().
         Process::run("docker rm -f {$containerName} 2>/dev/null || true");
+        // F1c: harmless no-op for the vast majority of projects
+        // (db_engine null, this container was never created) — cheap
+        // insurance for the ones that do have one, rather than adding a
+        // separate db_engine lookup + conditional at every cleanup site.
+        Process::run("docker rm -f {$containerName}-db 2>/dev/null || true");
 
         // FIX #13: verify before declaring victory, same as everywhere
         // else that removes a container (reapStaleSandboxes,
@@ -1004,6 +1020,8 @@ class ProjectController extends Controller
             ->get();
         foreach ($openRuns as $openRun) {
             Process::run("docker rm -f {$openRun->docker_name} 2>/dev/null || true");
+            // F1c: same no-op-if-absent cleanup as every other removal site.
+            Process::run("docker rm -f {$openRun->docker_name}-db 2>/dev/null || true");
         }
         Process::run("docker rm -f ubiq_project_{$project->id} 2>/dev/null || true");
 
@@ -1021,6 +1039,16 @@ class ProjectController extends Controller
 
         $project->delete();
         FileSystem::deleteDirectory($this->getProjectPath($project));
+
+        // F1c: the project itself is gone, so its db-data bind mount has
+        // no future run left to survive for — this is the one place
+        // that data actually gets deleted (every stop/restart in between
+        // deliberately leaves it alone, see dbDataPaths()'s docblock).
+        // Safe even if db_engine was never set: the directory just won't
+        // exist and deleteDirectory() on a missing path is a no-op.
+        [$dbDataPath] = $this->dbDataPaths($project);
+        FileSystem::deleteDirectory($dbDataPath);
+
         return response()->json(['message' => 'Deleted']); 
     }
 
@@ -1036,6 +1064,37 @@ class ProjectController extends Controller
         if ($project->user_id !== $request->user()->id) abort(403);
         $project->update(['is_archived'=>false]); 
         return response()->json(['message'=>'Restored']); 
+    }
+
+    /**
+     * F1c (PLAN_SYSTEM_TASKS.md Phase F): opt in/out of a real `db`
+     * container for this project's sandbox. `null` (the default) keeps
+     * the existing SQLite-forced behavior with zero side effects — no
+     * `db` container, no bind-mounted data directory ever created.
+     * Switching FROM mysql/postgres TO null (or a different engine)
+     * does not delete the old engine's data directory on disk; only
+     * `destroy()` (deleting the whole project) does that. A stale data
+     * directory left behind by a since-abandoned engine choice is
+     * harmless — nothing references it once db_engine no longer points
+     * at it, and re-enabling the same engine later would happily pick
+     * the old data back up.
+     */
+    public function setDbEngine(Request $request, Project $project)
+    {
+        if ($project->user_id !== $request->user()->id) abort(403);
+
+        $validated = $request->validate([
+            'db_engine' => 'nullable|in:mysql,postgres',
+        ]);
+
+        $project->update(['db_engine' => $validated['db_engine'] ?? null]);
+
+        return response()->json([
+            'message' => $validated['db_engine']
+                ? "Database set to {$validated['db_engine']} — takes effect next time you run this project."
+                : 'Database reverted to SQLite — takes effect next time you run this project.',
+            'db_engine' => $project->db_engine,
+        ]);
     }
 
     public function download(Request $request, Project $project) 
@@ -1222,6 +1281,8 @@ class ProjectController extends Controller
             // force-remove any remnant and free the port/plan-slot it held.
             Log::warning("[Sandbox] Reaping stale run for project {$run->project_id} (container not running).");
             Process::run("docker rm -f {$containerName} 2>/dev/null || true");
+            // F1c: same no-op-if-absent cleanup as every other removal site.
+            Process::run("docker rm -f {$containerName}-db 2>/dev/null || true");
 
             // FIX #13: verify the removal actually worked before declaring
             // this row closed. Previously this update() ran unconditionally
@@ -1303,6 +1364,8 @@ class ProjectController extends Controller
         // -f so this can never hang behind a graceful-stop timeout —
         // same reasoning as stopProject()/reapStaleSandboxes().
         Process::run("docker rm -f {$containerName} 2>/dev/null || true");
+        // F1c: same no-op-if-absent cleanup as every other removal site.
+        Process::run("docker rm -f {$containerName}-db 2>/dev/null || true");
 
         $stillThere = Process::run("docker ps -a --filter name=^/{$containerName}\$ --format '{{.Names}}'");
         if (trim($stillThere->output()) !== '') {
@@ -1404,6 +1467,14 @@ class ProjectController extends Controller
         $config = $this->getRuntimeConfig($workspacePath);
         $runtime = $config['runtime'];
         $framework = $config['framework'];
+
+        // F1c (PLAN_SYSTEM_TASKS.md Phase F): thread the project's
+        // opt-in db choice into $config so generateStartupScript's
+        // Laravel branch can wire real DB env vars instead of forcing
+        // SQLite. Null for every project that hasn't explicitly opted
+        // in via PATCH /projects/{project}/db-engine — zero behavior
+        // change for the default case.
+        $config['db_engine'] = $project->db_engine;
  
         // --- 2. GENERATE SCRIPT ---
         // Pass $workspacePath so generateStartupScript can write bootstrap/app.php
@@ -1515,6 +1586,16 @@ class ProjectController extends Controller
         // the same project.
         $containerName = $sandboxRun->docker_name;
 
+        // F1c (PLAN_SYSTEM_TASKS.md Phase F): opt-in `db` container,
+        // started before the app container so its own connection-retry
+        // loop (laravelRealDbCommands) has a head start — though that
+        // loop tolerates the db container not being ready yet regardless,
+        // so this ordering isn't load-bearing. No-op entirely for the
+        // vast majority of projects (db_engine null).
+        if ($project->db_engine) {
+            $this->startDbContainer($project, $containerName);
+        }
+
         // Angular CLI + esbuild needs ~700-900MB RAM during build.
         // Node containers get 1GB; PHP/Python stay at 512MB.
         // Tier-aware sizing from plan_features (was hardcoded before —
@@ -1587,6 +1668,12 @@ class ProjectController extends Controller
             Log::error("[Sandbox] Docker run failed for project {$project->id}: " . $result->errorOutput());
             $sandboxRun->update(['stopped_at' => now()]);
             Process::run("docker rm -f {$containerName} 2>/dev/null || true");
+            // F1c: tear down the db container too if this run had one —
+            // the app never came up, so there's nothing left using it.
+            // Data on the bind mount survives regardless (see
+            // dbDataPaths()'s docblock) — a future run of this project
+            // picks the same data back up.
+            Process::run("docker rm -f {$containerName}-db 2>/dev/null || true");
             $this->planGuard->release($request->user(), 'active_sandboxes');
             return response()->json(['error' => 'Docker failed to start the sandbox.', 'details' => $result->errorOutput()], 500);
         }
@@ -1620,6 +1707,10 @@ class ProjectController extends Controller
                 // the shared per-project one — the run-scoped container
                 // is what actually exists (or was about to) at this point.
                 Process::run("docker rm -f {$sandboxRun->docker_name} 2>/dev/null || true");
+                // F1c: same no-op-if-absent cleanup as every other
+                // removal site — this exception could hit before or
+                // after startDbContainer() ran, so always attempt it.
+                Process::run("docker rm -f {$sandboxRun->docker_name}-db 2>/dev/null || true");
             }
 
             $this->planGuard->release($user, 'active_sandboxes');
@@ -1910,28 +2001,200 @@ class ProjectController extends Controller
      * export/portability purposes even though the live sandbox won't run
      * multi-container via compose — see the re-scoped F1c note.
      */
+    /**
+     * F1c (PLAN_SYSTEM_TASKS.md Phase F, re-scoped 2026-08-11 — see that
+     * decision-log entry for the full story of why this is a second
+     * `docker run`, not `docker compose`): image/port/env for the
+     * project's opt-in `db` container. One source of truth, read by both
+     * startDbContainer() (live sandbox) and the Laravel startup-script
+     * generator (defaultStartCommands/laravelRealDbCommands), so the
+     * two can't drift into disagreeing about the port or credentials.
+     */
+    private function dbEngineSpec(string $engine): array
+    {
+        return match ($engine) {
+            'mysql' => [
+                'image' => 'mysql:8.0',
+                'port'  => 3306,
+                'env'   => [
+                    'MYSQL_ROOT_PASSWORD=' . self::DB_DEV_ROOT_PASSWORD,
+                    'MYSQL_DATABASE=' . self::DB_DEV_DATABASE,
+                    'MYSQL_USER=' . self::DB_DEV_USER,
+                    'MYSQL_PASSWORD=' . self::DB_DEV_PASSWORD,
+                ],
+                'data_path_in_container' => '/var/lib/mysql',
+            ],
+            'postgres' => [
+                'image' => 'postgres:16-alpine',
+                'port'  => 5432,
+                'env'   => [
+                    'POSTGRES_DB=' . self::DB_DEV_DATABASE,
+                    'POSTGRES_USER=' . self::DB_DEV_USER,
+                    'POSTGRES_PASSWORD=' . self::DB_DEV_PASSWORD,
+                ],
+                'data_path_in_container' => '/var/lib/postgresql/data',
+            ],
+            default => throw new \InvalidArgumentException("Unsupported db_engine: {$engine}"),
+        };
+    }
+
+    /**
+     * F1c: the project-scoped (not run-scoped) host directory a `db`
+     * container's data lives in. Deliberately a bind mount, not a named
+     * Docker volume — `docker volume create` almost certainly hits the
+     * same VOLUMES:0-blocks-GET wall on the socket-proxy that killed the
+     * F1b compose attempt (see that entry); a bind mount is the exact
+     * same "just a directory the daemon can see" mechanism the app
+     * container's own source-code mount already relies on, so it's
+     * already proven to work through this proxy. Scoped to the PROJECT,
+     * not the run, so it survives stop/start across many runs — mirrors
+     * how the app's own workspace directory already persists the same
+     * way. Returns [php-visible path, docker-daemon-host path] — same
+     * dual-path pattern runProject() already uses for the app's own
+     * workspace mount ($workspacePath vs $hostMountPath).
+     */
+    private function dbDataPaths(Project $project): array
+    {
+        $baseHostPath = env('HOST_WORKSPACE_PATH', '/home/ubuntu/ubiq/backend/storage/app/workspaces');
+        $suffix = "{$project->user_id}/{$project->id}-dbdata";
+
+        return [
+            storage_path("app/workspaces/{$suffix}"), // PHP-visible, for @mkdir
+            "{$baseHostPath}/{$suffix}",               // host path, for the -v flag
+        ];
+    }
+
+    /**
+     * F1c: starts (or restarts) this run's `db` container. Called right
+     * before the app container's own `docker run`, so the app's
+     * connection-retry loop (laravelRealDbCommands) has as much of a
+     * head start as possible — though it tolerates the db container not
+     * being ready yet regardless, so ordering here isn't load-bearing.
+     *
+     * Network alias `db` (not this container's own per-run-unique name)
+     * is what the app's startup script actually connects to — keeps
+     * that generated shell script fully static text, no interpolation
+     * needed, and matches the `db:` service name the exported
+     * docker-compose.yml (F1b's export half) already uses, so
+     * "DB_HOST=db" means the same thing in both places.
+     *
+     * Non-fatal on failure by design: a broken `db` container shouldn't
+     * block the whole sandbox from starting when there's a real chance
+     * the app doesn't hit the database on first boot. Logged, not
+     * silently swallowed.
+     */
+    private function startDbContainer(Project $project, string $appContainerName): void
+    {
+        $spec = $this->dbEngineSpec($project->db_engine);
+        $dbContainerName = "{$appContainerName}-db";
+
+        [$phpDataDir, $hostDataDir] = $this->dbDataPaths($project);
+        if (!is_dir($phpDataDir)) {
+            @mkdir($phpDataDir, 0777, true);
+        }
+        @chmod($phpDataDir, 0777);
+
+        // Stray container from an interrupted previous attempt — same
+        // defense-in-depth reasoning as runProject's CONTAINER PREP step
+        // for the app container. The data survives regardless, since
+        // it's on the bind mount, not inside the container being removed.
+        Process::run("docker rm -f {$dbContainerName} 2>/dev/null || true");
+
+        $envFlags = [];
+        foreach ($spec['env'] as $e) {
+            $envFlags[] = '-e';
+            $envFlags[] = escapeshellarg($e);
+        }
+
+        $cmd = implode(' ', array_merge([
+            'docker run -d',
+            '--name', escapeshellarg($dbContainerName),
+            '--network=ubiq_sandbox',
+            '--network-alias=db',
+            '-v', escapeshellarg($hostDataDir) . ':' . $spec['data_path_in_container'],
+            '--memory=384m',
+            '--memory-swap=384m',
+            '--cpus=0.5',
+            '--cap-drop=ALL',
+            '--security-opt', 'no-new-privileges:true',
+            '--restart=no',
+            '--log-driver=json-file',
+            '--log-opt', 'max-size=5m',
+            '--log-opt', 'max-file=1',
+        ], $envFlags, [$spec['image']]));
+
+        $result = Process::timeout(60)->run($cmd);
+        if (!$result->successful()) {
+            Log::error("[Sandbox] db container failed to start for project {$project->id}: " . $result->errorOutput());
+        }
+    }
+
     private function writeDockerComposeExport(Project $project, string $workspacePath, int $internalPort): void
     {
-        $compose = <<<YAML
-        # Generated by Ubiq — the portable companion to the Dockerfile in
-        # this same project. `docker compose up --build` should work on any
-        # machine with Docker installed, independent of Ubiq's own infra
-        # (this deliberately does not reference Ubiq's private network,
-        # per-tier resource limits, or bind-mounted source — those only
-        # mean something inside Ubiq's own sandbox).
-        #
-        # Editing this file has no effect on how the sandbox runs inside
-        # Ubiq itself, same as the Dockerfile it builds from.
-        services:
-          app:
-            build: .
-            ports:
-              - "{$internalPort}:{$internalPort}"
-            environment:
-              PORT: "{$internalPort}"
-            restart: unless-stopped
+        // F1c: give the export a `db:` service too when the project has
+        // one configured — independent of live execution, which never
+        // uses compose (see F1b's decision-log entry). This half of F1b
+        // never touched the socket-proxy in the first place, so nothing
+        // about the F1b revert applies to it; export and live execution
+        // were already two separate code paths before that happened.
+        // Built as a plain line array rather than heredoc interpolation
+        // of pre-indented blocks — much harder to get YAML indentation
+        // subtly wrong that way.
+        $lines = [
+            '# Generated by Ubiq — the portable companion to the Dockerfile in',
+            '# this same project. `docker compose up --build` should work on any',
+            '# machine with Docker installed, independent of Ubiq\'s own infra',
+            '# (this deliberately does not reference Ubiq\'s private network,',
+            '# per-tier resource limits, or bind-mounted source — those only',
+            '# mean something inside Ubiq\'s own sandbox).',
+            '#',
+            '# Editing this file has no effect on how the sandbox runs inside',
+            '# Ubiq itself, same as the Dockerfile it builds from.',
+            'services:',
+            '  app:',
+            '    build: .',
+            '    ports:',
+            "      - \"{$internalPort}:{$internalPort}\"",
+            '    environment:',
+            "      PORT: \"{$internalPort}\"",
+        ];
 
-        YAML;
+        if ($project->db_engine) {
+            $spec = $this->dbEngineSpec($project->db_engine);
+            $driver = $project->db_engine === 'postgres' ? 'pgsql' : 'mysql';
+
+            $lines[] = "      DB_CONNECTION: \"{$driver}\"";
+            $lines[] = "      DB_HOST: \"db\"";
+            $lines[] = "      DB_PORT: \"{$spec['port']}\"";
+            $lines[] = "      DB_DATABASE: \"" . self::DB_DEV_DATABASE . '"';
+            $lines[] = "      DB_USERNAME: \"" . self::DB_DEV_USER . '"';
+            $lines[] = "      DB_PASSWORD: \"" . self::DB_DEV_PASSWORD . '"';
+            $lines[] = '    depends_on:';
+            $lines[] = '      - db';
+        }
+
+        $lines[] = '    restart: unless-stopped';
+
+        if ($project->db_engine) {
+            $spec = $this->dbEngineSpec($project->db_engine);
+
+            $lines[] = '';
+            $lines[] = '  db:';
+            $lines[] = "    image: {$spec['image']}";
+            $lines[] = '    environment:';
+            foreach ($spec['env'] as $e) {
+                [$key, $value] = explode('=', $e, 2);
+                $lines[] = "      {$key}: \"{$value}\"";
+            }
+            $lines[] = '    volumes:';
+            $lines[] = "      - dbdata:{$spec['data_path_in_container']}";
+            $lines[] = '    restart: unless-stopped';
+            $lines[] = '';
+            $lines[] = 'volumes:';
+            $lines[] = '  dbdata:';
+        }
+
+        $compose = implode("\n", $lines) . "\n";
 
         file_put_contents($workspacePath . '/docker-compose.yml', $compose);
 
@@ -2170,6 +2433,10 @@ PHP;
         $framework = $config['framework'] ?? 'html';
         $pm        = $config['package_manager'] ?? 'npm';
         $port      = $config['port'] ?? ($runtime === 'node' ? 5173 : 8000);
+        // F1c (PLAN_SYSTEM_TASKS.md Phase F): null unless runProject()
+        // explicitly set $config['db_engine'] from the project's own
+        // opt-in choice — see defaultStartCommands' Laravel branch.
+        $dbEngine  = $config['db_engine'] ?? null;
 
         // ── Write critical files to disk NOW (before the container starts) ──
         if ($framework === 'laravel' && $workspacePath !== '') {
@@ -2255,7 +2522,7 @@ PHP;
             $lines[] = "echo '[Ubiq] Starting (from ubiq.json)...'";
             $lines[] = $config['start'];
         } else {
-            $lines = array_merge($lines, $this->defaultStartCommands($runtime, $framework, $pm, $port));
+            $lines = array_merge($lines, $this->defaultStartCommands($runtime, $framework, $pm, $port, $dbEngine));
         }
 
         return implode("\n", array_filter($lines, fn($l) => $l !== '')) . "\n";
@@ -2309,7 +2576,64 @@ PHP;
         };
     }
 
-    private function defaultStartCommands(string $runtime, string $framework, string $pm, int $port): array {
+    /**
+     * F1c (PLAN_SYSTEM_TASKS.md Phase F): the SQLite-forcing lines,
+     * unchanged byte-for-byte from before F1c existed — extracted out
+     * of defaultStartCommands' Laravel branch so it and
+     * laravelRealDbCommands() below are swapped in by the same one-line
+     * conditional instead of duplicating the surrounding session/cache/
+     * migrate/start lines in two near-identical match arms.
+     */
+    private function laravelSqliteCommands(): array
+    {
+        return [
+            // Force SQLite — override whatever the AI put in .env or config
+            "sed -i 's|^DB_CONNECTION=.*|DB_CONNECTION=sqlite|' .env 2>/dev/null || true",
+            "sed -i 's|^DB_DATABASE=.*|DB_DATABASE=/app/database/database.sqlite|' .env 2>/dev/null || true",
+            "grep -q '^DB_CONNECTION' .env || printf '\\nDB_CONNECTION=sqlite\\nDB_DATABASE=/app/database/database.sqlite\\n' >> .env",
+        ];
+    }
+
+    /**
+     * F1c: points Laravel at the real `db` container startDbContainer()
+     * started instead of forcing SQLite. `db` resolves via the network
+     * alias that container was given — same hostname regardless of the
+     * container's own per-run-unique name, so this stays static text,
+     * no interpolation of a container name needed here.
+     *
+     * The wait loop is a plain `php -r` fsockopen retry, not a shell
+     * `nc`/`/dev/tcp` wait: PHP is guaranteed present in every Laravel
+     * image already (this doesn't assume anything about the base image
+     * beyond what `php artisan` itself needs), unlike `nc` (not always
+     * installed on the slim images used here) or `/dev/tcp` (a
+     * bash-only feature — this script's shebang is plain `sh`, which on
+     * Alpine is ash/dash and doesn't have it). Non-fatal: if the db
+     * container never comes up, this logs and moves on rather than
+     * hanging the whole sandbox boot — migrate/serve below will simply
+     * fail their own way if the connection genuinely isn't there.
+     */
+    private function laravelRealDbCommands(string $dbEngine): array
+    {
+        $spec   = $this->dbEngineSpec($dbEngine);
+        $driver = $dbEngine === 'postgres' ? 'pgsql' : 'mysql';
+        $port   = $spec['port'];
+
+        $waitLine = "php -r 'for(\$i=0;\$i<30;\$i++){\$c=@fsockopen(\"db\",{$port},\$e,\$s,1);if(\$c){fclose(\$c);exit(0);}sleep(1);}exit(1);' || echo '[Ubiq] db container not reachable yet, continuing anyway...'";
+
+        return [
+            "echo '[Ubiq] Waiting for db container...'",
+            $waitLine,
+            "sed -i 's|^DB_CONNECTION=.*|DB_CONNECTION={$driver}|' .env 2>/dev/null || true",
+            "sed -i 's|^DB_HOST=.*|DB_HOST=db|' .env 2>/dev/null || true",
+            "sed -i 's|^DB_PORT=.*|DB_PORT={$port}|' .env 2>/dev/null || true",
+            "sed -i 's|^DB_DATABASE=.*|DB_DATABASE=" . self::DB_DEV_DATABASE . "|' .env 2>/dev/null || true",
+            "sed -i 's|^DB_USERNAME=.*|DB_USERNAME=" . self::DB_DEV_USER . "|' .env 2>/dev/null || true",
+            "sed -i 's|^DB_PASSWORD=.*|DB_PASSWORD=" . self::DB_DEV_PASSWORD . "|' .env 2>/dev/null || true",
+            "grep -q '^DB_CONNECTION' .env || printf '\\nDB_CONNECTION={$driver}\\nDB_HOST=db\\nDB_PORT={$port}\\nDB_DATABASE=" . self::DB_DEV_DATABASE . "\\nDB_USERNAME=" . self::DB_DEV_USER . "\\nDB_PASSWORD=" . self::DB_DEV_PASSWORD . "\\n' >> .env",
+        ];
+    }
+
+    private function defaultStartCommands(string $runtime, string $framework, string $pm, int $port, ?string $dbEngine = null): array {
         $runCmd = match($pm) { 'pnpm' => "pnpm", 'bun' => "bun run", 'yarn' => "yarn", default => "npm run" };
         return match(true) {
             $framework === 'nextjs' => [
@@ -2327,38 +2651,45 @@ PHP;
                 "export VITE_CACHE_DIR=/tmp/.vite-cache",
                 "if [ -f vite.config.js ] || [ -f vite.config.ts ]; then npx vite --host 0.0.0.0 --port {$port}; else {$runCmd} dev -- --host 0.0.0.0 --port {$port}; fi",
             ],
-            $framework === 'laravel' => [
-                // .env setup
-                "if [ ! -f .env ]; then",
-                "  if [ -f .env.example ]; then cp .env.example .env; else printf 'APP_KEY=\\nAPP_ENV=local\\nAPP_DEBUG=true\\n' > .env; fi",
-                "fi",
-                // App key
-                "grep -q 'APP_KEY=base64:' .env || php artisan key:generate --force 2>&1 || true",
-                // package:discover (safe now — .env + APP_KEY exist)
-                "php artisan package:discover --ansi 2>/dev/null || echo '[Ubiq] package:discover skipped (non-fatal)'",
-                // Force SQLite — override whatever the AI put in .env or config
-                "sed -i 's|^DB_CONNECTION=.*|DB_CONNECTION=sqlite|' .env 2>/dev/null || true",
-                "sed -i 's|^DB_DATABASE=.*|DB_DATABASE=/app/database/database.sqlite|' .env 2>/dev/null || true",
-                "grep -q '^DB_CONNECTION' .env || printf '\\nDB_CONNECTION=sqlite\\nDB_DATABASE=/app/database/database.sqlite\\n' >> .env",
-                // FIX: Force file-based session + cache so we never need a sessions table.
-                // AI often generates config/session.php with SESSION_DRIVER=database which
-                // requires migrations. File driver works with zero DB setup.
-                "sed -i 's|^SESSION_DRIVER=.*|SESSION_DRIVER=file|' .env 2>/dev/null || true",
-                "grep -q '^SESSION_DRIVER' .env || printf '\\nSESSION_DRIVER=file\\n' >> .env",
-                "sed -i 's|^CACHE_STORE=.*|CACHE_STORE=file|' .env 2>/dev/null || true",
-                "sed -i 's|^CACHE_DRIVER=.*|CACHE_DRIVER=file|' .env 2>/dev/null || true",
-                "grep -q '^CACHE_STORE' .env || printf '\\nCACHE_STORE=file\\n' >> .env",
-                // Re-chmod sqlite in case something changed it
-                "chmod 666 /app/database/database.sqlite 2>/dev/null || true",
-                // Clear config cache so .env overrides take effect
-                "php artisan config:clear 2>&1 || true",
-                // Migrations — non-fatal
-                "echo '[Ubiq] Running migrations...'",
-                "php artisan migrate --force 2>&1 || echo '[Ubiq] Migrations failed (non-fatal), continuing...'",
-                // Start
-                "echo '[Ubiq] Starting Laravel server on port {$port}...'",
-                "php artisan serve --host=0.0.0.0 --port={$port}",
-            ],
+            $framework === 'laravel' => array_merge(
+                [
+                    // .env setup
+                    "if [ ! -f .env ]; then",
+                    "  if [ -f .env.example ]; then cp .env.example .env; else printf 'APP_KEY=\\nAPP_ENV=local\\nAPP_DEBUG=true\\n' > .env; fi",
+                    "fi",
+                    // App key
+                    "grep -q 'APP_KEY=base64:' .env || php artisan key:generate --force 2>&1 || true",
+                    // package:discover (safe now — .env + APP_KEY exist)
+                    "php artisan package:discover --ansi 2>/dev/null || echo '[Ubiq] package:discover skipped (non-fatal)'",
+                ],
+                // F1c (PLAN_SYSTEM_TASKS.md Phase F): the one branch
+                // point in this whole block. Every project that hasn't
+                // explicitly opted in via PATCH .../db-engine gets
+                // exactly the same SQLite-forcing lines that ran before
+                // F1c existed — zero behavior change for the default case.
+                $dbEngine ? $this->laravelRealDbCommands($dbEngine) : $this->laravelSqliteCommands(),
+                [
+                    // FIX: Force file-based session + cache so we never need a sessions table.
+                    // AI often generates config/session.php with SESSION_DRIVER=database which
+                    // requires migrations. File driver works with zero DB setup, real or SQLite.
+                    "sed -i 's|^SESSION_DRIVER=.*|SESSION_DRIVER=file|' .env 2>/dev/null || true",
+                    "grep -q '^SESSION_DRIVER' .env || printf '\\nSESSION_DRIVER=file\\n' >> .env",
+                    "sed -i 's|^CACHE_STORE=.*|CACHE_STORE=file|' .env 2>/dev/null || true",
+                    "sed -i 's|^CACHE_DRIVER=.*|CACHE_DRIVER=file|' .env 2>/dev/null || true",
+                    "grep -q '^CACHE_STORE' .env || printf '\\nCACHE_STORE=file\\n' >> .env",
+                    // Re-chmod sqlite in case something changed it — harmless
+                    // no-op when db_engine is set and this file is unused.
+                    "chmod 666 /app/database/database.sqlite 2>/dev/null || true",
+                    // Clear config cache so .env overrides take effect
+                    "php artisan config:clear 2>&1 || true",
+                    // Migrations — non-fatal
+                    "echo '[Ubiq] Running migrations...'",
+                    "php artisan migrate --force 2>&1 || echo '[Ubiq] Migrations failed (non-fatal), continuing...'",
+                    // Start
+                    "echo '[Ubiq] Starting Laravel server on port {$port}...'",
+                    "php artisan serve --host=0.0.0.0 --port={$port}",
+                ]
+            ),
             $framework === 'fastapi' => [
                 "uvicorn main:app --host 0.0.0.0 --port {$port} --reload 2>/dev/null || python main.py",
             ],

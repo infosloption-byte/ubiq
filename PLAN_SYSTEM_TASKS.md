@@ -6,10 +6,10 @@ scope from what was originally planned.
 
 Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 
-**Status as of 2026-08-09: Phases A–E complete. Phase F (Enhancement
+**Status as of 2026-08-11: Phases A–E complete. Phase F (Enhancement
 Roadmap) in progress — F0 (P0 sandbox slot leak) done, F3 (GitHub
 OAuth) done except F3e stretch, G1 (usage dashboard) done except G1d
-stretch, F1 next.**
+stretch, F1a/F1c done, F1b reverted (see notes), F1d next.**
 Phase F tracks `UBIQ_ENHANCEMENT_ROADMAP.md` — prioritized and broken
 into implementable tasks below. Work it top-to-bottom; the order
 already reflects priority (retention-critical → differentiation →
@@ -233,7 +233,7 @@ team plan that doesn't exist yet).
         shipped via download) kept — that part never touched the
         socket-proxy and is still useful on its own. — 2026-08-11,
         see notes for the full story
-  - [ ] F1c — DB service in the sandbox, re-scoped: NOT via
+  - [x] F1c — DB service in the sandbox, re-scoped: NOT via
         `docker compose` (see F1b above — the socket-proxy makes
         compose-as-execution-engine a real security trade-off for no
         current benefit). Instead: a second `docker run
@@ -252,6 +252,9 @@ team plan that doesn't exist yet).
         gain a `db:` service for portability even though live execution
         stays on two `docker run` calls — export and live execution are
         already two different code paths, so this isn't a new split.
+        — 2026-08-11, see notes. Scoped to Laravel only + opt-in via
+        new `db_engine` project column, both deliberate narrowings not
+        in the original wording — see notes for why.
   - [ ] F1d — Ephemeral preview links: signed token derived from a
         running `SandboxRun` row, resolving
         `preview-{token}.ubiq-editor.space` proxied to that run's
@@ -328,6 +331,112 @@ team plan that doesn't exist yet).
 
 (Add dated entries here when a design decision changes mid-build — e.g. a
 feature_key gets renamed, a limit default changes, a phase gets reordered.)
+
+- 2026-08-11 — F1c (opt-in real DB in the sandbox) complete, built on
+  top of F1b's revert (see that entry immediately below — read it
+  first, this one assumes it). Delivered exactly the re-scoped design
+  from F1c's own checklist entry above: a second `docker run
+  --network=ubiq_sandbox --network-alias=db ...`, no compose, no
+  Networks/Volumes API calls anywhere.
+    - **New `db_engine` column on `projects`** (migration
+      `2026_08_11_000001`), nullable, default null on every row.
+      `PATCH /projects/{project}/db-engine` (owner-only, validates
+      `nullable|in:mysql,postgres`) is the only way to set it — not
+      folded into the generic project-update route, since flipping this
+      does something far more consequential (a second container plus a
+      persistent bind-mounted directory on disk) than an ordinary field
+      edit.
+    - **Two deliberate narrowings from the roadmap/checklist wording,
+      both worth flagging:**
+        1. **Opt-in, not automatic.** The checklist entry describes
+           "DB service in the sandbox" without saying explicitly opt-in
+           vs. on-by-default for whichever frameworks need one. Went
+           with strictly opt-in (`db_engine` null by default) rather
+           than auto-detecting "this Laravel project probably wants a
+           real DB" and switching existing projects over automatically
+           — an automatic switch changes what already-working projects
+           connect to, untestable in this sandbox (no live Docker/PHP
+           here), for behavior that used to work fine on SQLite. Opt-in
+           means zero blast radius: nothing about any existing
+           project's sandbox changes unless someone explicitly calls
+           the new endpoint.
+        2. **Laravel only.** The only framework wired to actually *use*
+           `db_engine` (`laravelRealDbCommands()` in
+           `defaultStartCommands`) is Laravel — the one framework with
+           an active hardcoded SQLite override
+           (`laravelSqliteCommands()`, extracted unchanged from what
+           was already there) to swap out. Django's startup block
+           already just runs `migrate --run-syncdb` against whatever
+           `settings.py` says (normally SQLite by Django's own
+           convention) with no Ubiq-side override to fight — wiring
+           `db_engine` into it would mean *editing the AI-generated
+           settings.py* to point at `db`, a materially different (and
+           riskier) change than Laravel's "flip env vars Laravel
+           already reads" case. Left for a follow-up if real demand
+           shows up; `db_engine` on the project itself is
+           framework-agnostic already, so extending to Django later is
+           additive, not a redesign.
+    - **`dbEngineSpec()`**: one source of truth for image
+      (`mysql:8.0` / `postgres:16-alpine`), port, env, and the
+      in-container data path — read by both `startDbContainer()` (live
+      sandbox) and `laravelRealDbCommands()`/`writeDockerComposeExport()`
+      (startup script and export respectively), so none of the three
+      can drift into disagreeing about the port or credentials.
+    - **Storage**: `dbDataPaths()` returns a bind-mount host directory
+      scoped to the *project* (`{id}-dbdata`, sibling to the project's
+      own workspace dir), not the run — same reasoning F1c's checklist
+      entry called out: a named Docker volume would need
+      `docker volume create`, which almost certainly hits the same
+      `VOLUMES:0`-blocks-GET wall that killed F1b's compose attempt. A
+      bind mount is the same "just a directory the daemon can see"
+      mechanism the app container's own source mount already uses
+      successfully through this proxy. Every run gets a fresh `db`
+      *container*; the data underneath survives stop/start exactly like
+      the app's own workspace already does. `destroy()` (deleting the
+      whole project) is the one place that data actually gets deleted —
+      every ordinary stop/restart in between leaves it alone on purpose.
+    - **Connectivity**: `startDbContainer()` gives the container
+      `--network-alias=db` (not its own per-run-unique name) on the
+      shared `ubiq_sandbox` network — Docker's embedded DNS resolves
+      that alias to whichever container currently holds it, so the
+      generated startup script can hardcode `DB_HOST=db` as static
+      text, no interpolation of a container name needed. The same
+      alias is why `DB_HOST: "db"` in the exported compose's `app`
+      service environment means the same thing there too.
+    - **Readiness**: no `docker exec`-based healthcheck (blocked by the
+      proxy's `EXEC:0`, same constraint `getBuildLog()`'s own docblock
+      already documents) and no shell `nc`/`/dev/tcp` wait (`nc` isn't
+      guaranteed installed on these slim images; `/dev/tcp` is a
+      bash-only feature and this script's shebang is plain `sh`, ash/
+      dash on Alpine). Used a `php -r` fsockopen retry loop instead —
+      PHP is guaranteed present in any Laravel image already, so this
+      adds no new assumption about the base image. Non-fatal: 30 one-
+      second retries, then continues regardless, logging rather than
+      hanging the whole sandbox boot if the db container is somehow
+      never reachable.
+    - **Cleanup**: every existing container-removal site
+      (`stopProject`, `reapStaleSandboxes`, `closeOpenRunForProject`,
+      both `runProject` failure/exception branches, `destroy`,
+      `CleanupSandboxes`) got one extra `docker rm -f {name}-db
+      2>/dev/null || true` alongside its existing app-container removal
+      — a harmless no-op for the vast majority of projects that never
+      had a db container, cheap insurance for the ones that did, rather
+      than adding a `db_engine` lookup + conditional at every site.
+    - **Export** (`writeDockerComposeExport`): rewrote from heredoc
+      interpolation of pre-indented blocks to a plain line array after
+      catching a real indentation bug in my own first draft this way
+      (over-indented `environment:`/`depends_on:` blocks that would
+      have produced invalid YAML) — verified the corrected version
+      round-trips through `pyyaml` correctly for both the with-db and
+      without-db cases before considering this done.
+    - Same caveat as everything else in this log: no live Docker/PHP in
+      this sandbox to actually run a `db_engine=mysql` project end to
+      end. Checked by hand (brace/paren balance, the export YAML
+      parsed, the shell-escaping in the `php -r` wait line traced
+      character-by-character) but genuinely needs a real smoke test — a
+      Laravel project with `db_engine` set, confirm migrations actually
+      land in MySQL/Postgres and not silently fall through to SQLite —
+      before this ships to users.
 
 - 2026-08-11 — F1b (multi-service `docker-compose` sandboxes) attempted
   and reverted. Full story below because the reasoning matters more than

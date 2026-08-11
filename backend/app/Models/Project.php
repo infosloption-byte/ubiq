@@ -20,7 +20,8 @@ class Project extends Model
         'repository_url',
         'branch',
         'github_token',
-        'storage_path'
+        'storage_path',
+        'db_engine', // F1c — null | 'mysql' | 'postgres', opt-in real DB in the sandbox
     ];
 
     protected $casts = [

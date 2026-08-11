@@ -135,6 +135,14 @@ Route::prefix('v1')->group(function () {
             Route::apiResource('projects', ProjectController::class);
             Route::post('/projects/{project}/archive', [ProjectController::class, 'archive']);
             Route::post('/projects/{project}/restore', [ProjectController::class, 'restore']);
+            // F1c (PLAN_SYSTEM_TASKS.md Phase F): opt-in real DB for the
+            // sandbox. Separate from the apiResource's PUT/PATCH
+            // project-update route on purpose — this triggers a
+            // different, more consequential effect (a second container +
+            // a persistent bind-mounted data dir on disk) than an
+            // ordinary field edit, so it gets its own explicit endpoint
+            // rather than being silently settable via a generic update.
+            Route::patch('/projects/{project}/db-engine', [ProjectController::class, 'setDbEngine']);
             Route::apiResource('projects.files', FileController::class)->shallow();
             Route::delete('projects/{project}/files/path',   [FileController::class, 'destroyPath']);
             Route::post('projects/import',                   [ProjectController::class, 'import']);
