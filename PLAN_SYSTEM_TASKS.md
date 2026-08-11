@@ -356,6 +356,28 @@ feature_key gets renamed, a limit default changes, a phase gets reordered.)
       F1a already generates, no bind mount. This mirrors the split F1a
       already established between the live sandbox and the exported
       Dockerfile — same reasoning, applied to compose.
+    - **Correction, found during real deploy testing on the EC2 box
+      (2026-08-11, later same day):** the runtime compose file
+      originally used `networks: { default: { external: true, name:
+      ubiq_sandbox } }`. A manual `docker network inspect ubiq_sandbox`
+      through the socket-proxy came back `403 Forbidden` — turns out
+      `NETWORKS: 0` on the proxy blocks `GET` on `/networks/*` too, not
+      only `POST`. Compose does exactly that `GET` to resolve an
+      `external: true` network before attaching a container to it, so
+      `docker compose up` would have hit the same 403 the manual
+      inspect did — the original "external:true avoids the create
+      call" reasoning was right about the create call and wrong about
+      compose never needing to look the network up at all. Switched to
+      `network_mode: ubiq_sandbox` at the service level instead — a
+      raw `HostConfig.NetworkMode` pass-through on the container-create
+      call itself, the same mechanism the old `docker run
+      --network=ubiq_sandbox` flag already used successfully through
+      this proxy. No `/networks/*` call, GET or POST, happens for it at
+      all. **Flag for F1c:** the same `VOLUMES: 0` restriction almost
+      certainly blocks `GET` on `/volumes/*` too, by the same pattern —
+      worth assuming a named Docker volume won't work at all (not just
+      "won't auto-create") and planning the bind-mount approach from
+      the start rather than discovering this the same way.
     - Runtime compose file is regenerated fresh every run and deleted
       once its container's removal is confirmed (`cleanupRuntimeCompose()`,
       called from `stopProject`, `reapStaleSandboxes`, and
