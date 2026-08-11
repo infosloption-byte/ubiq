@@ -145,6 +145,13 @@ services:
       - frontend
     networks:
       - ubiq-net
+      # F1d: same pattern F0d already established for ubiq_api — nginx
+      # needs to reach each sandbox container directly by name to proxy
+      # preview-{token}.ubiq-editor.space to it (see nginx.conf's
+      # `preview-` server block). This is what lets the app container
+      # stop publishing a host port at all: nginx is now the only thing
+      # that talks to it, over this network, never via a host:port.
+      - ubiq_sandbox
 
 volumes:
   db_data:

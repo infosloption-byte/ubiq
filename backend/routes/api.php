@@ -17,6 +17,7 @@ use App\Http\Controllers\API\V1\TerminalController;
 use App\Http\Controllers\API\V1\PayPalController;
 use App\Http\Controllers\API\V1\AiKeyController; // D8 fix — PLAN_SYSTEM_TASKS.md Phase D
 use App\Http\Controllers\API\V1\GithubOAuthController; // F3 — PLAN_SYSTEM_TASKS.md Phase F
+use App\Http\Controllers\API\V1\PreviewResolveController; // F1d — PLAN_SYSTEM_TASKS.md Phase F
 use App\Http\Controllers\OllamaProxyController;
 
 // ── Unauthenticated fallback ───────────────────────────────────────────────
@@ -74,6 +75,14 @@ Route::prefix('v1')->group(function () {
     Route::get('/projects/{project}/preview/{path}', [FileController::class, 'previewSigned'])
         ->where('path', '.*')
         ->name('projects.preview.signed');
+
+    // F1d — internal only, never called by a browser directly. nginx's
+    // preview server block auth_requests this for every request to
+    // preview-{token}.ubiq-editor.space; see PreviewResolveController's
+    // docblock and nginx.conf for the full mechanism. Public route (no
+    // auth:sanctum) because the token itself — not a bearer session —
+    // is the credential here, same reasoning as previewSigned() above.
+    Route::get('/internal/preview-resolve', [PreviewResolveController::class, 'resolve']);
 
     // ── Authenticated ─────────────────────────────────────────────────────
     Route::middleware(['auth:sanctum', 'throttle:120,1'])->group(function () {

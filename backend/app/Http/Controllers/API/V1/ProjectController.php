@@ -1170,11 +1170,11 @@ class ProjectController extends Controller
      * @throws \RuntimeException if the entire range is occupied
      * @return array{0:int,1:SandboxRun} [$port, $reservationRow]
      */
-    private function claimPortAndReserve(Project $project, $user, string $runtime, string $framework, int $start = 8100, int $end = 8899): array
+    private function claimPortAndReserve(Project $project, $user, string $runtime, string $framework, int $internalPort, int $start = 8100, int $end = 8899): array
     {
         $lock = Cache::lock('sandbox-port-allocation', 10);
 
-        return $lock->block(5, function () use ($project, $user, $runtime, $framework, $start, $end) {
+        return $lock->block(5, function () use ($project, $user, $runtime, $framework, $internalPort, $start, $end) {
             $used = SandboxRun::whereNull('stopped_at')->pluck('port')->all();
 
             for ($port = $start; $port <= $end; $port++) {
@@ -1222,6 +1222,16 @@ class ProjectController extends Controller
                     'started_at'   => now(),
                     'heartbeat_at' => now(),
                     'port'         => $port,
+                    // F1d: the port the app actually listens on INSIDE
+                    // the container — same value selectDockerImage()
+                    // handed the caller before this method ran. `port`
+                    // above stays purely a locking/uniqueness token now
+                    // that it's never published to the host (see
+                    // runProject's docker-run command); this is what
+                    // nginx's preview proxy and getBuildLog's readiness
+                    // probe actually connect to, over ubiq_sandbox by
+                    // container name.
+                    'internal_port' => $internalPort,
                     'runtime'      => $runtime,
                     'framework'    => $framework,
                     // F0d: per-run secret for the container's own exec
@@ -1579,7 +1589,7 @@ class ProjectController extends Controller
 
         // --- 5. CLAIM PORT (atomic — see claimPortAndReserve docblock) ---
         try {
-            [$port, $sandboxRun] = $this->claimPortAndReserve($project, $user, $runtime, $framework);
+            [$port, $sandboxRun] = $this->claimPortAndReserve($project, $user, $runtime, $framework, $internalPort);
         } catch (\RuntimeException $e) {
             $this->planGuard->release($request->user(), 'active_sandboxes');
             return response()->json(['error' => 'No free ports available. Try again later.'], 503);
@@ -1641,10 +1651,23 @@ class ProjectController extends Controller
         // Not worth trading away for a capability (F1c's db service)
         // nothing needs yet. Back to plain `docker run`, unchanged from
         // before this file's F1b attempt.
+        // F1d: no more `-p {$port}:{$internalPort}` here. The app
+        // container used to publish itself directly to the host so the
+        // frontend could hit http://{serverIp}:{$port} — that's exactly
+        // the exposure this effort removes (see UBIQ_ENHANCEMENT_ROADMAP.md
+        // / PLAN_SYSTEM_TASKS.md "F1d — Ephemeral preview links" and the
+        // decision-log entry it's built on). The container is now reached
+        // exclusively over ubiq_sandbox by name — nginx's preview server
+        // block does that for real visitors (see nginx.conf), and
+        // getBuildLog()'s readiness probe does the same for its own
+        // internal check (see that method). $port (still claimed above)
+        // is now purely an internal locking/uniqueness token — nothing
+        // Docker-facing reads it anymore. Once this has been verified
+        // live end-to-end, the 8100-8899 range can come out of the EC2
+        // security group entirely; it was only ever open for this flag.
         $cmd = implode(' ', [
             'docker run -d',
             '--name',   escapeshellarg($containerName),
-            '-p',       "{$port}:{$internalPort}",
             '-e',       "PORT={$internalPort}",
             // F0d: shared secret for this run's own in-container exec
             // listener — see generateStartupScript()'s listener snippet
@@ -1692,12 +1715,24 @@ class ProjectController extends Controller
             return response()->json(['error' => 'Docker failed to start the sandbox.', 'details' => $result->errorOutput()], 500);
         }
 
-        $serverIp = env('SERVER_PUBLIC_IP', $request->getHost());
+        // F1d: one url field, always the wildcard preview link, always
+        // through the token gate — no parallel "direct" host:port mode
+        // left to keep in sync (that mode is what this whole change
+        // removes). Read-only check() here, not authorize(): viewing
+        // your own running sandbox isn't a metered action with its own
+        // usage counter the way sandbox.start is — authorize() already
+        // gated actually starting this container a few lines up. See
+        // PlanGuard's preview.enable entry for why this is a dedicated
+        // feature key (seeded true for every plan today) rather than a
+        // reuse of sharing.enable.
+        $previewDomain = env('PREVIEW_DOMAIN', 'ubiq-editor.space');
+        $previewUrl = $this->planGuard->check($user, 'preview.enable')
+            ? "https://preview-{$sandboxRun->preview_token}.{$previewDomain}"
+            : null;
 
         return response()->json([
             'message'   => 'Project booting...',
-            'url'       => "http://{$serverIp}:{$port}",
-            'port'      => $port,
+            'url'       => $previewUrl,
             'runtime'   => $runtime,
             'framework' => $framework,
         ]);
@@ -1800,10 +1835,23 @@ class ProjectController extends Controller
         }
 
         // Real readiness — the only signal here immune to misleading log
-        // text. Published on the host by `docker run -p`; reachable from
-        // this container via host.docker.internal.
+        // text. F1d: this used to dial host.docker.internal:$run->port,
+        // relying on the app container publishing itself to the host
+        // (`docker run -p`) — that publish is gone now (see runProject's
+        // docker-run command), so host.docker.internal can no longer
+        // reach it either. Same fix as TerminalController::execute()'s
+        // exec listener already uses: dial the container directly by
+        // name over the internal `ubiq_sandbox` network, which ubiq_api
+        // has been a member of since F0d. $run->internal_port is the
+        // in-container listening port (see that column's migration);
+        // falls back to the pre-F1d host-port check only for a legacy
+        // row that predates internal_port existing, so an in-flight
+        // sandbox mid-deploy doesn't just go permanently "not ready".
         $portReady = false;
-        if ($run->port) {
+        if ($run->internal_port) {
+            $sock = @fsockopen($run->docker_name, $run->internal_port, $errno, $errstr, 0.5);
+            if ($sock) { $portReady = true; fclose($sock); }
+        } elseif ($run->port) {
             $sock = @fsockopen('host.docker.internal', $run->port, $errno, $errstr, 0.5);
             if ($sock) { $portReady = true; fclose($sock); }
         }

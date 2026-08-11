@@ -83,6 +83,26 @@ class PlanGuard
             'type' => 'boolean',
             'feature_key' => 'sharing.enabled',
         ],
+        // F1d: deliberately its OWN feature key, not a reuse of
+        // sharing.enabled. sharing.enabled gates making a project's
+        // *code* publicly discoverable — a real paid-tier feature.
+        // preview.enable gates whether a user can see their OWN
+        // sandbox running at all, which is base functionality every
+        // tier already had for free (the old response returned a raw
+        // http://{ip}:{port} URL to every user, gated by nothing).
+        // Reusing sharing.enabled here would silently take that away
+        // from free/starter as a side effect of this refactor, which
+        // is a product regression, not a security tightening — this
+        // migration's whole point was removing the exposed port range,
+        // not restricting who gets to use their own preview.
+        // Seeded 'true' for every plan (see PlanSeeder) so this is a
+        // no-op gate today; it exists so a real future tier decision
+        // (e.g. "free tier previews are watermarked/rate-limited") has
+        // a chokepoint to land in without another migration.
+        'preview.enable' => [
+            'type' => 'boolean',
+            'feature_key' => 'preview.enabled',
+        ],
         'model.access' => [
             'type' => 'tier_compare',
             'feature_key' => 'ai.max_model_tier',

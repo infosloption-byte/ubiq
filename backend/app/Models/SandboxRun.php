@@ -28,6 +28,7 @@ class SandboxRun extends Model
         'port',
         'container_name',
         'exec_secret',
+        'internal_port',
         'runtime',
         'framework',
     ];
@@ -76,5 +77,31 @@ class SandboxRun extends Model
     public function getDockerNameAttribute(): string
     {
         return $this->container_name ?? "ubiq_project_{$this->project_id}";
+    }
+
+    /**
+     * F1d: the ephemeral preview link's token, signed (not stored) from
+     * this row's own id — "derived from that row" per the roadmap entry,
+     * rather than a random column like exec_secret. Safe to derive
+     * on-the-fly because run ids are never reused (plain autoincrement,
+     * a row is never recreated under an old id), so there's nothing a
+     * stored secret would buy here that the signature doesn't already
+     * guarantee: unforgeable without config('app.key'), and — since
+     * PreviewResolveController looks the row up by this same id and
+     * requires stopped_at IS NULL — automatically stops resolving the
+     * instant the existing reap/stop/heartbeat-timeout logic closes this
+     * run. No separate expiry or revocation list to maintain.
+     *
+     * 'preview:' prefix namespaces this signature so it can never be
+     * confused with a differently-purposed HMAC computed the same way
+     * elsewhere in the app.
+     */
+    public function getPreviewTokenAttribute(): string
+    {
+        return $this->id . '-' . substr(
+            hash_hmac('sha256', 'preview:' . $this->id, config('app.key')),
+            0,
+            32
+        );
     }
 }
