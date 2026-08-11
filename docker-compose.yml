@@ -100,8 +100,20 @@ services:
       - socket-proxy
     networks:
       - ubiq-net
-      - proxy-net   # must be on proxy-net to reach socket-proxy
-      - shared_net  # must be on shared_net to reach mysql_shared by name
+      - proxy-net     # must be on proxy-net to reach socket-proxy
+      - shared_net    # must be on shared_net to reach mysql_shared by name
+      # F0d: must be on this network to reach each sandbox container's
+      # exec listener by name (see TerminalController::execute()).
+      # Joining a static compose network membership like this is applied
+      # directly by `docker compose up` against the real daemon, not
+      # through ubiq_api's own restricted DOCKER_HOST=socket-proxy
+      # connection at runtime — so this has no relationship to
+      # EXEC/NETWORKS being 0 on the proxy below. Laravel gains the
+      # ability to open a plain TCP connection to containers on this
+      # network (already true of every other service port any sandbox
+      # container publishes on it — see the `ubiq_sandbox` network note
+      # further down), not any new Docker-daemon capability.
+      - ubiq_sandbox
 
   # ── Frontend (Vite build -> its own nginx) ─────────────────────────────────
   frontend:
@@ -147,3 +159,14 @@ networks:
 
   shared_net:
     external: true    # pre-existing network that mysql_shared/pma_shared live on
+
+  # F0d: pre-existing network created by ubiq_docker_setup.sh, already
+  # joined by every sandbox container via `--network=ubiq_sandbox` in
+  # ProjectController::runProject()/startDbContainer(). Every container
+  # on it is already reachable from every other container on it by name
+  # (Docker's embedded DNS) — that's how the F1c `db` alias and the
+  # app's own service ports already work today. Adding ubiq_api here
+  # doesn't change that trust boundary, just lets Laravel participate in
+  # it too, for the one new reason it needs to (F0d's exec listener).
+  ubiq_sandbox:
+    external: true

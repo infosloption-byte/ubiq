@@ -94,14 +94,73 @@ class TerminalController extends Controller
             ], 409);
         }
 
-        // Execute the command inside the confirmed-live, run-scoped container.
-        // 'sh -c' allows piping, variable expansion, and combined commands.
-        $execCmd = "docker exec -w /app " . escapeshellarg($containerName) . " sh -c " . escapeshellarg($command . " 2>&1");
+        // F0d: `docker exec` used to run here, but FIX #9's socket-proxy
+        // rejects it for every container by design (EXEC:0 in
+        // docker-compose.yml) — that's the actual root cause of the
+        // "Terminal panel doesn't run anything" report this fixes.
+        // Widening the proxy back to a global exec capability would undo
+        // exactly what FIX #9 was for: a compromised Laravel process
+        // would inherit exec-into-anything rather than exec-into-nothing.
+        //
+        // Instead, this talks directly to a tiny listener running inside
+        // that one container (started in generateStartupScript()'s exec-
+        // listener snippet), reached over the internal `ubiq_sandbox`
+        // network by container name — never through the Docker API, so
+        // the proxy's EXEC setting has no bearing on it either way. The
+        // listener only executes what it receives if the request also
+        // carries this run's own `exec_secret` (generated once in
+        // claimPortAndReserve(), injected into the container as
+        // UBIQ_EXEC_SECRET, never sent to the frontend — see
+        // SandboxRun::$hidden). Any other container reachable on that
+        // same shared bridge network — true of every sandbox today, not
+        // a new exposure this introduces — can open a TCP connection to
+        // this port too, but can't get it to run anything without also
+        // knowing that per-run secret.
+        if (empty($openRun->exec_secret)) {
+            // Only possible for a run started before this migration
+            // shipped — nothing to authenticate with, and no way to
+            // retrofit a secret into an already-running container's env.
+            return response()->json([
+                'output' => "This sandbox was started before the Terminal panel's exec listener existed. Click RESTART to pick up the new one, then try again.",
+            ], 409);
+        }
 
-        $result = Process::timeout(60)->run($execCmd);
+        $socket = @fsockopen($containerName, 7411, $errno, $errstr, 2.0);
+        if (!$socket) {
+            // Most likely `apk add socat` failed inside the container
+            // (transient registry issue, non-fatal by design — see the
+            // startup-script snippet) or the listener hasn't finished
+            // booting yet immediately after RUN. Either way this is a
+            // clean, actionable failure, not a raw connection error.
+            Log::warning("[Terminal] Could not reach exec listener for {$containerName} ({$errno}: {$errstr}).");
+            return response()->json([
+                'output' => "Couldn't reach this sandbox's terminal listener. If the sandbox just started, wait a few seconds and try again; otherwise click RESTART.",
+            ], 409);
+        }
+
+        stream_set_timeout($socket, 60);
+        fwrite($socket, $openRun->exec_secret . "\n");
+        fwrite($socket, base64_encode($command) . "\n");
+
+        $output = '';
+        while (!feof($socket)) {
+            $chunk = fread($socket, 8192);
+            if ($chunk === false) {
+                break;
+            }
+            $output .= $chunk;
+        }
+        $meta = stream_get_meta_data($socket);
+        fclose($socket);
+
+        if ($meta['timed_out']) {
+            return response()->json([
+                'output' => rtrim($output) . "\n[Ubiq] Command timed out after 60s.",
+            ]);
+        }
 
         return response()->json([
-            'output' => $result->output() ?: $result->errorOutput() ?: ""
+            'output' => $output !== '' ? $output : ""
         ]);
     }
 }

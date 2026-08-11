@@ -10,7 +10,8 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  *
  * Columns:
  *   id, user_id, project_id, ip_address, user_agent,
- *   started_at, stopped_at, port, container_name, runtime, framework
+ *   started_at, stopped_at, port, container_name, exec_secret, runtime,
+ *   framework
  */
 class SandboxRun extends Model
 {
@@ -26,8 +27,17 @@ class SandboxRun extends Model
         'stopped_at',
         'port',
         'container_name',
+        'exec_secret',
         'runtime',
         'framework',
+    ];
+
+    protected $hidden = [
+        // F0d: never let this leak out through an accidental toArray()/
+        // toJson() on a SandboxRun — nothing in the frontend needs it, it
+        // only ever travels container-side as an env var and server-side
+        // inside TerminalController::execute().
+        'exec_secret',
     ];
 
     protected $casts = [

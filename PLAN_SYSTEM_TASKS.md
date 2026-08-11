@@ -171,6 +171,34 @@ team plan that doesn't exist yet).
         pattern here). Starting a sandbox now stays the sole
         responsibility of `ProjectController::runProject()`.
 
+- [x] **F0d — Terminal panel still didn't work after F0c** *(found 2026-08-11,
+      F0c's own "not yet done" smoke test caught the real remaining bug)*
+      — see 2026-08-11 decision-log entry.
+  - [x] Root cause: F0c fixed the container-name lookup, but the
+        `docker exec` call itself is rejected outright by the
+        socket-proxy (`EXEC: 0`, see docker-compose.yml's FIX #9 note) —
+        every command was failing at the daemon boundary, independent of
+        which container name was used.
+  - [x] Fix: each sandbox container now runs its own tiny command
+        listener (started in `generateStartupScript()`, right before any
+        runtime-specific install step), reachable only over the internal
+        `ubiq_sandbox` network by container name — no Docker API call
+        involved, so `EXEC: 0` has no bearing on it either way. Gated by
+        a per-run secret (`sandbox_runs.exec_secret`, new column) so
+        reaching the listener isn't enough on its own to run something.
+  - [x] `TerminalController::execute()` now talks to that listener over
+        a plain TCP socket instead of shelling out to `docker exec`.
+  - [x] `ubiq_api` joins the pre-existing `ubiq_sandbox` network in
+        `docker-compose.yml` so it can resolve sandbox containers by
+        name — a static compose network membership, unaffected by the
+        socket-proxy either.
+  - [ ] Not yet done: the same real-Docker-host smoke test F0c's entry
+        flagged as missing — no Docker in this environment to run one.
+        Before shipping: start a project, confirm the "Exec listener up
+        on :7411" line appears in Live Server Logs, run a command in the
+        Terminal panel, then stop the sandbox and confirm the panel falls
+        back to its "click RUN"/"click RESTART" messages correctly.
+
 - [x] **F3 — GitHub OAuth (replace pasted PATs)** — 2026-08-09, F3a–F3d done, F3e stretch not started
   - [x] F3a — Register GitHub OAuth App; add `GET /auth/github/redirect`
         and `GET /auth/github/callback`, mirroring
@@ -402,6 +430,95 @@ feature_key gets renamed, a limit default changes, a phase gets reordered.)
       reaches the running container, then stop the sandbox and confirm
       the panel now returns the "click RUN" message instead of a raw
       Docker error.
+
+- 2026-08-11 — F0d found and fixed, same terminal-panel report as F0c,
+  after F0c's own container-name fix turned out not to be the whole
+  story. Reported as: exec'ing into the correct, live container now (no
+  more "No such container"), but commands still silently produced no
+  output.
+    - **Root cause:** `TerminalController::execute()` shells out via
+      `Process::run("docker exec ...")`, and `ubiq_api`'s `DOCKER_HOST`
+      points at the socket-proxy sidecar added for FIX #9 — which has
+      `EXEC: 0` (see docker-compose.yml). The proxy accepts `docker ps`/
+      `docker inspect` (both used a few lines earlier in the same
+      method, which is why those checks kept working and the failure
+      looked container-name-shaped rather than proxy-shaped) but flatly
+      rejects exec, by design, for every container, not just other
+      users'. `getBuildLog()`'s own docblock had already noted this
+      ("docker exec ... is rejected by the socket-proxy (EXEC: 0), so
+      that's not available either") in the context of crash detection —
+      this is the same wall, just hit from a second call site.
+    - **Why not just set `EXEC: 1`:** that flag is global on the proxy —
+      it can't be scoped to "only this container, only for a request
+      already authenticated as that container's owner". `EXEC: 1` would
+      mean any code path in Laravel, for any reason, can exec into any
+      sandbox container on the box. `TerminalController`'s own
+      `$project->user_id !== $request->user()->id` check is the only
+      thing that would stand between "user runs a command in their own
+      sandbox" and "user runs a command in someone else's" in that
+      world, and that check only holds if Laravel itself hasn't been
+      compromised through something entirely unrelated (an injection, an
+      auth bypass) — exactly the scenario FIX #9 introduced the proxy to
+      contain in the first place. Reverting `EXEC` to `1` to fix a
+      terminal bug would undo that.
+    - **Fix — a listener scoped to one container instead of a daemon
+      capability scoped to none:** `generateStartupScript()` now emits a
+      small snippet, run first (before any runtime-specific package
+      install, so the terminal doesn't sit dead through a slow `npm
+      install`), that `apk add`s `socat` and starts
+      `socat TCP-LISTEN:7411,reuseaddr,fork SYSTEM:/tmp/.ubiq_exec_handler.sh`
+      in the background. That handler script (written to `/tmp` by the
+      container itself at boot via a heredoc, never touching the
+      bind-mounted `/app` workspace, so it never shows up in the file
+      tree) reads two newline-terminated lines — a shared secret, then
+      the command base64-encoded — and only runs the command if the
+      secret matches `$UBIQ_EXEC_SECRET`. Deliberately not real HTTP:
+      parsing HTTP requests correctly in POSIX `sh` (Alpine's `/bin/sh`
+      is `ash`, not `bash` — no `/dev/tcp`, as the F1c db-wait-loop note
+      already established) is much more surface area to get wrong than
+      two `read -r` lines.
+    - `sandbox_runs` gets a new nullable `exec_secret` column
+      (migration `2026_08_11_000004`), generated once per run in
+      `claimPortAndReserve()` (`bin2hex(random_bytes(24))`) and injected
+      into the container as `UBIQ_EXEC_SECRET` in `runProject()`'s
+      `docker run` — same env-var mechanism `PORT` already uses there.
+      Added to `SandboxRun::$hidden` so it can never leak out through an
+      incidental `toJson()`/API response; only `TerminalController` and
+      the container itself ever see it.
+    - `TerminalController::execute()` now opens a plain `fsockopen()` to
+      `$containerName:7411` (resolved by Docker's embedded DNS — no
+      `-p` publish for this port, it's never reachable from outside the
+      `ubiq_sandbox` network at all) instead of shelling out to `docker
+      exec`. `docker ps` stays as the pre-flight liveness check — that
+      call was never the problem, only the exec itself was.
+    - `ubiq_api` needs to actually be *on* `ubiq_sandbox` to resolve
+      container names on it, so `docker-compose.yml` adds it as a third
+      network membership (alongside `ubiq-net`/`proxy-net`/`shared_net`)
+      and declares `ubiq_sandbox: external: true`, matching how
+      `shared_net` was already declared. This is a compose-file network
+      attachment applied directly against the real daemon by whoever
+      runs `docker compose up` — it has no relationship to the
+      socket-proxy's `NETWORKS`/`EXEC` settings, which only gate what
+      `ubiq_api`'s own *runtime* `DOCKER_HOST` connection can do through
+      the proxy, not how compose wires the container up in the first
+      place.
+    - **Not a new exposure, same existing trust boundary:** every
+      sandbox container has always been on the shared `ubiq_sandbox`
+      bridge network, reachable from every other container on it by
+      name — that's the exact mechanism F1c's `db` network-alias already
+      relies on. Any sandbox container could already open a TCP
+      connection to any other sandbox's published service port on this
+      network before this change; the exec listener is one more port in
+      that same category, gated by its own per-run secret so reachability
+      alone isn't sufficient. `ubiq_api` joining this network is new, but
+      what it gains is "can open a TCP connection to a container," the
+      same thing any sandbox container could already do to another —
+      not any Docker-daemon capability, and specifically not the global
+      exec-into-anything capability `EXEC: 1` would have granted.
+    - **Not yet done:** same caveat as F0c — no Docker host available in
+      this environment to actually run a project, confirm the listener's
+      boot line, and exercise the Terminal panel end-to-end. See the
+      task-list entry above for the exact smoke-test steps.
 
 - 2026-08-11 — F1c (opt-in real DB in the sandbox) complete, built on
   top of F1b's revert (see that entry immediately below — read it

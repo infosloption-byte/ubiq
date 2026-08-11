@@ -1224,6 +1224,14 @@ class ProjectController extends Controller
                     'port'         => $port,
                     'runtime'      => $runtime,
                     'framework'    => $framework,
+                    // F0d: per-run secret for the container's own exec
+                    // listener (see TerminalController::execute() and the
+                    // startup-script snippet in generateStartupScript()).
+                    // Generated once here, injected as UBIQ_EXEC_SECRET
+                    // into the container's env in the `docker run` below —
+                    // never sent to the frontend (see the model's
+                    // $hidden), only used server-side and container-side.
+                    'exec_secret'  => bin2hex(random_bytes(24)),
                 ]);
 
                 // P0 fix (F0b): stamp a container name unique to THIS run,
@@ -1638,6 +1646,12 @@ class ProjectController extends Controller
             '--name',   escapeshellarg($containerName),
             '-p',       "{$port}:{$internalPort}",
             '-e',       "PORT={$internalPort}",
+            // F0d: shared secret for this run's own in-container exec
+            // listener — see generateStartupScript()'s listener snippet
+            // and TerminalController::execute(). Not published to the
+            // host (no -p flag for it, unlike the app's own port above),
+            // only reachable over the internal ubiq_sandbox network.
+            '-e',       'UBIQ_EXEC_SECRET=' . escapeshellarg($sandboxRun->exec_secret),
             '-v',       escapeshellarg($hostMountPath) . ':/app',
             '-w',       '/app',
             "--memory={$memoryLimit}",
@@ -2449,6 +2463,54 @@ PHP;
             'export TMPDIR=/tmp',
             'mkdir -p /tmp/.cache',
         ];
+
+        // ── F0d: command-exec listener (Terminal panel) ──────────────────────
+        // Structural replacement for `docker exec`, which FIX #9's
+        // socket-proxy rejects for every container by design (EXEC:0 —
+        // see docker-compose.yml). Rather than widen the proxy back into a
+        // "Laravel can exec into anything" capability, each sandbox
+        // container runs its own tiny listener, reachable only over the
+        // internal `ubiq_sandbox` network by container name — never
+        // published to the host, never touching the Docker API at all.
+        // See TerminalController::execute() for the client side.
+        //
+        // Started first, before any runtime-specific package install
+        // below, so the terminal is usable immediately — a slow
+        // `npm install` shouldn't also mean a dead terminal for two
+        // minutes. Non-fatal by design: `apk add socat` failing (e.g. a
+        // transient registry blip) just means the terminal reports
+        // "not reachable" until RESTART, same graceful-degradation
+        // pattern as every other apk/curl step in this script.
+        //
+        // Protocol is deliberately NOT real HTTP — two newline-terminated
+        // lines (shared secret, then the command base64-encoded to dodge
+        // shell-quoting entirely) and a socat `fork` listener is far less
+        // code to get right in POSIX sh than parsing HTTP requests would
+        // be. UBIQ_EXEC_SECRET is injected per-run by runProject(); a
+        // request with the wrong (or missing) secret gets one line back
+        // and nothing runs.
+        $lines[] = "apk add --no-cache socat 2>&1 || true";
+        $lines[] = <<<'EXECLISTENER'
+        cat > /tmp/.ubiq_exec_handler.sh <<'HANDLER'
+        #!/bin/sh
+        read -r _secret
+        read -r _b64cmd
+        if [ -z "$UBIQ_EXEC_SECRET" ] || [ "$_secret" != "$UBIQ_EXEC_SECRET" ]; then
+          echo "Unauthorized"
+          exit 1
+        fi
+        _cmd=$(printf '%s' "$_b64cmd" | base64 -d 2>/dev/null)
+        cd /app 2>/dev/null
+        timeout 55 sh -c "$_cmd" 2>&1
+        HANDLER
+        chmod +x /tmp/.ubiq_exec_handler.sh
+        if command -v socat >/dev/null 2>&1; then
+          socat TCP-LISTEN:7411,reuseaddr,fork SYSTEM:/tmp/.ubiq_exec_handler.sh &
+          echo '[Ubiq] Exec listener up on :7411 (internal only).'
+        else
+          echo '[Ubiq] socat unavailable -- Terminal panel will report "not reachable" until a later RESTART.'
+        fi
+        EXECLISTENER;
 
         // ── System packages ──────────────────────────────────────────────────
         // CRITICAL: Use separate lines with || true for each group.
