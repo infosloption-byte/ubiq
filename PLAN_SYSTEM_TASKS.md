@@ -223,12 +223,12 @@ team plan that doesn't exist yet).
         project's own workspace directory (alongside `ubiq.json`) so
         the existing `download()` zip ships it automatically. No
         changes needed to `download()` itself. — 2026-08-10, see notes
-  - [ ] F1b — Multi-service sandboxes: move project execution from a
+  - [x] F1b — Multi-service sandboxes: move project execution from a
         single `docker run` to a generated `docker-compose.yml`
         (drop-in equivalent for the single-container case first).
         Capacity accounting: one compose stack = one slot against
         `SANDBOX_GLOBAL_CONCURRENT_LIMIT`, same as today — don't invent
-        new capacity math.
+        new capacity math. — 2026-08-11, see notes
   - [ ] F1c — DB service in the sandbox: add a `db` service (F1b) with
         a project-scoped Docker volume (survives stop/start, never a
         standing service); include it in the generated
@@ -312,6 +312,79 @@ team plan that doesn't exist yet).
 
 (Add dated entries here when a design decision changes mid-build — e.g. a
 feature_key gets renamed, a limit default changes, a phase gets reordered.)
+
+- 2026-08-11 — F1b (multi-service `docker-compose` sandboxes) complete.
+  Replaced the single `docker run ...` string in `runProject()` with a
+  generated, per-run `docker-compose.yml` + `docker compose -f ... -p ...
+  up -d`. Deliberately a drop-in equivalent for the single-container
+  case — same image, bind mount, memory/cpu/pids limits, ulimits,
+  cap-drop/cap-add, security-opt, log driver, and `ubiq_sandbox` network
+  attachment the old `docker run` command used, just expressed as one
+  compose service (`app`) instead of CLI flags. Nothing else needed to
+  change: `stopProject`, `reapStaleSandboxes`, `closeOpenRunForProject`,
+  and the pre-run stray-container sweep all still work by `docker rm -f
+  <container_name>` / `docker ps --filter name=...`, and a container
+  compose creates is an ordinary container by that name — those call
+  sites don't need to know compose exists.
+    - **Two infra constraints found while implementing, not guessed at
+      — checked the actual files:**
+      1. Root `docker-compose.yml`'s socket-proxy sidecar has
+         `NETWORKS: 0` and `VOLUMES: 0` — it rejects `POST
+         /networks/create` and `/volumes/create` over the proxied
+         Docker API. Plain compose usually creates its own default
+         network per project on first `up`, which would silently fail
+         against that proxy. Fixed by declaring `ubiq_sandbox` (the
+         same pre-existing network the old `--network=ubiq_sandbox`
+         flag just attached to) as `external: true` in the generated
+         file, so compose never asks to create anything.
+      2. `backend/Dockerfile` only ever installed `docker-ce-cli`, never
+         `docker-compose-plugin` — `docker compose` would have failed
+         with "unknown command" even though every other `docker ...`
+         call already worked. Added `docker-compose-plugin` to the same
+         apt install line docker-ce-cli was already on. **This means
+         `ubiq_api` needs a rebuild (`docker compose build api` on the
+         EC2 host) before F1b can actually run — a plain code deploy
+         isn't enough by itself.**
+    - **Two separate compose files, on purpose, not one:** the runtime
+      one (`buildRuntimeComposeYaml()`, written to
+      `storage/app/sandbox-runtime/run-{id}.yml`, outside the
+      workspace, never shipped) uses the stock image + bind mount for
+      Ubiq's own fast dev loop; the portable one
+      (`writeDockerComposeExport()`, written into the workspace as
+      `docker-compose.yml`, tracked as a project file, shipped by the
+      existing `download()` zip) uses `build: .` against the Dockerfile
+      F1a already generates, no bind mount. This mirrors the split F1a
+      already established between the live sandbox and the exported
+      Dockerfile — same reasoning, applied to compose.
+    - Runtime compose file is regenerated fresh every run and deleted
+      once its container's removal is confirmed (`cleanupRuntimeCompose()`,
+      called from `stopProject`, `reapStaleSandboxes`, and
+      `closeOpenRunForProject` right after each one's existing
+      removal-verification step) — otherwise `sandbox-runtime/` grows by
+      one small file per run forever. Not calling it anywhere wouldn't
+      have been a correctness bug, just an unbounded-disk-growth one.
+    - Capacity accounting untouched, as scoped: one compose stack still
+      costs exactly one slot against `SANDBOX_GLOBAL_CONCURRENT_LIMIT`,
+      since it's still one `SandboxRun` row and one container either
+      way. No new capacity math introduced.
+    - Same caveat as F0/F1a/F3/G1: no PHP or Docker available in this
+      sandbox to actually run `docker compose up` against the generated
+      file — code review + brace-balance check only. **Needs a real
+      smoke test after the `ubiq_api` image rebuild** — run a project of
+      each runtime type, confirm the container still starts/serves/stops
+      exactly as it did under plain `docker run`, and confirm
+      `docker compose ps` / `docker ps` agree on what's running.
+  F1c (DB service in the sandbox) is next — it slots a `db:` service
+  into the same `buildRuntimeComposeYaml()` / `writeDockerComposeExport()`
+  pair this added, so neither generator needs restructuring for it.
+  Worth flagging now: F1c's "project-scoped Docker volume" will hit the
+  same `VOLUMES: 0` socket-proxy restriction found above — a named
+  Docker volume can't be created through that proxy either, so F1c
+  likely wants a host bind-mount into a project-scoped directory
+  instead of an actual `docker volume`, the same approach the app's own
+  source files already use. Worth confirming against the roadmap
+  wording before starting, since "Docker volume" there may have meant
+  "persistent storage," not literally the Docker Volumes API.
 
 - 2026-08-10 — Panel-fix, not part of the roadmap: Source Control panel
   overflowed into the center editor when the sidebar was resized
@@ -549,9 +622,8 @@ feature_key gets renamed, a limit default changes, a phase gets reordered.)
       review only, needs a real smoke test (build one of each runtime
       type — node/php/python/static — and confirm the image actually
       runs and serves) before this ships to users.
-  F1b (multi-service `docker-compose` sandboxes) is next — F1a was
-  scoped to be independent of it specifically so it could ship first
-  without waiting.
+  F1b (multi-service `docker-compose` sandboxes) shipped next — see the
+  2026-08-11 entry above.
 
 - 2026-07-28 — Phase A complete. Sentinel convention: `-1` means "unlimited"
   for numeric `plan_features` values (used by `projects.max_count` on Pro).

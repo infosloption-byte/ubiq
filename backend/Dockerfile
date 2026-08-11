@@ -15,6 +15,14 @@ FROM php:8.2-fpm
 # we install docker-ce-cli (the client only, no daemon) from Docker's own apt
 # repo rather than docker.io (which pulls in the full daemon package and wastes
 # ~120 MB on an image that should never run a daemon).
+#
+# F1b (PLAN_SYSTEM_TASKS.md Phase F): also install docker-compose-plugin —
+# the CLI didn't ship it before, so `docker compose ...` would have failed
+# with "unknown command" even though ordinary `docker ...` calls worked.
+# Same apt repo as docker-ce-cli above, no extra source needed. The plugin
+# talks to Docker over DOCKER_HOST exactly like the plain CLI does, so no
+# other change is needed for it to reach the daemon through the
+# socket-proxy sidecar.
 
 RUN apt-get update && apt-get install -y \
     curl \
@@ -40,7 +48,7 @@ RUN apt-get update && apt-get install -y \
        $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
        | tee /etc/apt/sources.list.d/docker.list > /dev/null \
     && apt-get update \
-    && apt-get install -y docker-ce-cli \
+    && apt-get install -y docker-ce-cli docker-compose-plugin \
     && docker-php-ext-install zip pdo_mysql mbstring exif pcntl bcmath gd pdo_sqlite \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
