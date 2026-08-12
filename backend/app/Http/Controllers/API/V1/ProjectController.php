@@ -31,6 +31,32 @@ class ProjectController extends Controller
     private const DB_DEV_DATABASE = 'app';
     private const DB_DEV_ROOT_PASSWORD = 'ubiq_dev_root_pw';
 
+    /**
+     * F1g (PLAN_SYSTEM_TASKS.md Phase F): Vite >=5.4.15 / 6.x added a
+     * DNS-rebinding protection (GHSA-vg6x-rcgg-rjx6) that rejects any
+     * request whose Host header isn't localhost/127.0.0.1 or explicitly
+     * listed in `server.allowedHosts` — every `preview-{token}.
+     * ubiq-editor.space` request got "Blocked request. This host ...
+     * is not allowed." straight from Vite's own dev server, before this
+     * repo's code ever ran. Patching every project's own vite.config.js
+     * (AI-generated, user-imported, arbitrary export styles/TS/JS) isn't
+     * reliable — Vite instead documents exactly this env var for
+     * platforms that own their preview domain (see server-options.md:
+     * "if you own a domain vite.dev, you can add vite.dev and
+     * .vite.dev to the list"), so this works regardless of what's in
+     * the project's own config and needs no per-run token — the whole
+     * `.ubiq-editor.space` domain is ours, so a suffix match here is
+     * exactly the safe, documented use case, not a wildcard-everything
+     * bypass. Does NOT need the specific preview_token for this run:
+     * generateStartupScript() builds this script before
+     * claimPortAndReserve() creates the SandboxRun row (and therefore
+     * before preview_token exists), so a per-run host could not be
+     * threaded through here without reordering that claim — the
+     * domain-suffix form sidesteps that entirely.
+     */
+    private const VITE_ALLOWED_HOSTS_EXPORT =
+        "export __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS='.ubiq-editor.space,ubiq-editor.space'";
+
     public function __construct(private PlanGuard $planGuard, private PlanService $planService)
     {
     }
@@ -2754,11 +2780,13 @@ PHP;
                 // Boots in <30s, same as React/Vue.
                 "export VITE_CACHE_DIR=/tmp/.vite-cache",
                 "export NODE_OPTIONS='--max-old-space-size=768'",
+                self::VITE_ALLOWED_HOSTS_EXPORT,
                 "echo '[Ubiq] Starting Angular (Vite) dev server on port {$port}...'",
                 "npx vite --host 0.0.0.0 --port {$port} 2>&1",
             ],
             $framework === 'react' || $framework === 'vue' => [
                 "export VITE_CACHE_DIR=/tmp/.vite-cache",
+                self::VITE_ALLOWED_HOSTS_EXPORT,
                 "if [ -f vite.config.js ] || [ -f vite.config.ts ]; then npx vite --host 0.0.0.0 --port {$port}; else {$runCmd} dev -- --host 0.0.0.0 --port {$port}; fi",
             ],
             $framework === 'laravel' => array_merge(
