@@ -2466,3 +2466,38 @@ Decisions made 2026-08-08 (previously open questions):
   deleted) so it can never again cover the log panel; embedding could
   come back later as an explicit opt-in if wanted, but isn't the
   default.
+
+- 2026-08-12 — F1g: Vite >=5.4.15/6.x's DNS-rebinding protection
+  (GHSA-vg6x-rcgg-rjx6) rejects any request whose `Host` header isn't
+  localhost/127.0.0.1 or explicitly in `server.allowedHosts` — every
+  `preview-{token}.ubiq-editor.space` request hit "Blocked request.
+  This host ... is not allowed." straight from Vite's own dev server.
+  **First fix** (`eeeb0fee`): added
+  `export __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS='.ubiq-editor.space,
+  ubiq-editor.space'` (Vite's own documented env-var escape hatch for
+  platforms that own their preview domain — no per-project
+  vite.config.js patching needed) inside `defaultStartCommands()`'s
+  react/vue and angular branches.
+  **Bug in that fix:** only worked for projects using the *default*
+  start command. `generateStartupScript()`'s "Start server" section
+  branches on `!empty($config['start'])` — any project with its own
+  `start` command (from `ubiq.json`) takes that branch and never calls
+  `defaultStartCommands()` at all, so the export never ran for those
+  projects. Symptom looked inconsistent ("works for this project, not
+  that one") but tracked exactly to which branch each project's
+  startup script took, not project age or Vite version.
+  **Fix:** moved `$lines[] = self::VITE_ALLOWED_HOSTS_EXPORT;` to
+  right before the `if (!empty($config['start']))` split in
+  `generateStartupScript()`, so it's set once, unconditionally, ahead
+  of both branches. Removed the now-redundant per-branch lines inside
+  `defaultStartCommands()`. No-op for non-Vite frameworks.
+  If this regresses again: open the failing project's `startup.sh` in
+  the file browser and confirm the `export __VITE_ADDITIONAL_SERVER_
+  ALLOWED_HOSTS...` line is present near the top, before whichever
+  start command follows — if it's missing, the deploy didn't land
+  (check `docker compose restart api`, since `optimize:clear` doesn't
+  reset opcache and `backend/` is volume-mounted straight into the
+  container); if it's present and still blocked, check what Vite
+  version actually resolved for that project (env-var support landed
+  in a specific Vite point release, slightly after the allowedHosts
+  check itself — a project pinned in that narrow gap won't honor it).

@@ -53,6 +53,13 @@ class ProjectController extends Controller
      * before preview_token exists), so a per-run host could not be
      * threaded through here without reordering that claim — the
      * domain-suffix form sidesteps that entirely.
+     *
+     * Follow-up fix: initially only injected inside defaultStartCommands()'
+     * react/vue/angular branches, so any project with its own `start`
+     * command (from ubiq.json) skipped it entirely — that branch never
+     * calls defaultStartCommands() at all (see generateStartupScript()'s
+     * "Start server" section). Now set once, unconditionally, before that
+     * branch splits, so it applies regardless of which one runs.
      */
     private const VITE_ALLOWED_HOSTS_EXPORT =
         "export __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS='.ubiq-editor.space,ubiq-editor.space'";
@@ -2654,6 +2661,17 @@ PHP;
         }
 
         // ── Start server ─────────────────────────────────────────────────────
+        // F1g follow-up: hoisted out of defaultStartCommands() so it applies
+        // to BOTH branches below, not just the default one. A project with
+        // its own `start` command (from ubiq.json) used to skip this
+        // entirely, since it took the `if` branch and never touched
+        // defaultStartCommands() where the export used to live — that's
+        // exactly why some projects still got "Blocked request" after the
+        // first F1g fix while others didn't. Harmless no-op for non-Vite
+        // frameworks (Laravel, static, etc.), so setting it unconditionally
+        // here is safe.
+        $lines[] = self::VITE_ALLOWED_HOSTS_EXPORT;
+
         if (!empty($config['start'])) {
             $lines[] = "echo '[Ubiq] Starting (from ubiq.json)...'";
             $lines[] = $config['start'];
@@ -2780,13 +2798,11 @@ PHP;
                 // Boots in <30s, same as React/Vue.
                 "export VITE_CACHE_DIR=/tmp/.vite-cache",
                 "export NODE_OPTIONS='--max-old-space-size=768'",
-                self::VITE_ALLOWED_HOSTS_EXPORT,
                 "echo '[Ubiq] Starting Angular (Vite) dev server on port {$port}...'",
                 "npx vite --host 0.0.0.0 --port {$port} 2>&1",
             ],
             $framework === 'react' || $framework === 'vue' => [
                 "export VITE_CACHE_DIR=/tmp/.vite-cache",
-                self::VITE_ALLOWED_HOSTS_EXPORT,
                 "if [ -f vite.config.js ] || [ -f vite.config.ts ]; then npx vite --host 0.0.0.0 --port {$port}; else {$runCmd} dev -- --host 0.0.0.0 --port {$port}; fi",
             ],
             $framework === 'laravel' => array_merge(
