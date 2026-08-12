@@ -2407,6 +2407,31 @@ Decisions made 2026-08-08 (previously open questions):
   any future edit to `nginx.conf` specifically (not an issue for
   `backend/`'s directory mount).
 
+  **Exact fix sequence that actually resolved the live preview-link
+  500s (for reference — both steps were required, neither alone was
+  enough):**
+  1. `nginx.conf` — reorder `include fastcgi_params;` before the
+     manual `fastcgi_param` overrides in the
+     `location = /api/v1/internal/preview-resolve` block, and add
+     explicit `REQUEST_URI`/`DOCUMENT_URI`/`SCRIPT_NAME` overrides
+     after the include (F1e's fix). Committed and pushed as
+     `f654125` — this repo's `nginx.conf` on `main` already reflects
+     it, no further code change needed here.
+  2. On the server, after `git pull` brought `f654125` down:
+     `docker exec ubiq_nginx nginx -t` (validate) then
+     `docker compose up -d --force-recreate nginx` (**not**
+     `nginx -s reload` and **not** `docker restart ubiq_nginx`,
+     both of which keep the same stale-inode bind mount from F1f).
+  3. Verified via `docker exec ubiq_nginx md5sum
+     /etc/nginx/conf.d/default.conf` matching `md5sum nginx.conf` on
+     the host, then confirmed live against a real
+     `preview-{token}.ubiq-editor.space` URL in-browser.
+  Should either bug regress after a future `nginx.conf` edit, check
+  in this order: (a) is the edit actually in `git log -1 -- nginx.conf`
+  on the server, (b) does `docker exec ubiq_nginx md5sum
+  /etc/nginx/conf.d/default.conf` match the host file, (c) only then
+  look at the `auth_request`/`fastcgi_param` logic itself again.
+
 - 2026-08-12 — F1f (frontend, same PLAN letter reused — this is the
   `ProjectRunner.tsx` half of the same symptom, not a new bug):
   with F1e/F1f (nginx) both live, preview links load correctly, but
