@@ -13,6 +13,7 @@ const DashboardPage    = lazy(() => import('./pages/DashboardPage'));
 const ChatPage         = lazy(() => import('./pages/ChatPage'));
 const SettingsPage     = lazy(() => import('./pages/SettingsPage'));
 const ProjectsPage     = lazy(() => import('./pages/ProjectsPage'));
+const SandboxesPage    = lazy(() => import('./pages/SandboxesPage'));
 const ProjectEditorPage = lazy(() => import('./pages/ProjectEditorPage'));
 const ProjectInfoPage  = lazy(() => import('./pages/ProjectInfoPage'));
 const AuthCallbackPage = lazy(() => import('./pages/AuthCallbackPage'));
@@ -88,6 +89,10 @@ function App() {
                     <Route
                         path="/projects/:id"
                         element={token ? <SubscriptionGuard><ProjectInfoPage /></SubscriptionGuard> : <Navigate to="/login" />}
+                    />
+                    <Route
+                        path="/sandboxes"
+                        element={token ? <SubscriptionGuard><SandboxesPage /></SubscriptionGuard> : <Navigate to="/login" />}
                     />
                     <Route
                         path="/editor/:id"

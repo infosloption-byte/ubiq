@@ -160,6 +160,11 @@ export const projectAPI = {
     getBuildLog: (projectId: number) => api.get(`/projects/${projectId}/build-log`),
 };
 
+export const sandboxAPI = {
+    getAll: () => api.get('/sandboxes'),
+    stop: (sandboxRunId: number) => api.post(`/sandboxes/${sandboxRunId}/stop`),
+};
+
 export const terminalAPI = {
     execute: (projectId: number, command: string) =>
         api.post(`/projects/${projectId}/terminal`, { command })

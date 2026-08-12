@@ -18,6 +18,7 @@ use App\Http\Controllers\API\V1\PayPalController;
 use App\Http\Controllers\API\V1\AiKeyController; // D8 fix — PLAN_SYSTEM_TASKS.md Phase D
 use App\Http\Controllers\API\V1\GithubOAuthController; // F3 — PLAN_SYSTEM_TASKS.md Phase F
 use App\Http\Controllers\API\V1\PreviewResolveController; // F1d — PLAN_SYSTEM_TASKS.md Phase F
+use App\Http\Controllers\API\V1\SandboxController; // F1h — PLAN_SYSTEM_TASKS.md Phase F
 use App\Http\Controllers\OllamaProxyController;
 
 // ── Unauthenticated fallback ───────────────────────────────────────────────
@@ -167,6 +168,17 @@ Route::prefix('v1')->group(function () {
             Route::middleware('throttle:20,1')->group(function () {
                 Route::post('projects/{project}/run',  [ProjectController::class, 'runProject']);
                 Route::post('projects/{project}/stop', [ProjectController::class, 'stopProject']);
+            });
+
+            // F1h — Sandboxes list page: cross-project inventory of a
+            // user's sandboxes (running/stopped/crashed, health, vitals)
+            // plus per-row stop. `index` is read-only and stays on the
+            // parent 120/min rate; `stop` shares the same 20/min sandbox
+            // throttle as the existing per-project run/stop above, since
+            // it performs the identical docker rm -f action.
+            Route::get('sandboxes', [SandboxController::class, 'index']);
+            Route::middleware('throttle:20,1')->group(function () {
+                Route::post('sandboxes/{sandboxRun}/stop', [SandboxController::class, 'stop']);
             });
 
             // Heartbeat — pinged every ~30s while a preview is open, needs

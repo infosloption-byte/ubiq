@@ -6,11 +6,12 @@ scope from what was originally planned.
 
 Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 
-**Status as of 2026-08-11: Phases A–E complete. Phase F (Enhancement
+**Status as of 2026-08-12: Phases A–E complete. Phase F (Enhancement
 Roadmap) in progress — F0 (P0 sandbox slot leak) done, F0c (Terminal
 panel using stale pre-F0b container name) done, F3 (GitHub OAuth) done
 except F3e stretch, G1 (usage dashboard) done except G1d stretch,
-F1a/F1c done, F1b reverted (see notes), F1d next.**
+F1a/F1c/F1d/F1e/F1f/F1g done, F1b reverted (see notes), F1h (new
+Sandboxes list page) done, G2 next.**
 Phase F tracks `UBIQ_ENHANCEMENT_ROADMAP.md` — prioritized and broken
 into implementable tasks below. Work it top-to-bottom; the order
 already reflects priority (retention-critical → differentiation →
@@ -347,6 +348,34 @@ team plan that doesn't exist yet).
         was `z-20` over the log terminal's `z-10` and silently covered
         it every run; reverted to the intended logs + "Open Preview in
         New Tab" UX unconditionally (see note).
+
+- [x] **F1h — Sandboxes list page** *(new left-nav page, not from the
+      original roadmap doc — added directly per product ask, sequenced
+      here since it's a thin UI/read layer over the `SandboxRun`
+      tracking F0-F1d already built, not new sandbox-lifecycle logic)*
+      — 2026-08-12, see notes below
+  - [x] Backend: `SandboxController` (`GET /sandboxes`,
+        `POST /sandboxes/{sandboxRun}/stop`) — cross-project inventory
+        of a user's `SandboxRun` rows, reconciled against live
+        `docker inspect`/`docker stats` per row (so a DB-open row whose
+        container actually died reports as "crashed", not a false
+        "running"), plus recent stopped-run history and usage vs.
+        `sandbox.max_concurrent` (reuses `PlanGuard::remaining()`).
+        `stop()` mirrors `ProjectController::stopProject()`'s
+        kill → verify → stamp → release sequence exactly, addressed by
+        run id instead of "project's latest run" since this list spans
+        multiple projects at once.
+  - [x] Frontend: new `SandboxesPage.tsx`, new "Sandboxes" left-nav
+        item in `Layout.tsx` (between Projects and AI Chat), new
+        `/sandboxes` route in `App.tsx` (same auth + `SubscriptionGuard`
+        pattern as `/projects`). UI/UX deliberately mirrors
+        `ProjectsPage.tsx`'s card grid (same header, search bar, empty
+        state, card shell) rather than inventing a new layout language.
+        Each card shows status (running/stopped/crashed), live
+        CPU/Memory/Network/health vitals, live uptime, and a Stop
+        action (confirm dialog via the existing `ConfirmDialog`); a
+        collapsible history list covers recently-stopped runs. Polls
+        `GET /sandboxes` every 10s for live vitals/health drift.
 
 - [ ] **G2 — Multi-file diff review screen + user-controlled autonomy**
   - [ ] G2a — Build the batch review screen: file list with
@@ -2501,3 +2530,65 @@ Decisions made 2026-08-08 (previously open questions):
   version actually resolved for that project (env-var support landed
   in a specific Vite point release, slightly after the allowedHosts
   check itself — a project pinned in that narrow gap won't honor it).
+
+- 2026-08-12 — F1h: added the "Sandboxes" left-nav page. This wasn't
+  in the original `UBIQ_ENHANCEMENT_ROADMAP.md` — it's a direct
+  product ask ("user could run sandboxes... add new menu item... show
+  Sandbox list... aware what sandboxes running, stopped, health,
+  vitals... stop/remove") — but it's purely a read + stop layer over
+  `SandboxRun` tracking that F0–F1d already built, so no new
+  sandbox-lifecycle logic was needed, just a new way to see and act on
+  what already exists.
+
+  **Why a new `SandboxController` instead of extending
+  `ProjectController`:** every existing sandbox endpoint
+  (`run`/`stop`/`heartbeat`) is inherently scoped to one project at a
+  time (`{project}` in the route). The new page needed the opposite —
+  "every sandbox this user has, across every project, in one list" —
+  which doesn't fit that shape without bolting an unrelated
+  cross-project query onto an already-2800-line controller. Kept
+  `stop()`'s actual container-removal logic byte-for-byte equivalent
+  to `stopProject()`'s (force-remove, verify removal before stamping
+  `stopped_at`, always release the `active_sandboxes` counter) rather
+  than inventing a second version — see that method's own comments for
+  why each step exists. The only real difference: this `stop()` is
+  addressed by `SandboxRun` id, not "the project's latest open run",
+  since a cross-project list operates on individual rows.
+
+  **Reconciling DB vs. real Docker state for the list:** a `SandboxRun`
+  with `stopped_at IS NULL` normally means "running", but
+  `reapStaleSandboxes()` only self-heals a dead row the next time that
+  project's `run` endpoint is hit — a user who never clicks Run again
+  would otherwise see a permanently-"running" card for a container
+  that's actually gone. `SandboxController::index()` calls
+  `docker inspect` per open row on every request and reports
+  `crashed` instead of `running` when Docker disagrees, so the list is
+  honest without needing to actually run the reap-and-mutate logic
+  itself (that stays exactly where it already lived, triggered by the
+  next real `run` click, not by viewing this page).
+
+  **Vitals:** CPU/Memory/Network come from `docker stats --no-stream`,
+  called only for rows already confirmed `running` (skipped for
+  stopped/crashed, where there's nothing to sample). Cheap enough to
+  run synchronously per request here for the same reason
+  `reapStaleSandboxes()` considered its own per-user Docker calls
+  cheap: global sandbox concurrency is capped around 3
+  (`SANDBOX_GLOBAL_CONCURRENT_LIMIT`), so this is at most a handful of
+  `docker` invocations, not an unbounded fan-out.
+
+  **Frontend:** deliberately reused `ProjectsPage.tsx`'s exact card-grid
+  shell (header, search input, empty state, card corners/hover/spacing)
+  rather than designing a new pattern, per the ask to "follow same
+  UI/UX as projects list." Polls `GET /sandboxes` every 10s while the
+  page is open (matches the existing `useSandboxAutoStop.ts` heartbeat
+  cadence order-of-magnitude) so vitals and crash detection stay live
+  without needing a websocket for what's fundamentally a dashboard, not
+  a real-time console. A client-side 1s tick re-renders the "Up Xm Ys"
+  counter between polls so it doesn't visibly stall for 10 seconds at a
+  time.
+
+  **Not done in this pass, worth a follow-up if this page gets used a
+  lot:** no bulk "stop all" action, and the history list is capped at
+  the last 15 stopped runs with no pagination — both were deliberately
+  left out to keep this a thin read layer rather than growing new
+  product surface area beyond what was asked for.

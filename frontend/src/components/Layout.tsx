@@ -10,7 +10,8 @@ import {
   SparklesIcon,
   Bars3Icon,
   XMarkIcon,
-  FolderIcon // New Icon for Projects
+  FolderIcon, // New Icon for Projects
+  CubeTransparentIcon // F1h — Icon for Sandboxes
 } from '@heroicons/react/24/outline';
 
 interface LayoutProps {
@@ -109,6 +110,8 @@ export default function Layout({ children }: LayoutProps) {
           <NavItem to="/dashboard" icon={Squares2X2Icon} title="Dashboard" />
           {/* NEW: Projects Menu Item */}
           <NavItem to="/projects" icon={FolderIcon} title="Projects" />
+          {/* F1h: Sandboxes Menu Item — cross-project sandbox inventory */}
+          <NavItem to="/sandboxes" icon={CubeTransparentIcon} title="Sandboxes" />
           <NavItem to="/chat" icon={ChatBubbleLeftRightIcon} title="AI Chat" />
         </nav>
 
