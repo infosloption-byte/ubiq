@@ -1100,11 +1100,23 @@ PHP;
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
+// F1g follow-up: __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS is exported by
+// startup.sh (see ProjectController::VITE_ALLOWED_HOSTS_EXPORT) so every
+// preview-{token}.ubiq-editor.space request passes Vite's DNS-rebinding
+// allowedHosts check. The export alone does nothing on its own — Vite
+// has no built-in awareness of this variable name, this is the piece
+// that actually reads it into server.allowedHosts.
+const allowedHosts = (process.env.__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS ?? '')
+  .split(',')
+  .map((host) => host.trim())
+  .filter(Boolean)
+
 export default defineConfig({
   plugins: [react()],
   server: {
     host: '0.0.0.0',
     port: 5173,
+    allowedHosts: allowedHosts.length ? allowedHosts : undefined,
   },
 })
 JS,
@@ -1232,11 +1244,23 @@ CSS,
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 
+// F1g follow-up: __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS is exported by
+// startup.sh (see ProjectController::VITE_ALLOWED_HOSTS_EXPORT) so every
+// preview-{token}.ubiq-editor.space request passes Vite's DNS-rebinding
+// allowedHosts check. The export alone does nothing on its own — Vite
+// has no built-in awareness of this variable name, this is the piece
+// that actually reads it into server.allowedHosts.
+const allowedHosts = (process.env.__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS ?? '')
+  .split(',')
+  .map((host) => host.trim())
+  .filter(Boolean)
+
 export default defineConfig({
   plugins: [vue()],
   server: {
     host: '0.0.0.0',
     port: 5173,
+    allowedHosts: allowedHosts.length ? allowedHosts : undefined,
   },
 })
 JS,
@@ -1471,11 +1495,23 @@ CSS,
 import { defineConfig } from 'vite'
 import angular from '@analogjs/vite-plugin-angular'
 
+// F1g follow-up: __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS is exported by
+// startup.sh (see ProjectController::VITE_ALLOWED_HOSTS_EXPORT) so every
+// preview-{token}.ubiq-editor.space request passes Vite's DNS-rebinding
+// allowedHosts check. The export alone does nothing on its own — Vite
+// has no built-in awareness of this variable name, this is the piece
+// that actually reads it into server.allowedHosts.
+const allowedHosts = (process.env.__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS ?? '')
+  .split(',')
+  .map((host) => host.trim())
+  .filter(Boolean)
+
 export default defineConfig({
   plugins: [angular()],
   server: {
     host: '0.0.0.0',
     port: 4200,
+    allowedHosts: allowedHosts.length ? allowedHosts : undefined,
   },
 })
 TS,

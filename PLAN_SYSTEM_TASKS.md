@@ -2531,6 +2531,32 @@ Decisions made 2026-08-08 (previously open questions):
   in a specific Vite point release, slightly after the allowedHosts
   check itself — a project pinned in that narrow gap won't honor it).
 
+  **Follow-up, same session, deeper bug than either fix above:** even
+  with the export landing correctly (confirmed present in a live
+  project's `startup.sh`), a fresh preview link still hit "Blocked
+  request... not allowed." The env var itself does nothing on its
+  own — `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS` isn't a name Vite
+  knows about; something has to actually read it into
+  `server.allowedHosts`. Checked all three `vite.config.js`/`.ts`
+  templates in `BoilerplateManager.php` (react, vue, angular) — none
+  of them did. They hardcoded `host`/`port` and never touched
+  `allowedHosts` at all, so every single scaffolded project has been
+  missing this regardless of which `generateStartupScript()` branch
+  it took — the two fixes above got the export itself correct and
+  consistent, but nothing was ever plugged into the other end.
+  **Fix:** all three templates now read
+  `process.env.__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS`, split on `,`,
+  and pass the result into `server.allowedHosts`. Only fixes **new**
+  scaffolds going forward — `"DO NOT REGENERATE: ... vite.config.js"`
+  is baked into the AI-generation prompts specifically so existing
+  projects' configs are never silently rewritten, so every
+  already-scaffolded project needs this patched into its own
+  `vite.config.js` by hand once. If a specific project's preview
+  still 400s after this: open its `vite.config.js` in the file
+  browser and confirm the `allowedHosts` line is actually there —
+  if it's not, that project predates this fix and needs the manual
+  one-line patch, not another look at nginx or the export itself.
+
 - 2026-08-12 — F1h: added the "Sandboxes" left-nav page. This wasn't
   in the original `UBIQ_ENHANCEMENT_ROADMAP.md` — it's a direct
   product ask ("user could run sandboxes... add new menu item... show
@@ -2592,3 +2618,55 @@ Decisions made 2026-08-08 (previously open questions):
   the last 15 stopped runs with no pagination — both were deliberately
   left out to keep this a thin read layer rather than growing new
   product surface area beyond what was asked for.
+
+- 2026-08-12 — F1h follow-up: per-sandbox detail page. Direct product
+  ask ("user could see history of it, and also its crashed it could
+  see why its crashed") — clicking a card on the Sandboxes list page
+  now opens `/sandboxes/{id}` instead of jumping straight to the
+  project; the folder icon/project title inside a card still shortcut
+  to the project directly (now with `stopPropagation` so they don't
+  also fire the card's own navigate).
+
+  **Backend:** new `SandboxController::show()` / `GET
+  /sandboxes/{sandboxRun}` — same per-row `dockerHealth()`/
+  `dockerStats()`/`formatSandbox()` the list already used, plus two
+  things a list row has no room for:
+    - **Raw log** — read from `{workspace}/startup.log`, but only if
+      this run is currently that *project's* latest one.
+      `runProject()` truncates that same path fresh on every new run
+      (one file per project, not per run), so anything older has
+      already been overwritten by whatever ran after it. Surfaced
+      honestly as `log_available: false` + a `log_note` explaining why,
+      rather than either erroring or silently showing the wrong run's
+      content.
+    - **Crash summary** — best-effort parsed reason, not just the raw
+      dump. If Docker still has the container (`docker_status !==
+      'missing'`): `docker inspect`'s `ExitCode`/`OOMKilled`/`Error`/
+      `FinishedAt` drive a short one-line reason (OOM, a Docker-level
+      error, or a bare exit code pointing at the log). If the
+      container's already gone entirely (already `docker rm`'d — no
+      inspect data left to have an opinion from): falls back to the
+      same Node-crash-banner heuristic `ProjectController::
+      getBuildLog()` already established (`/Node\.js v\d+\.\d+\.\d+\s*$/`
+      as the last log line only happens when something killed the
+      process unexpectedly), then a plain "already removed, nothing
+      further to show" as the last resort. Never fabricates a reason
+      it doesn't have evidence for.
+
+  **Frontend:** new `SandboxDetailPage.tsx`, styled to match
+  `ProjectInfoPage.tsx`'s existing detail-page conventions (back link,
+  header layout, `Layout` wrapper) rather than inventing a new pattern.
+  Polls every 5s (tighter than the list's 10s, since this is the page
+  you're actually staring at while debugging a crash) and auto-scrolls
+  the log view to the bottom as it grows, same behavior as the
+  editor's own Live Server Logs panel.
+
+  **Known limitation, same one flagged on F1h itself:** history
+  browsing works (any stopped run in the list now opens its own detail
+  page too, not just running/crashed ones), but only the *current* run
+  per project ever has a raw log — older runs in history will
+  correctly show as unavailable rather than wrong. If full per-run log
+  history matters going forward, that needs a schema change (persist
+  log content or a storage key at stop-time) — flagged here rather
+  than attempted, since it's a meaningfully bigger scope than what was
+  asked for this pass.

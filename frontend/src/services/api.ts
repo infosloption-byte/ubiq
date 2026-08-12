@@ -162,6 +162,7 @@ export const projectAPI = {
 
 export const sandboxAPI = {
     getAll: () => api.get('/sandboxes'),
+    get: (sandboxRunId: number) => api.get(`/sandboxes/${sandboxRunId}`),
     stop: (sandboxRunId: number) => api.post(`/sandboxes/${sandboxRunId}/stop`),
 };
 

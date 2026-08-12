@@ -177,6 +177,12 @@ Route::prefix('v1')->group(function () {
             // throttle as the existing per-project run/stop above, since
             // it performs the identical docker rm -f action.
             Route::get('sandboxes', [SandboxController::class, 'index']);
+            // F1h follow-up — per-sandbox detail page: raw startup log +
+            // parsed crash reason for one run. Read-only, same 120/min
+            // rate as the list above; no reason to throttle it tighter,
+            // it does one docker inspect at most, same cost class as a
+            // single row's health check already folded into index().
+            Route::get('sandboxes/{sandboxRun}', [SandboxController::class, 'show']);
             Route::middleware('throttle:20,1')->group(function () {
                 Route::post('sandboxes/{sandboxRun}/stop', [SandboxController::class, 'stop']);
             });

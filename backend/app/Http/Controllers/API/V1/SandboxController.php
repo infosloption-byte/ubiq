@@ -142,6 +142,147 @@ class SandboxController extends Controller
     }
 
     /**
+     * GET /sandboxes/{sandboxRun}
+     *
+     * Detail view for a single run — everything `index()` returns per
+     * row, plus the two things a list row has no room for: the raw
+     * startup log and a short parsed "why did this crash" reason.
+     *
+     * Raw log availability is a real constraint, not a bug: `startup.sh`
+     * writes to `{workspace}/startup.log`, ONE file per *project*, not
+     * per run — see `ProjectController::runProject()`'s
+     * `file_put_contents(..., '[Ubiq] Initializing Container...')`,
+     * which truncates that same path fresh on every new run. So the log
+     * body below is only ever available for whichever run is currently
+     * the *latest* one for its project; anything older has already been
+     * overwritten by whatever ran after it. That's surfaced explicitly
+     * as `log_available: false` with a `log_note` explaining why, rather
+     * than silently showing stale or wrong content.
+     */
+    public function show(Request $request, SandboxRun $sandboxRun)
+    {
+        if ($sandboxRun->user_id !== $request->user()->id) {
+            return response()->json(['error' => 'Unauthorized'], 403);
+        }
+
+        $sandboxRun->loadMissing('project:id,name,language,source');
+        $containerName = $sandboxRun->docker_name;
+        $health = $this->dockerHealth($containerName);
+
+        $status = match (true) {
+            $sandboxRun->stopped_at !== null => 'stopped',
+            $health['docker_status'] === 'running' => 'running',
+            $health['docker_status'] === 'missing' => 'crashed',
+            default => 'stopped',
+        };
+
+        $stats = $status === 'running' ? $this->dockerStats($containerName) : $this->emptyStats();
+        $sandbox = $this->formatSandbox($sandboxRun, $status, $health, $stats);
+
+        $isLatestRunForProject = SandboxRun::where('project_id', $sandboxRun->project_id)
+            ->orderByDesc('started_at')
+            ->value('id') === $sandboxRun->id;
+
+        [$log, $logAvailable, $logNote] = $this->readLogFor($sandboxRun, $isLatestRunForProject);
+
+        $sandbox['log'] = $log;
+        $sandbox['log_available'] = $logAvailable;
+        $sandbox['log_note'] = $logNote;
+        $sandbox['crash_summary'] = $status === 'crashed'
+            ? $this->crashSummary($containerName, $health, $log)
+            : null;
+
+        return response()->json(['sandbox' => $sandbox]);
+    }
+
+    /**
+     * Reads the project-level startup.log for this run, if it's still
+     * that project's most recent run — see show()'s docblock for why
+     * that condition exists at all. Returns [content|null, available,
+     * note-for-the-unavailable-case|null].
+     */
+    private function readLogFor(SandboxRun $run, bool $isLatestRunForProject): array
+    {
+        if (!$isLatestRunForProject) {
+            return [null, false, 'A newer run of this project has started since, which overwrote this run\'s log file — only the most recent run per project keeps its raw output.'];
+        }
+
+        $workspacePath = storage_path("app/workspaces/{$run->user_id}/{$run->project_id}");
+        $logPath = $workspacePath . '/startup.log';
+
+        if (!file_exists($logPath)) {
+            return [null, false, 'No log file was ever written for this run.'];
+        }
+
+        // Same cap as everywhere else logs are shown to a browser tab —
+        // large logs (long-running dev servers with lots of HMR chatter)
+        // shouldn't turn this into a multi-MB response.
+        $lines = file($logPath) ?: [];
+        $tail = array_slice($lines, -500);
+
+        return [implode('', $tail), true, null];
+    }
+
+    /**
+     * Best-effort "why did this crash" for a container Docker still
+     * knows about (still exists, just not running) vs. one that's
+     * already gone entirely (docker_status === 'missing', e.g. already
+     * `docker rm`'d) — the latter can only fall back to whatever the
+     * log happened to say right before it disappeared, since `docker
+     * inspect` has nothing left to report once the container's removed.
+     */
+    private function crashSummary(string $containerName, array $health, ?string $log): array
+    {
+        if ($health['docker_status'] !== 'missing') {
+            $inspect = Process::run(
+                "docker inspect -f '{{.State.ExitCode}}|{{.State.OOMKilled}}|{{.State.Error}}|{{.State.FinishedAt}}' {$containerName} 2>/dev/null"
+            );
+            $output = trim($inspect->output());
+            if ($inspect->successful() && $output !== '') {
+                [$exitCode, $oomKilled, $dockerError, $finishedAt] = array_pad(explode('|', $output, 4), 4, null);
+
+                $reason = match (true) {
+                    $oomKilled === 'true' => 'Killed by the kernel out-of-memory killer — the container exceeded its memory limit.',
+                    $dockerError !== '' => "Docker reported: {$dockerError}",
+                    $exitCode !== '0' => "Process exited with code {$exitCode}. Check the log below for what it printed right before that.",
+                    default => 'Exited cleanly (code 0), but Ubiq expected this process to keep running. Check the log below for what happened right before it stopped.',
+                };
+
+                return [
+                    'exit_code' => is_numeric($exitCode) ? (int) $exitCode : null,
+                    'oom_killed' => $oomKilled === 'true',
+                    'finished_at' => $finishedAt ?: null,
+                    'reason' => $reason,
+                ];
+            }
+        }
+
+        // Container's gone entirely — same Node-crash heuristic
+        // ProjectController::getBuildLog() already uses, since that's
+        // the one log-content signal specific enough to trust: Node
+        // always prints its version banner as the LAST line of output
+        // when an uncaught exception/unhandled rejection kills the
+        // process, which nothing else legitimately prints there.
+        if ($log && preg_match('/Node\.js v\d+\.\d+\.\d+\s*$/', rtrim($log))) {
+            return [
+                'exit_code' => null,
+                'oom_killed' => null,
+                'finished_at' => null,
+                'reason' => 'An uncaught exception crashed the process — Node printed its version banner as the last line, which only happens when something killed it unexpectedly. Check the log below for the actual error above that line.',
+            ];
+        }
+
+        return [
+            'exit_code' => null,
+            'oom_killed' => null,
+            'finished_at' => null,
+            'reason' => $log
+                ? 'The container was already removed by the time this was checked, so Docker has no exit details left to report. Showing the last thing it printed below.'
+                : 'The container was already removed, and no log is available for this run either — nothing further to show.',
+        ];
+    }
+
+    /**
      * Live Docker state for a container: is it actually running, and
      * (if the image defines one) what does its HEALTHCHECK report.
      * Returns 'missing' for docker_status when the container doesn't

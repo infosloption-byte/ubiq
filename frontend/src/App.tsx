@@ -14,6 +14,7 @@ const ChatPage         = lazy(() => import('./pages/ChatPage'));
 const SettingsPage     = lazy(() => import('./pages/SettingsPage'));
 const ProjectsPage     = lazy(() => import('./pages/ProjectsPage'));
 const SandboxesPage    = lazy(() => import('./pages/SandboxesPage'));
+const SandboxDetailPage = lazy(() => import('./pages/SandboxDetailPage'));
 const ProjectEditorPage = lazy(() => import('./pages/ProjectEditorPage'));
 const ProjectInfoPage  = lazy(() => import('./pages/ProjectInfoPage'));
 const AuthCallbackPage = lazy(() => import('./pages/AuthCallbackPage'));
@@ -93,6 +94,10 @@ function App() {
                     <Route
                         path="/sandboxes"
                         element={token ? <SubscriptionGuard><SandboxesPage /></SubscriptionGuard> : <Navigate to="/login" />}
+                    />
+                    <Route
+                        path="/sandboxes/:id"
+                        element={token ? <SubscriptionGuard><SandboxDetailPage /></SubscriptionGuard> : <Navigate to="/login" />}
                     />
                     <Route
                         path="/editor/:id"

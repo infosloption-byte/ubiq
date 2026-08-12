@@ -229,12 +229,14 @@ export default function SandboxesPage() {
                             return (
                                 <div
                                     key={sandbox.id}
-                                    className="group relative bg-ubiq-900 border border-white/5 rounded-2xl p-6 hover:border-ubiq-accent/30 hover:bg-ubiq-900/80 transition-all duration-300 shadow-lg"
+                                    onClick={() => navigate(`/sandboxes/${sandbox.id}`)}
+                                    className="group relative bg-ubiq-900 border border-white/5 rounded-2xl p-6 hover:border-ubiq-accent/30 hover:bg-ubiq-900/80 transition-all duration-300 shadow-lg cursor-pointer"
                                 >
                                     <div className="flex justify-between items-start mb-4">
                                         <div
-                                            onClick={() => navigate(`/projects/${sandbox.project_id}`)}
+                                            onClick={(e) => { e.stopPropagation(); navigate(`/projects/${sandbox.project_id}`); }}
                                             className={`w-10 h-10 rounded-xl flex items-center justify-center cursor-pointer ${sandbox.project_language ? 'bg-ubiq-accent/10 text-ubiq-accent' : 'bg-white/5 text-slate-400'}`}
+                                            title="Open project"
                                         >
                                             <FolderIcon className="w-6 h-6" />
                                         </div>
@@ -247,8 +249,9 @@ export default function SandboxesPage() {
                                     </div>
 
                                     <h3
-                                        onClick={() => navigate(`/projects/${sandbox.project_id}`)}
+                                        onClick={(e) => { e.stopPropagation(); navigate(`/projects/${sandbox.project_id}`); }}
                                         className="text-lg font-semibold text-white mb-1 group-hover:text-ubiq-accent transition-colors truncate cursor-pointer"
+                                        title="Open project"
                                     >
                                         {sandbox.project_name}
                                     </h3>
@@ -303,7 +306,7 @@ export default function SandboxesPage() {
                                             {isRunning ? `Up ${formatDuration(uptime)}` : `Ran ${formatDuration(uptime)}`}
                                         </div>
                                         <button
-                                            onClick={() => setStopModal({ open: true, sandbox })}
+                                            onClick={(e) => { e.stopPropagation(); setStopModal({ open: true, sandbox }); }}
                                             disabled={stoppingId === sandbox.id}
                                             className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-slate-500 hover:text-red-400 hover:bg-red-500/10 transition-all font-medium disabled:opacity-50"
                                             title="Stop and remove this sandbox"
@@ -328,7 +331,7 @@ export default function SandboxesPage() {
                                 {filteredHistory.map((sandbox) => (
                                     <div
                                         key={sandbox.id}
-                                        onClick={() => navigate(`/projects/${sandbox.project_id}`)}
+                                        onClick={() => navigate(`/sandboxes/${sandbox.id}`)}
                                         className="flex items-center justify-between gap-4 px-5 py-3.5 bg-ubiq-900/50 hover:bg-ubiq-900 cursor-pointer transition-colors"
                                     >
                                         <div className="flex items-center gap-3 min-w-0">
