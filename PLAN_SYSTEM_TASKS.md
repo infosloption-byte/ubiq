@@ -300,7 +300,7 @@ team plan that doesn't exist yet).
         — 2026-08-11, see notes. Scoped to Laravel only + opt-in via
         new `db_engine` project column, both deliberate narrowings not
         in the original wording — see notes for why.
-  - [~] F1d — Ephemeral preview links: signed token derived from a
+  - [x] F1d — Ephemeral preview links: signed token derived from a
         running `SandboxRun` row, resolving
         `preview-{token}.ubiq-editor.space` proxied to that run's
         allocated port; link dies the moment existing reaping logic
@@ -330,6 +330,23 @@ team plan that doesn't exist yet).
         preview links became `https://`, it's just embedding a URL
         still broken by (1)/(2) above; no frontend fix needed once
         those land. — 2026-08-11, see notes
+        **DONE — 2026-08-12, see F1e/F1f notes below.** master_nginx
+        wildcard cert + routing landed; then two more bugs found and
+        fixed against the real preview flow: **F1e** —
+        `auth_request`'s `fastcgi_params` include ordering was
+        clobbering `REQUEST_URI` back to the visitor's own URL, so
+        `PreviewResolveController` was never actually reached (see
+        note). **F1f** — after F1e shipped, symptoms persisted because
+        `ubiq_nginx`'s single-file bind mount was pinned to a stale
+        inode from before the fix and needed `--force-recreate`, not
+        just a config reload (see note). Once both landed, preview
+        links load correctly. Frontend note: `ProjectRunner.tsx`'s
+        auto-embedding iframe branch (dead code while preview links
+        were `http://`, per the note above) turned out to actively
+        need disabling once links became reachable `https://` — it
+        was `z-20` over the log terminal's `z-10` and silently covered
+        it every run; reverted to the intended logs + "Open Preview in
+        New Tab" UX unconditionally (see note).
 
 - [ ] **G2 — Multi-file diff review screen + user-controlled autonomy**
   - [ ] G2a — Build the batch review screen: file list with
@@ -2335,3 +2352,92 @@ Decisions made 2026-08-08 (previously open questions):
   a second login method, doesn't touch Google login). Everyone else gets
   the normal **"Change Password."** Cheap to key off since `google_id`
   already exists on the model.
+
+- 2026-08-12 — F1e: preview links still 500ing after the F1d
+  route-path/status fixes landed (commit `f654125`). Root cause was a
+  second, independent bug in the same `location = /api/v1/internal/
+  preview-resolve` block: the manual `fastcgi_param SCRIPT_FILENAME` /
+  `REQUEST_METHOD` / `QUERY_STRING` overrides were placed *before*
+  `include fastcgi_params;`, not after. nginx's stock `fastcgi_params`
+  sets `REQUEST_URI $request_uri;`, and `$request_uri` is the **outer
+  client request's own URI** even inside an `auth_request` subrequest —
+  not this location's own path. Since nginx uses last-directive-wins
+  for repeated `fastcgi_param` names, the `include` silently clobbered
+  `REQUEST_URI` back to whatever the visitor actually requested (`/`,
+  `/favicon.ico`, ...), so Laravel routed on *that* instead of ever
+  reaching `PreviewResolveController`: `/` matched `routes/web.php`'s
+  `Route::get('/', fn() => view('welcome'))` (200, no `X-Target-*`
+  headers → nginx's `proxy_pass http://$target_host:$target_port;`
+  became `http://:` → `"invalid port in upstream ':'"`); anything else
+  had no matching route → genuine Laravel 404 → `auth_request`
+  converts any non-2xx/401/403 subrequest status to a flat 500 before
+  `error_page` runs → `"auth request unexpected status: 404"`.
+  Confirmed by curling `/api/v1/internal/preview-resolve` directly
+  through the `api.ubiq-editor.space` server block with a real preview
+  token — correct `X-Target-Host`/`X-Target-Port` came back every
+  time, proving the controller/routing/migration side was never the
+  problem, only what `REQUEST_URI` looked like inside the subrequest.
+  **Fix:** reordered so `include fastcgi_params;` runs first, then
+  explicit `fastcgi_param REQUEST_URI`, `DOCUMENT_URI`, and
+  `SCRIPT_NAME` overrides after it so nothing downstream can reset
+  them back to the visitor's URL.
+
+- 2026-08-12 — F1f: after F1e's `nginx.conf` fix was committed and
+  pushed (and `git pull`/`nginx -s reload` both run on the server), the
+  exact same two errors kept appearing, byte-for-byte identical to
+  before the fix. Traced to `ubiq_nginx`'s bind mount of `nginx.conf`
+  being a **single-file** bind (`./nginx.conf:/etc/nginx/conf.d/
+  default.conf` in `docker-compose.yml`), which Docker attaches to the
+  specific inode present at container-creation time — not to the path.
+  `git pull`/`git checkout` don't edit a file in place, they write a
+  new file and rename it over the old path; that rename swaps which
+  inode the directory entry points to, but the container's mount
+  namespace stayed pinned to the old, now-orphaned inode. Confirmed via
+  `docker exec ubiq_nginx md5sum /etc/nginx/conf.d/default.conf` not
+  matching `md5sum nginx.conf` on the host, and the file sizes/mtimes
+  inside vs. outside the container disagreeing even right after a
+  `pull` + `nginx -s reload` (reload just re-read the same stale
+  mounted file — restart alone would have hit the same wall, since
+  restart keeps the same container and the same stale mount). Directory
+  bind mounts (`./backend:/var/www/html` for `ubiq_api`) don't have
+  this problem, only single-file ones. **Fix:** no code change — the
+  container has to actually be recreated, not just reloaded/restarted,
+  for a single-file bind mount to pick up a `git pull`'d file:
+  `docker compose up -d --force-recreate nginx`. Worth remembering for
+  any future edit to `nginx.conf` specifically (not an issue for
+  `backend/`'s directory mount).
+
+- 2026-08-12 — F1f (frontend, same PLAN letter reused — this is the
+  `ProjectRunner.tsx` half of the same symptom, not a new bug):
+  with F1e/F1f (nginx) both live, preview links load correctly, but
+  the Sandbox Server panel's log terminal + "Open Preview in New Tab"
+  view was gone, replaced silently by the live app rendered straight
+  in the panel (e.g. a project's own login screen appearing where logs
+  used to be). Root cause: `ProjectRunner.tsx` has two overlapping
+  blocks in its view area — the log terminal (`z-10`, shows while
+  `isRunning || isPollingActive || previewUrl`) and a "SUCCESS IFRAME"
+  block (`z-20`, shows when `previewUrl && !isMixedContent &&
+  !isRunning && !error`) that auto-embeds the running sandbox.
+  `isMixedContent` is `https page + http:// previewUrl` — back when
+  preview links were plain `http://` (pre-F1d), this was always true,
+  so the iframe block never rendered and the log terminal (with its
+  own "Open Preview in New Tab" banner, gated on `isMixedContent`) was
+  the only thing visible — this is the "as earlier" behavior being
+  asked for here. Now that preview links are `https://`,
+  `isMixedContent` is always false, flipping which block wins: the
+  iframe now renders unconditionally and, being `z-20` over the log
+  terminal's `z-10`, silently covers it on every run. This exact
+  mechanism was already flagged as a known consequence in F1d's note
+  above ("isMixedContent check correctly switched to its https-iframe
+  branch") — at the time assumed to need no frontend fix once
+  routing/cert landed, but the actual product intent turned out to be
+  logs-first (this panel is a build/run console, not an embedded
+  browser), so the iframe auto-embed itself needed to stop, not just
+  "work." **Fix:** the "Open Preview in New Tab" banner inside the log
+  terminal block is no longer gated on `isMixedContent` — it now shows
+  any time `previewUrl && !isRunning`, matching the pre-F1d behavior
+  unconditionally instead of only for the http case. The SUCCESS
+  IFRAME block is disabled (`false && ...`, left in place rather than
+  deleted) so it can never again cover the log panel; embedding could
+  come back later as an explicit opt-in if wanted, but isn't the
+  default.

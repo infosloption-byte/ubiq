@@ -278,9 +278,17 @@ export default function ProjectRunner({ projectId, onClose, onContainerStateChan
                              <div ref={bottomRef} className="animate-pulse text-emerald-400 mt-2">_</div>
                          </div>
 
-                         {previewUrl && isMixedContent && !isRunning && (
-                            <div className="mt-4 p-3 bg-amber-500/10 border border-amber-500/20 rounded-lg text-center shrink-0">
-                                <p className="text-amber-200 text-xs mb-2">Sandbox is running on HTTP. Browsers block unsafe embedding.</p>
+                         {/* Always show the in-panel "open in new tab" prompt once the
+                             sandbox is reachable — previously gated on isMixedContent
+                             (only true for http:// preview links, which is what let the
+                             SUCCESS IFRAME block below take over instead once preview
+                             links became https://). Ubiq's UX here is deliberately
+                             logs-first: this panel is a build/run console, not an
+                             embedded browser — the iframe block below is now unused
+                             for that reason but left in place rather than deleted, in
+                             case embedding is wanted as an opt-in later. */}
+                         {previewUrl && !isRunning && (
+                            <div className="mt-4 p-3 bg-emerald-500/10 border border-emerald-500/20 rounded-lg text-center shrink-0">
                                 <a 
                                     href={previewUrl} 
                                     target="_blank" 
@@ -326,8 +334,18 @@ export default function ProjectRunner({ projectId, onClose, onContainerStateChan
                     </div>
                 )}
 
-                {/* 3. SUCCESS IFRAME */}
-                {previewUrl && !isMixedContent && !isRunning && !error && (
+                {/* 3. SUCCESS IFRAME — disabled. This used to only render for
+                     non-mixed-content (http) preview URLs, which in practice was
+                     never true, so it never fired. Now that preview links are
+                     https it fired unconditionally and, being z-20 over the log
+                     terminal's z-10, silently covered the logs panel for good.
+                     Ubiq's sandbox panel is meant to stay a build/run console —
+                     "Open Preview in New Tab" (in the log terminal block above
+                     and in the header) is the intended way to view the running
+                     app, not an embedded iframe. Left commented rather than
+                     deleted in case iframe embedding becomes an explicit
+                     opt-in feature later. */}
+                {false && previewUrl && !isMixedContent && !isRunning && !error && (
                     <iframe 
                         src={previewUrl} 
                         className="w-full h-full border-none bg-white relative z-20"
