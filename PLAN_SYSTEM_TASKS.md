@@ -300,7 +300,7 @@ team plan that doesn't exist yet).
         — 2026-08-11, see notes. Scoped to Laravel only + opt-in via
         new `db_engine` project column, both deliberate narrowings not
         in the original wording — see notes for why.
-  - [ ] F1d — Ephemeral preview links: signed token derived from a
+  - [~] F1d — Ephemeral preview links: signed token derived from a
         running `SandboxRun` row, resolving
         `preview-{token}.ubiq-editor.space` proxied to that run's
         allocated port; link dies the moment existing reaping logic
@@ -308,6 +308,28 @@ team plan that doesn't exist yet).
         (`*.ubiq-editor.space` via certbot DNS-01). Can be built in
         parallel with F1b/F1c — only depends on existing `SandboxRun`
         tracking. No deploy history/rollback/uptime story by design.
+        `nginx.conf`'s regex `server_name`/`auth_request`/
+        `PreviewResolveController` chain deployed and token resolution
+        itself works — a live preview URL now generates and loads a
+        page. Two things still broken before this can ship, both at
+        the **master_nginx** layer (outside this repo, not yet
+        located/fixed — see notes): (1) no wildcard cert exists yet for
+        `*.ubiq-editor.space`, so every preview link is served under
+        the wrong cert (`NET::ERR_CERT_COMMON_NAME_INVALID`); (2)
+        master_nginx has no `server_name` match for the
+        `preview-*.ubiq-editor.space` pattern at all, so TLS-terminated
+        requests are falling through to whatever vhost is acting as
+        the default/fallback server — confirmed landing on the **Asset
+        Tracking** project instead of the sandbox's own dev server.
+        Same root-cause family (missing/wrong routing at a layer this
+        repo doesn't control) as the frontend-container regression
+        this same nginx.conf rewrite caused — see notes. The sandbox
+        UI's apparent "logs disappeared" symptom traced to the SAME
+        cause (see notes) — `ProjectRunner.tsx`'s `isMixedContent`
+        check correctly switched to its https-iframe branch once
+        preview links became `https://`, it's just embedding a URL
+        still broken by (1)/(2) above; no frontend fix needed once
+        those land. — 2026-08-11, see notes
 
 - [ ] **G2 — Multi-file diff review screen + user-controlled autonomy**
   - [ ] G2a — Build the batch review screen: file list with
@@ -376,6 +398,122 @@ team plan that doesn't exist yet).
 
 (Add dated entries here when a design decision changes mid-build — e.g. a
 feature_key gets renamed, a limit default changes, a phase gets reordered.)
+
+- 2026-08-11 — F1d's `nginx.conf` rewrite (consolidating three
+  `server` blocks into one file so the preview regex `server_name` +
+  `resolver` could share an nginx instance) broke the live root
+  domain. Reported as: `https://ubiq-editor.space/` returning a plain
+  nginx `500 Internal Server Error` page (nginx/1.31.2 default error
+  page, not a Laravel error) immediately on landing the change.
+    - **Root cause:** the rewrite changed the `ubiq-editor.space`
+      server block from proxying to the `frontend` container to
+      serving static files directly (`root /var/www/frontend;
+      try_files $uri $uri/ /index.html;`). The `nginx` service in
+      `docker-compose.yml` only mounts `./backend:/var/www/html` — it
+      has no volume, bind mount, or build step that puts anything at
+      `/var/www/frontend`. That path never existed inside the
+      `ubiq_nginx` container, so `try_files` against a nonexistent
+      root threw nginx's own internal 500 before the request ever
+      reached PHP-FPM or app code. The actual built frontend assets
+      were sitting the whole time in the separate `frontend` container
+      (its own `nginx:alpine`, own `nginx.frontend.conf`, serving
+      `/usr/share/nginx/html`) — already on `ubiq-net`, just no longer
+      reachable from anywhere.
+    - **Fix:** reverted that block to `proxy_pass http://frontend:80;`
+      (plus standard `X-Forwarded-*`/`Host` headers) instead of
+      `root`/`try_files` — same container-name-resolves-via-Docker's-
+      embedded-DNS pattern already used for `api:9000` fastcgi two
+      blocks down. No new volumes, mounts, or build changes needed;
+      the working nginx was already there, just unproxied. Root domain
+      confirmed back up after this.
+    - **Still open, found while re-testing after the fix above (not
+      yet fixed, both outside this repo):** (1) a generated preview
+      link (`preview-{token}.ubiq-editor.space`) loads over HTTPS with
+      `NET::ERR_CERT_COMMON_NAME_INVALID` — no wildcard cert for
+      `*.ubiq-editor.space` has actually been issued yet (F1d's own
+      task text flagged this as needed, just hadn't been done). (2)
+      more concerning: the page that *does* load under that mismatched
+      cert is the **Asset Tracking** project's login screen, not the
+      sandbox's own dev server — meaning master_nginx (the host-level
+      TLS-terminating reverse proxy in front of every project's
+      container, not part of this repo) has no `server_name` entry
+      matching `preview-*.ubiq-editor.space` at all, so the request is
+      falling through to whatever vhost is currently acting as
+      master_nginx's default/fallback server, which happens to be
+      Asset Tracking's. Both need a wildcard cert (DNS-01) and a
+      matching master_nginx `server_name`/`proxy_pass` block added at
+      that layer, routing to 127.0.0.1:8082 same as the plain
+      `ubiq-editor.space` domain already does — this repo's own
+      `nginx.conf` regex/`auth_request`/token-resolution chain is
+      confirmed working once a request actually reaches it.
+    - **Follow-up same session — turned out to be the SAME bug, not a
+      second one:** the sandbox UI's "Sandbox Server" panel appeared
+      to lose its live server logs and inline "Open Preview" link
+      after a run. Traced to `ProjectRunner.tsx`'s `isMixedContent`
+      check (`https:` page + `http:` previewUrl) — pre-F1d preview
+      URLs were plain `http://`, which tripped that check and kept
+      the component on its Log Terminal branch (block 1, with its own
+      "Open Preview in New Tab" link) since browsers won't embed HTTP
+      in an HTTPS iframe. F1d's `https://preview-{token}...` links
+      correctly clear that check, so the component now switches to
+      its success-iframe branch (block 3) as designed — but the
+      iframe is loading a URL still broken by the cert/routing issue
+      above, so it just renders the browser's own native "page might
+      be temporarily down" error inside the iframe. Header's "Open
+      Tab" link (unconditional on `previewUrl`, separate from block
+      1's mixed-content-only one) is still rendering the whole time,
+      just pointing at that same broken URL. No frontend code change
+      needed here — once the wildcard cert + master_nginx routing is
+      fixed, this resolves on its own. Worth a follow-up hardening
+      pass later regardless: there's currently no fallback UI at all
+      if a *genuinely* broken preview URL ever reaches the iframe
+      branch again (e.g. run stopped mid-view) — iframes can't
+      reliably signal cross-origin load failure back to the parent,
+      so there's no "having trouble? view logs" escape hatch once
+      you're past the mixed-content branch.
+
+- 2026-08-11 — F1d, continued: with the master_nginx wildcard-cert +
+  routing fix live (added a `preview-*.ubiq-editor.space` server block
+  to `master_nginx`'s `ubiq.conf`, TLS via the new `certbot --manual
+  --preferred-challenges dns` wildcard lineage
+  `ubiq-editor.space-0001`, `proxy_pass`ing to the same
+  `127.0.0.1:8082` the root domain already uses), the cert/routing
+  layer confirmed fixed — but preview links then hit a plain nginx 500
+  again, this time from *inside* `ubiq_nginx`'s own `nginx.conf`
+  (the container this repo actually controls). Two compounding bugs,
+  both in the F1d `auth_request` chain itself:
+    - **Bug A:** `auth_request /_preview_resolve;` fired at a path that
+      was never actually registered. `routes/api.php`'s
+      `Route::get('/internal/preview-resolve', ...)` reads like a bare
+      path, but `bootstrap/app.php`'s `api:` entry gives every route
+      in that file an implicit `/api` prefix, and the file's own
+      `Route::prefix('v1')` group adds `/v1` on top — so the real,
+      effective path is `/api/v1/internal/preview-resolve`. Every
+      token, valid or not, was hitting Laravel's own unmatched-route
+      404.
+    - **Bug B, the one that actually produced the raw 500 (would have
+      bitten even with Bug A fixed):** nginx's `auth_request` module
+      only ever passes through `2xx`, `401`, or `403` from the
+      subrequest to the visitor — *any other status, 404 included,
+      becomes a flat 500 before `error_page` ever gets a chance to
+      remap it.* `PreviewResolveController::deny()` was returning 404
+      for an invalid/stale token, so even a correctly-routed "this
+      token doesn't exist" response would still have 500'd instead of
+      showing the intended "invalid or no longer active" message —
+      the original `error_page 401 403 404 = @preview_not_found` line
+      was written assuming 404 flows through normally, which
+      `auth_request` never allows.
+    - **Fix:** `nginx.conf`'s `location` and `auth_request` both
+      updated to the real `/api/v1/internal/preview-resolve` path;
+      `PreviewResolveController::deny()` changed to return `403`
+      instead of `404`; `error_page` mapping narrowed to `401 403`
+      (404 dropped — it can never legitimately arrive here now, auth
+      subrequests only ever produce 2xx/401/403 by design). Not yet
+      re-verified live against an actual running sandbox after this
+      specific edit — next step once deployed is generating a fresh
+      preview link and confirming both the happy path (loads the real
+      sandbox) and the deliberate-failure path (an expired/garbage
+      token shows the friendly message, not a raw 500).
 
 - 2026-08-11 — F0c (Terminal panel exec'ing into a nonexistent
   container) found and fixed. Reported as: "Sandbox is running (Live

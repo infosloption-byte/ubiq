@@ -20,7 +20,7 @@ use Illuminate\Support\Facades\Cache;
  * `proxy_pass` target — see nginx.conf for the full mechanism. This
  * endpoint itself proxies nothing; it only says which container:port a
  * valid, still-running token currently maps to (200) or that it doesn't
- * (404, which nginx turns into its own 404 for the visitor).
+ * (403 — see the note below on why not a literal 404).
  *
  * Deliberately public (no auth:sanctum) — the person viewing a preview
  * link is very often not the project owner and has no Ubiq session at
@@ -28,6 +28,13 @@ use Illuminate\Support\Facades\Cache;
  * itself is the credential; see SandboxRun::getPreviewTokenAttribute()
  * for why a signed, unstored token is enough here without a bearer auth
  * layer on top.
+ *
+ * Returns 200 (with X-Target-Host/X-Target-Port) or 403 — deliberately
+ * not 404 for the failure case. nginx's auth_request module only ever
+ * passes through 2xx, 401, or 403 from this subrequest to the visitor;
+ * any other status becomes a flat 500 before nginx.conf's error_page
+ * mapping gets a chance to turn it into the friendly "invalid or no
+ * longer active" message. See nginx.conf's @preview_not_found block.
  */
 class PreviewResolveController extends Controller
 {
@@ -100,6 +107,13 @@ class PreviewResolveController extends Controller
 
     private function deny(): Response
     {
-        return response('', 404);
+        // 403, not 404: nginx's auth_request module only ever passes
+        // through 2xx, 401, or 403 from this subrequest to the client —
+        // any other status (404 included) gets converted into a flat,
+        // unrecoverable 500 before nginx.conf's error_page mapping ever
+        // sees it. See nginx.conf's @preview_not_found block, which maps
+        // this 403 to the actual "invalid or no longer active" message
+        // the visitor sees.
+        return response('', 403);
     }
 }
