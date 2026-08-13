@@ -2766,3 +2766,31 @@ Decisions made 2026-08-08 (previously open questions):
   underneath generalizes without rework, which was the entire point of
   G1d as scoped ("confirm... to save rework", not "build the admin
   view now").
+
+- 2026-08-13 — F3e bugfix: opening CreateProjectDialog crashed with
+  React error #310 ("Rendered more hooks than during the previous
+  render") the first time the GitHub tab's picker code shipped. Root
+  cause: the new `useEffect` (GitHub-connection check) was placed
+  AFTER the existing `if (!isOpen) return null` early return.
+  ProjectsPage keeps this dialog mounted at all times and just toggles
+  the `isOpen` prop rather than conditionally rendering the component
+  itself, so React reuses the same fiber across open/close — while
+  closed, the early return skipped that `useEffect` entirely; the
+  moment `isOpen` flipped true, it suddenly ran. Hooks must execute
+  unconditionally, in the same order, on every render of a given
+  instance, so a hook appearing only on SOME renders (gated by an
+  early return above it) is exactly what #310 catches.
+
+  Fix: moved the early return to after every hook call (all 17
+  `useState`s + the one `useEffect`), and added `isOpen` itself to
+  both the effect's own guard condition and its dependency array
+  (previously implicit/assumed via the now-removed early return) so
+  the connection check still only actually does anything while the
+  dialog is genuinely open.
+
+  Lesson for next time a hook gets added to an existing component:
+  grep for `return null`/other early returns above the insertion point
+  before adding a new hook, not just below it — this file already had
+  one, and it was easy to miss since it was declared once at the very
+  top of the function and easy to lose track of scrolling down to add
+  new logic underneath.

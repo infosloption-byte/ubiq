@@ -120,14 +120,25 @@ export default function CreateProjectDialog({ isOpen, onClose, onSuccess }: Crea
   // Zip Import Specific
   const [importFile, setImportFile] = useState<File | null>(null);
 
-  if (!isOpen) return null;
-
   // F3e: lazily check GitHub connection + load repos the first time the
   // GitHub tab is opened, not on every dialog mount — most project
   // creations never touch this tab, so checking eagerly would add an
   // extra round-trip to a flow that doesn't need it.
+  //
+  // Bug fixed 2026-08-13: this useEffect used to sit AFTER the
+  // `if (!isOpen) return null` early return below. ProjectsPage keeps
+  // this dialog mounted and just toggles `isOpen` rather than
+  // conditionally rendering the whole component, so React reuses the
+  // same fiber across open/close cycles — while closed, the early
+  // return skipped this hook entirely; the moment `isOpen` flipped
+  // true, it suddenly ran. A different number of hooks between two
+  // renders of the same instance is exactly React error #310
+  // ("Rendered more hooks than during the previous render"). Hooks
+  // must be called unconditionally, in the same order, every render —
+  // so the early return has to come after every hook, not before any
+  // of them.
   useEffect(() => {
-    if (activeTab !== 'github' || githubConnected !== null) return;
+    if (!isOpen || activeTab !== 'github' || githubConnected !== null) return;
 
     githubAuthAPI.status()
       .then(res => {
@@ -141,7 +152,9 @@ export default function CreateProjectDialog({ isOpen, onClose, onSuccess }: Crea
         setGithubConnected(false);
         setRepoMode('manual');
       });
-  }, [activeTab]);
+  }, [isOpen, activeTab]);
+
+  if (!isOpen) return null;
 
   const loadRepos = () => {
     setReposLoading(true);
