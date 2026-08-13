@@ -13,13 +13,14 @@ import PlanUsageWidget from '../components/PlanUsageWidget';
 import ActiveSessionsPanel from '../components/ActiveSessionsPanel';
 import PasswordPanel from '../components/PasswordPanel';
 import ConnectedAccountsPanel from '../components/ConnectedAccountsPanel';
+import ConnectorsPanel from '../components/ConnectorsPanel';
 import DeleteAccountPanel from '../components/DeleteAccountPanel';
 import PrivacyPanel from '../components/PrivacyPanel';
 import { 
   User, Key, Monitor, Save, 
   CheckCircle2, Loader2,
   Eye, EyeOff, CreditCard, Calendar, Clock,
-  ShieldCheck, AlertTriangle, XCircle, LogOut, Lock
+  ShieldCheck, AlertTriangle, XCircle, LogOut, Lock, Link2
 } from 'lucide-react';
 
 // D8 fix (PLAN_SYSTEM_TASKS.md Phase D): the three providers this UI has
@@ -41,7 +42,7 @@ const AI_KEY_PROVIDERS: Array<{ id: 'openrouter' | 'mistral' | 'google'; label: 
 export default function SettingsPage() {
   const { user, setUser, logout } = useAuthStore();
   const navigate = useNavigate();
-  const [activeTab, setActiveTab] = useState<'ai' | 'editor' | 'billing' | 'general' | 'privacy'>('ai');
+  const [activeTab, setActiveTab] = useState<'ai' | 'editor' | 'connectors' | 'billing' | 'general' | 'privacy'>('ai');
   const [saving, setSaving] = useState(false);
   const [successMsg, setSuccessMsg] = useState('');
 
@@ -146,10 +147,19 @@ export default function SettingsPage() {
     }
   }, [user]);
 
-  // ── Check for ?tab=billing in URL (e.g. from Sidebar UPGRADE link) ─────────
+  // ── Check for ?tab=billing / ?tab=connectors in URL (e.g. from
+  // Sidebar UPGRADE link, or a future "Manage in Settings" link from
+  // CreateProjectDialog/SourceControlPanel's own Connect buttons) ────────────
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    if (params.get('tab') === 'billing') setActiveTab('billing');
+    const tab = params.get('tab');
+    if (tab === 'billing' || tab === 'connectors') setActiveTab(tab);
+    // github_connected / github_error land here with no explicit
+    // ?tab= param (see GithubOAuthController::callback()) — route
+    // those to Connectors too so the confirmation/error ConnectorsPanel
+    // shows is actually visible instead of landing on whatever tab
+    // happened to be default.
+    if (params.get('github_connected') || params.get('github_error')) setActiveTab('connectors');
   }, []);
 
   const showSuccess = (msg: string) => {
@@ -374,6 +384,7 @@ export default function SettingsPage() {
             <div className="flex flex-row md:flex-col gap-2 overflow-x-auto -mx-6 px-6 pb-1 md:mx-0 md:px-0 md:pb-0 md:overflow-visible md:w-64 shrink-0">
               <TabButton id="ai"      label="AI Models (BYOK)"  icon={Key} />
               <TabButton id="editor"  label="Editor Config"      icon={Monitor} />
+              <TabButton id="connectors" label="Connectors"      icon={Link2} />
               <TabButton id="billing" label="Billing & Plan"     icon={CreditCard} />
               <TabButton id="general" label="Account"            icon={User} />
               <TabButton id="privacy" label="Privacy"            icon={Lock} />
@@ -465,6 +476,9 @@ export default function SettingsPage() {
                   </div>
                 </div>
               )}
+
+              {/* ── CONNECTORS TAB ────────────────────────────────────────── */}
+              {activeTab === 'connectors' && <ConnectorsPanel />}
 
               {/* ── BILLING TAB ───────────────────────────────────────────── */}
               {activeTab === 'billing' && (

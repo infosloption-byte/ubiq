@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { projectAPI, githubAuthAPI, getAuthToken } from '../services/api';
 import axios from 'axios';
 import { 
@@ -89,6 +90,7 @@ interface CreateProjectDialogProps {
 }
 
 export default function CreateProjectDialog({ isOpen, onClose, onSuccess }: CreateProjectDialogProps) {
+  const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState<'manual' | 'import' | 'github'>('manual');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -182,9 +184,13 @@ export default function CreateProjectDialog({ isOpen, onClose, onSuccess }: Crea
       // leave the SPA and land on github.com (see githubAuthAPI's own
       // comment in services/api.ts).
       window.location.href = res.data.redirect_url;
-    } catch {
+    } catch (err: any) {
       setConnecting(false);
-      setRepoLoadError('Could not start GitHub connection. Please try again.');
+      // Surface the backend's specific message when it has one (e.g.
+      // 'github_not_configured' — server-side env vars missing) rather
+      // than a generic failure, since that one's actually actionable
+      // for whoever's deploying this, not just the end user.
+      setRepoLoadError(err.response?.data?.message || 'Could not start GitHub connection. Please try again.');
     }
   };
 
@@ -371,15 +377,28 @@ export default function CreateProjectDialog({ isOpen, onClose, onSuccess }: Crea
                   <p className="text-slate-300">
                     <strong className="text-white">Connect your GitHub account</strong> to browse and pick a repo directly, instead of pasting a URL and token by hand.
                   </p>
-                  <button
-                    type="button"
-                    onClick={handleConnectGithub}
-                    disabled={connecting}
-                    className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-ubiq-accent text-white text-xs font-medium hover:opacity-90 transition-opacity disabled:opacity-50"
-                  >
-                    {connecting ? <div className="w-3 h-3 border-2 border-white/40 border-t-white rounded-full animate-spin" /> : <CodeBracketIcon className="w-3.5 h-3.5" />}
-                    Connect GitHub
-                  </button>
+                  <div className="flex items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={handleConnectGithub}
+                      disabled={connecting}
+                      className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-ubiq-accent text-white text-xs font-medium hover:opacity-90 transition-opacity disabled:opacity-50"
+                    >
+                      {connecting ? <div className="w-3 h-3 border-2 border-white/40 border-t-white rounded-full animate-spin" /> : <CodeBracketIcon className="w-3.5 h-3.5" />}
+                      Connect GitHub
+                    </button>
+                    {/* Same connect() flow as the button above — this
+                        just goes through the account-level Connectors
+                        tab (canonical place to manage it) instead of
+                        connecting inline and staying in this dialog. */}
+                    <button
+                      type="button"
+                      onClick={() => { onClose(); navigate('/settings?tab=connectors'); }}
+                      className="text-slate-400 hover:text-white text-xs underline underline-offset-2 transition-colors"
+                    >
+                      Manage in Settings
+                    </button>
+                  </div>
                 </div>
               )}
 

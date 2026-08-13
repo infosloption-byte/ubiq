@@ -50,6 +50,25 @@ class GithubOAuthController extends Controller
      */
     public function connect(Request $request)
     {
+        // GITHUB_CLIENT_ID has no fallback default (unlike
+        // GITHUB_REDIRECT_URI just below, which does) — if it's unset
+        // or the config cache predates it being added to .env,
+        // `config('services.github.client_id')` silently resolves to
+        // null/empty, and GitHub's own /login/oauth/authorize endpoint
+        // returns a bare 404 page for a missing/empty client_id (this
+        // is documented GitHub behavior, not specific to this app —
+        // it can't tell a blank client_id from "no such app exists").
+        // Without this guard the failure surfaces as an inexplicable
+        // GitHub 404 with zero context; fail fast here instead, before
+        // ever sending the browser to github.com.
+        if (empty(config('services.github.client_id')) || empty(config('services.github.client_secret'))) {
+            Log::error('[GithubOAuth] connect() called but GITHUB_CLIENT_ID/GITHUB_CLIENT_SECRET are not configured on this server.');
+            return response()->json([
+                'error' => 'github_not_configured',
+                'message' => 'GitHub connection isn\'t configured on this server yet. Set GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET (see .env.example) and clear the config cache, or paste a repository URL manually for now.',
+            ], 503);
+        }
+
         $ticket = Str::random(40);
         Cache::put("github_connect:{$ticket}", $request->user()->id, now()->addMinutes(10));
 

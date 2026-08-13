@@ -223,6 +223,11 @@ team plan that doesn't exist yet).
         via the new OAuth flow, then clear the old `localStorage` value.
   - [x] F3e — Repo picker UI using the real OAuth token scopes, instead
         of pasting a repo URL by hand. — 2026-08-13, see notes below
+  - [x] F3f — Settings → Connectors: account-level page to connect/
+        disconnect GitHub (Claude's own Connectors settings was the
+        explicit reference point), separate from the two existing
+        inline entry points (SourceControlPanel, CreateProjectDialog's
+        GitHub tab). — 2026-08-13, see notes below
 
 - [x] **G1 — Usage transparency dashboard** — 2026-08-09. Most of this
       turned out to already be built under Phase C1/C2/E2b, before the
@@ -2794,3 +2799,96 @@ Decisions made 2026-08-08 (previously open questions):
   one, and it was easy to miss since it was declared once at the very
   top of the function and easy to lose track of scrolling down to add
   new logic underneath.
+
+- 2026-08-13 — F3 diagnosis: "Connect GitHub" redirecting to a bare
+  GitHub 404 (`github.com/login/oauth/authorize?...&client_id=...`)
+  instead of the GitHub authorization screen. This is the exact
+  unverified prerequisite F3's own original note flagged back on
+  2026-08-09 ("no live GitHub OAuth App available... before this goes
+  live: register the real GitHub OAuth App, set
+  GITHUB_CLIENT_ID/GITHUB_CLIENT_SECRET") — not a code regression from
+  F3e. GitHub's `/login/oauth/authorize` returns a 404 (not a
+  descriptive error) whenever `client_id` is missing/empty, which is
+  exactly what happens when `GITHUB_CLIENT_ID` isn't set in the live
+  server's `.env` (it has no fallback default, unlike
+  `GITHUB_REDIRECT_URI` which does) — confirmed `.env.example` didn't
+  even have a `GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET` placeholder
+  before this entry, reinforcing that this was never actually wired up
+  server-side.
+
+  **Action needed on the live server (not fixable from this repo
+  alone):** register a GitHub OAuth App at
+  github.com/settings/developers with its callback URL set to
+  `https://api.ubiq-editor.space/api/v1/auth/github/callback` (or
+  whatever `GITHUB_REDIRECT_URI` is set to), put the resulting
+  `GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET` in the server's `.env`, and
+  run `php artisan config:clear` (if `config:cache` was ever run,
+  editing `.env` alone won't take effect — same class of gotcha as the
+  `docker compose restart api` note elsewhere in this file for
+  `optimize:clear` not resetting opcache).
+
+  **What was fixed here:** `GithubOAuthController::connect()` now
+  checks both config values up front and fails with a clear
+  `github_not_configured` 503 (surfaced verbatim in
+  `CreateProjectDialog.tsx`'s repo-picker error banner) instead of
+  silently building a URL that GitHub 404s on with zero context —
+  so if this ever regresses again (or shows up on a fresh staging
+  environment), it'll say so directly instead of looking like a broken
+  redirect. Also added the missing `GITHUB_CLIENT_ID`/
+  `GITHUB_CLIENT_SECRET`/`GITHUB_REDIRECT_URI` placeholders (with the
+  config-cache gotcha called out) to `.env.example`, since they were
+  simply absent before.
+
+- 2026-08-13 — F3f: new Settings → Connectors tab
+  (`ConnectorsPanel.tsx`), the account-level place to connect/
+  disconnect GitHub — modeled explicitly on Claude's own Connectors
+  settings UX per the product ask ("in Claude first user connect
+  github to user claude profile, then Claude can access user github").
+
+  No new backend work needed — this is a UI-only addition on top of
+  the already-existing `githubAuthAPI.status()/connect()/disconnect()`
+  (F3a-F3d) and `UserGithubToken` (already tracks
+  `github_username`/`github_avatar_url`/`connected_at`/`last_used_at`,
+  all of which `status()` already returned and nothing in the frontend
+  displayed until now).
+
+  Deliberately kept separate from `ConnectedAccountsPanel.tsx` ("Login
+  Methods" in the Account tab, email/Google) rather than merging them
+  — that panel is about how you sign IN to Ubiq; this one is about
+  what Ubiq can access on your behalf once you're already signed in.
+  Conflating the two would make an account audit ("what have I given
+  access to") harder to reason about later, not easier.
+
+  Also handles `?github_connected=1` / `?github_error=...` — the
+  actual redirect targets `GithubOAuthController::callback()` already
+  used, landing on `/settings` either way, but nothing in the frontend
+  ever read either param before this panel existed. A failed connect
+  (expired ticket, GitHub itself rejecting the callback) previously
+  landed back on Settings with zero explanation; now surfaces the
+  specific reason, and a successful one auto-switches to the
+  Connectors tab and re-checks status instead of leaving the user to
+  notice on their own.
+
+  The two pre-existing entry points — `SourceControlPanel.tsx` (inside
+  an open project) and `CreateProjectDialog.tsx`'s GitHub tab (F3e,
+  mid-project-creation) — are unchanged and still call the exact same
+  connect()/status() endpoints; this doesn't replace them, it adds the
+  one place that was actually missing. Added a "Manage in Settings"
+  link next to CreateProjectDialog's inline Connect button, closing
+  the dialog and routing to `/settings?tab=connectors`, so someone who
+  lands there first still finds their way to the canonical page rather
+  than the two surfaces feeling disconnected from each other.
+
+  **On "does Ubiq need a GitHub account, or does this scale to many
+  users" (the actual question that prompted this):** already handled
+  correctly by the existing F3 design — one GitHub OAuth App belonging
+  to Ubiq (registered once, see the 2026-08-13 diagnosis entry above
+  for the exact steps and the `.env` vars it needs), not one per user.
+  Each individual user goes through their own OAuth consent screen and
+  gets their own row in `UserGithubToken` with their own access token
+  — this is the standard "one app, many users" OAuth pattern, already
+  what F3a-F3d built, nothing new needed here to make it scale.
+  Concretely: GitHub's OAuth Apps get a 5,000 requests/hour rate limit
+  **per user access token**, not a single limit shared across every
+  Ubiq user — so this doesn't get tighter as more people connect their
+  accounts; each connected user's usage is independent.
