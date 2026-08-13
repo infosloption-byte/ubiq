@@ -48,12 +48,9 @@ class UsageController extends Controller
         // different things about the same reason code. Capped at 10 and
         // scoped to denials only (allowed = false) — this endpoint isn't
         // trying to be a general audit log, just "what recently blocked
-        // me."
-        $recentDenials = PlanActionLog::where('user_id', $user->id)
-            ->where('allowed', false)
-            ->orderByDesc('created_at')
-            ->limit(10)
-            ->get(['action_key', 'reason', 'limit_value', 'current_usage', 'created_at'])
+        // me." Query itself lives in recentDenialsQuery() below — see
+        // that method's docblock for the G1d generalization work.
+        $recentDenials = $this->recentDenialsQuery($user->id, 10)
             ->map(fn (PlanActionLog $log) => [
                 'action_key'    => $log->action_key,
                 'reason'        => $log->reason,
@@ -98,6 +95,42 @@ class UsageController extends Controller
                 'sharing_enabled'              => $planService->limitFor($user, 'sharing.enabled'),
             ],
         ]);
+    }
+
+    /**
+     * G1d (PLAN_SYSTEM_TASKS.md Phase F, follow-up to G1a): the query
+     * behind planUsage()'s "recent denials" list, pulled out so the
+     * exact same shape works instance-wide once Bucket 3's admin
+     * analytics needs it — pass `$userId = null` for "any user" there
+     * instead of duplicating this query. G1d's task was specifically to
+     * *confirm* that generalization is actually free, not just assume
+     * it — it wasn't quite: `plan_action_logs` was only indexed on
+     * `(user_id, created_at)` and `(action_key, allowed, created_at)`
+     * (see that table's original migration), neither of which covers a
+     * plain `allowed = false ORDER BY created_at DESC` scan across every
+     * user. Migration 2026_08_13_000001 adds the missing
+     * `(allowed, created_at)` index so this stays a real index scan
+     * instead of a full-table scan once `$userId` is actually passed as
+     * null somewhere.
+     *
+     * Deliberately NOT exposed as an admin endpoint yet — that's real
+     * Bucket 3 scope (who's authorized to query other users' denial
+     * history, pagination past a flat limit, joining user identity for
+     * display). This only proves the underlying query generalizes
+     * without rework; the admin surface around it is still intentionally
+     * unbuilt. `id`/`user_id` are selected (unlike the old inline query)
+     * specifically so a future caller with `$userId = null` can tell
+     * whose denial each row is — the current per-user caller just
+     * ignores those two fields in its own `->map()`.
+     */
+    private function recentDenialsQuery(?int $userId, int $limit = 10)
+    {
+        return PlanActionLog::query()
+            ->when($userId !== null, fn ($q) => $q->where('user_id', $userId))
+            ->where('allowed', false)
+            ->orderByDesc('created_at')
+            ->limit($limit)
+            ->get(['id', 'user_id', 'action_key', 'reason', 'limit_value', 'current_usage', 'created_at']);
     }
 
     /**

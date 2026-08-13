@@ -260,6 +260,8 @@ export const githubAuthAPI = {
     status: () => api.get('/user/github'),
     connect: () => api.post('/auth/github/connect'),
     disconnect: () => api.delete('/user/github'),
+    // F3e: repo picker backing CreateProjectDialog.tsx's GitHub tab.
+    repos: () => api.get('/user/github/repos'),
 };
 
 // --- HELPER FUNCTIONS ---

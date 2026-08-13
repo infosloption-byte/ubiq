@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\UserGithubToken;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Laravel\Socialite\Facades\Socialite;
@@ -156,5 +157,125 @@ class GithubOAuthController extends Controller
         UserGithubToken::where('user_id', $request->user()->id)->delete();
 
         return response()->json(null, 204);
+    }
+
+    /**
+     * GET /user/github/repos — authenticated.
+     *
+     * F3e (PLAN_SYSTEM_TASKS.md Phase F): the repo picker this powers
+     * replaces "paste a repo URL by hand" in CreateProjectDialog.tsx
+     * with a searchable list of repos the connected account can
+     * actually see — using the real OAuth token's granted scopes
+     * (`repo`, from self::SCOPES above) rather than a second manual
+     * PAT paste. `store()`/`importFromGithub()` in ProjectController
+     * are untouched by this: they already accept a plain
+     * `repository_url` string and already prefer the stored OAuth
+     * token over a pasted one (see F3c) — this endpoint only needs to
+     * *supply* that URL, not change how it's consumed.
+     *
+     * GitHub's `GET /user/repos` is the right endpoint rather than
+     * `GET /user/starred` or the search API: it returns every repo the
+     * token's scopes grant access to — owned, collaborator, and org
+     * repos — which matches "what could this user plausibly want to
+     * import", not just what they personally own.
+     *
+     * Client-side search/filter (same pattern as the Sandboxes list
+     * page) rather than a server-side `q=` search param: GitHub's own
+     * repo *search* API is a different, separately-rate-limited
+     * endpoint with its own query syntax, and paginating "all repos
+     * this token can see, most recently updated first" already gives
+     * the frontend everything it needs to filter locally without a
+     * second network round-trip per keystroke.
+     */
+    public function repos(Request $request)
+    {
+        $token = UserGithubToken::where('user_id', $request->user()->id)->first();
+
+        if (!$token) {
+            return response()->json([
+                'error' => 'not_connected',
+                'message' => 'Connect your GitHub account first.',
+            ], 409);
+        }
+
+        try {
+            $repos = [];
+            // GitHub caps per_page at 100; walk a few pages so an active
+            // account's less-recently-touched repos still show up in the
+            // picker without needing every repo they've ever made. 300
+            // covers the overwhelming majority of individual/small-org
+            // accounts this product targets; a "load more" flow would be
+            // the honest next step past that, not fetching unbounded pages
+            // synchronously inside one request.
+            for ($page = 1; $page <= 3; $page++) {
+                $response = Http::withToken($token->access_token)
+                    ->withHeaders(['Accept' => 'application/vnd.github+json'])
+                    ->timeout(15)
+                    ->get('https://api.github.com/user/repos', [
+                        'per_page' => 100,
+                        'page' => $page,
+                        'sort' => 'updated',
+                        'affiliation' => 'owner,collaborator,organization_member',
+                    ]);
+
+                if ($response->status() === 401) {
+                    // Token revoked on GitHub's side (user removed the
+                    // OAuth App grant, rotated it, etc.) without going
+                    // through Ubiq's own disconnect() — surface that
+                    // distinctly so the frontend can prompt reconnect
+                    // instead of showing a generic error.
+                    return response()->json([
+                        'error' => 'token_invalid',
+                        'message' => 'Your GitHub connection has expired or been revoked. Please reconnect.',
+                    ], 401);
+                }
+
+                if (!$response->successful()) {
+                    Log::error('[GithubOAuth] repos() GitHub API error', [
+                        'user_id' => $request->user()->id,
+                        'status' => $response->status(),
+                        'body' => $response->body(),
+                    ]);
+                    return response()->json([
+                        'error' => 'github_api_error',
+                        'message' => 'GitHub API request failed. Please try again in a moment.',
+                    ], 502);
+                }
+
+                $page_data = $response->json();
+                if (empty($page_data)) {
+                    break;
+                }
+                $repos = array_merge($repos, $page_data);
+                if (count($page_data) < 100) {
+                    break; // last page
+                }
+            }
+
+            $token->update(['last_used_at' => now()]);
+
+            return response()->json([
+                'repos' => collect($repos)->map(fn (array $r) => [
+                    'name' => $r['name'],
+                    'full_name' => $r['full_name'],
+                    'html_url' => $r['html_url'],
+                    'clone_url' => $r['clone_url'],
+                    'private' => $r['private'],
+                    'default_branch' => $r['default_branch'] ?? 'main',
+                    'description' => $r['description'],
+                    'language' => $r['language'],
+                    'updated_at' => $r['updated_at'],
+                    'owner_login' => $r['owner']['login'] ?? null,
+                    'owner_avatar_url' => $r['owner']['avatar_url'] ?? null,
+                ])->values(),
+            ]);
+
+        } catch (\Exception $e) {
+            Log::error('[GithubOAuth] repos() failed: ' . $e->getMessage());
+            return response()->json([
+                'error' => 'github_api_error',
+                'message' => 'Could not load your repositories. Please try again.',
+            ], 502);
+        }
     }
 }

@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { projectAPI, getAuthToken } from '../services/api';
+import { useState, useEffect } from 'react';
+import { projectAPI, githubAuthAPI, getAuthToken } from '../services/api';
 import axios from 'axios';
 import { 
   FolderPlusIcon, 
@@ -9,7 +9,11 @@ import {
   CloudArrowUpIcon,
   LockClosedIcon,
   GlobeAltIcon,
-  ExclamationTriangleIcon
+  ExclamationTriangleIcon,
+  MagnifyingGlassIcon,
+  CheckCircleIcon,
+  ArrowPathIcon,
+  PencilSquareIcon,
 } from '@heroicons/react/24/outline';
 
 const MAX_ZIP_MB = 20;
@@ -49,6 +53,35 @@ function parseGithubError(raw: string): string {
   return raw; // fallback to raw if unrecognised
 }
 
+// Compact "3d ago" / "2mo ago" style relative time for the repo picker list
+function timeAgo(iso: string): string {
+  const diffMs = Date.now() - new Date(iso).getTime();
+  const mins = Math.floor(diffMs / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days}d ago`;
+  const months = Math.floor(days / 30);
+  if (months < 12) return `${months}mo ago`;
+  return `${Math.floor(months / 12)}y ago`;
+}
+
+interface GithubRepo {
+  name: string;
+  full_name: string;
+  html_url: string;
+  clone_url: string;
+  private: boolean;
+  default_branch: string;
+  description: string | null;
+  language: string | null;
+  updated_at: string;
+  owner_login: string | null;
+  owner_avatar_url: string | null;
+}
+
 interface CreateProjectDialogProps {
   isOpen: boolean;
   onClose: () => void;
@@ -68,11 +101,89 @@ export default function CreateProjectDialog({ isOpen, onClose, onSuccess }: Crea
   // GitHub Specific
   const [repoUrl, setRepoUrl] = useState('');
   const [githubToken, setGithubToken] = useState('');
+
+  // F3e: repo picker state — separate from the manual-paste fields
+  // above, which stay as the fallback path (unlisted repos, or no
+  // GitHub connection at all). `githubConnected === null` means "not
+  // checked yet"; only fetched lazily once the GitHub tab is actually
+  // opened, not on dialog mount, since most project creations never
+  // touch this tab at all.
+  const [githubConnected, setGithubConnected] = useState<boolean | null>(null);
+  const [githubRepos, setGithubRepos] = useState<GithubRepo[] | null>(null);
+  const [repoLoadError, setRepoLoadError] = useState('');
+  const [reposLoading, setReposLoading] = useState(false);
+  const [repoMode, setRepoMode] = useState<'picker' | 'manual'>('picker');
+  const [repoSearch, setRepoSearch] = useState('');
+  const [selectedRepoFullName, setSelectedRepoFullName] = useState<string | null>(null);
+  const [connecting, setConnecting] = useState(false);
   
   // Zip Import Specific
   const [importFile, setImportFile] = useState<File | null>(null);
 
   if (!isOpen) return null;
+
+  // F3e: lazily check GitHub connection + load repos the first time the
+  // GitHub tab is opened, not on every dialog mount — most project
+  // creations never touch this tab, so checking eagerly would add an
+  // extra round-trip to a flow that doesn't need it.
+  useEffect(() => {
+    if (activeTab !== 'github' || githubConnected !== null) return;
+
+    githubAuthAPI.status()
+      .then(res => {
+        setGithubConnected(res.data.connected);
+        if (res.data.connected) loadRepos();
+        else setRepoMode('manual');
+      })
+      .catch(() => {
+        // Status check failing shouldn't block project creation — fall
+        // back to the manual-paste path the same as "not connected".
+        setGithubConnected(false);
+        setRepoMode('manual');
+      });
+  }, [activeTab]);
+
+  const loadRepos = () => {
+    setReposLoading(true);
+    setRepoLoadError('');
+    githubAuthAPI.repos()
+      .then(res => setGithubRepos(res.data.repos || []))
+      .catch(err => {
+        const code = err.response?.data?.error;
+        if (code === 'token_invalid') {
+          setGithubConnected(false);
+          setRepoMode('manual');
+          setRepoLoadError('Your GitHub connection expired. Reconnect below, or paste a repository URL manually.');
+        } else {
+          setRepoLoadError('Could not load your repositories. You can still paste a repository URL manually below.');
+        }
+      })
+      .finally(() => setReposLoading(false));
+  };
+
+  const handleConnectGithub = async () => {
+    setConnecting(true);
+    try {
+      const res = await githubAuthAPI.connect();
+      // Full-page navigation, not an axios call — this has to actually
+      // leave the SPA and land on github.com (see githubAuthAPI's own
+      // comment in services/api.ts).
+      window.location.href = res.data.redirect_url;
+    } catch {
+      setConnecting(false);
+      setRepoLoadError('Could not start GitHub connection. Please try again.');
+    }
+  };
+
+  const filteredRepos = (githubRepos || []).filter(r =>
+    r.full_name.toLowerCase().includes(repoSearch.toLowerCase()) ||
+    (r.description || '').toLowerCase().includes(repoSearch.toLowerCase())
+  );
+
+  const selectRepo = (repo: GithubRepo) => {
+    setSelectedRepoFullName(repo.full_name);
+    setRepoUrl(repo.clone_url);
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -133,6 +244,7 @@ export default function CreateProjectDialog({ isOpen, onClose, onSuccess }: Crea
       onSuccess();
       onClose();
       setName(''); setDescription(''); setRepoUrl(''); setGithubToken(''); setImportFile(null);
+      setSelectedRepoFullName(null); setRepoSearch(''); setRepoMode('picker');
 
     } catch (err: any) {
       console.error('Failed to create project:', err);
@@ -239,31 +351,168 @@ export default function CreateProjectDialog({ isOpen, onClose, onSuccess }: Crea
           {/* GITHUB TAB SPECIFIC */}
           {activeTab === 'github' && (
             <div className="space-y-4 animate-fade-in">
-              <div className="p-3 bg-blue-500/10 border border-blue-500/20 rounded-lg text-blue-300 text-xs leading-relaxed">
-                <strong>GitHub Integration:</strong> We will clone the repository to your workspace. 
-                Use a Token if the repo is private.
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-slate-400 uppercase tracking-wide mb-1.5">Repository URL</label>
-                <input 
-                    type="url" required 
-                    className="input-primary w-full font-mono text-xs" 
-                    placeholder="https://github.com/username/repo" 
-                    value={repoUrl} 
-                    onChange={e => setRepoUrl(e.target.value)} 
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-slate-400 uppercase tracking-wide mb-1.5">Personal Access Token (Optional)</label>
-                <input 
-                    type="password" 
-                    className="input-primary w-full font-mono text-xs" 
-                    placeholder="ghp_xxxxxxxxxxxx" 
-                    value={githubToken} 
-                    onChange={e => setGithubToken(e.target.value)} 
-                />
-                <p className="text-[10px] text-slate-500 mt-1">Required for private repositories. Not stored permanently.</p>
-              </div>
+
+              {/* Not connected yet — offer Connect, manual paste stays available below */}
+              {githubConnected === false && (
+                <div className="p-3 bg-ubiq-accent/10 border border-ubiq-accent/20 rounded-lg text-xs leading-relaxed space-y-2">
+                  <p className="text-slate-300">
+                    <strong className="text-white">Connect your GitHub account</strong> to browse and pick a repo directly, instead of pasting a URL and token by hand.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={handleConnectGithub}
+                    disabled={connecting}
+                    className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-ubiq-accent text-white text-xs font-medium hover:opacity-90 transition-opacity disabled:opacity-50"
+                  >
+                    {connecting ? <div className="w-3 h-3 border-2 border-white/40 border-t-white rounded-full animate-spin" /> : <CodeBracketIcon className="w-3.5 h-3.5" />}
+                    Connect GitHub
+                  </button>
+                </div>
+              )}
+
+              {githubConnected === null && (
+                <div className="flex items-center gap-2 text-xs text-slate-500 py-2">
+                  <div className="w-3.5 h-3.5 border-2 border-slate-600 border-t-slate-300 rounded-full animate-spin" />
+                  Checking GitHub connection...
+                </div>
+              )}
+
+              {repoLoadError && (
+                <div className="flex items-start gap-2 p-2.5 rounded-lg border border-amber-500/20 bg-amber-500/10 text-amber-300 text-xs">
+                  <ExclamationTriangleIcon className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                  <span>{repoLoadError}</span>
+                </div>
+              )}
+
+              {/* Connected: picker <-> manual toggle */}
+              {githubConnected === true && (
+                <div className="flex items-center gap-1 p-1 bg-ubiq-950/50 rounded-lg border border-white/5 w-fit">
+                  <button
+                    type="button"
+                    onClick={() => setRepoMode('picker')}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${repoMode === 'picker' ? 'bg-ubiq-accent/15 text-ubiq-accent' : 'text-slate-400 hover:text-white'}`}
+                  >
+                    <CodeBracketIcon className="w-3.5 h-3.5" /> Browse repos
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setRepoMode('manual')}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${repoMode === 'manual' ? 'bg-ubiq-accent/15 text-ubiq-accent' : 'text-slate-400 hover:text-white'}`}
+                  >
+                    <PencilSquareIcon className="w-3.5 h-3.5" /> Paste URL
+                  </button>
+                </div>
+              )}
+
+              {/* Repo picker */}
+              {githubConnected === true && repoMode === 'picker' && (
+                <div className="space-y-2">
+                  <div className="relative">
+                    <MagnifyingGlassIcon className="w-4 h-4 text-slate-500 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="text"
+                      placeholder="Search your repositories..."
+                      value={repoSearch}
+                      onChange={e => setRepoSearch(e.target.value)}
+                      className="input-primary w-full pl-8 py-2 text-xs"
+                    />
+                    <button
+                      type="button"
+                      onClick={loadRepos}
+                      title="Refresh list"
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 hover:text-white transition-colors"
+                    >
+                      <ArrowPathIcon className={`w-3.5 h-3.5 ${reposLoading ? 'animate-spin' : ''}`} />
+                    </button>
+                  </div>
+
+                  <div className="border border-white/5 rounded-lg max-h-52 overflow-y-auto custom-scrollbar divide-y divide-white/5">
+                    {reposLoading ? (
+                      <div className="flex items-center justify-center py-8">
+                        <div className="w-5 h-5 border-2 border-ubiq-accent border-t-transparent rounded-full animate-spin" />
+                      </div>
+                    ) : filteredRepos.length === 0 ? (
+                      <p className="text-xs text-slate-500 text-center py-8 px-4">
+                        {githubRepos === null ? 'Loading...' : githubRepos.length === 0 ? "No repositories found for this account." : "No repos match your search."}
+                      </p>
+                    ) : (
+                      filteredRepos.map(repo => {
+                        const isSelected = selectedRepoFullName === repo.full_name;
+                        return (
+                          <button
+                            type="button"
+                            key={repo.full_name}
+                            onClick={() => selectRepo(repo)}
+                            className={`w-full flex items-start gap-2.5 px-3 py-2.5 text-left transition-colors ${isSelected ? 'bg-ubiq-accent/10' : 'hover:bg-white/5'}`}
+                          >
+                            <div className="mt-0.5 shrink-0">
+                              {isSelected ? (
+                                <CheckCircleIcon className="w-4 h-4 text-ubiq-accent" />
+                              ) : repo.private ? (
+                                <LockClosedIcon className="w-4 h-4 text-slate-500" />
+                              ) : (
+                                <GlobeAltIcon className="w-4 h-4 text-slate-500" />
+                              )}
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-2">
+                                <span className="text-xs font-medium text-white truncate">{repo.full_name}</span>
+                                {repo.private && (
+                                  <span className="text-[9px] uppercase tracking-wide text-slate-500 border border-white/10 rounded px-1 py-0.5 shrink-0">Private</span>
+                                )}
+                              </div>
+                              {repo.description && (
+                                <p className="text-[11px] text-slate-500 truncate mt-0.5">{repo.description}</p>
+                              )}
+                              <div className="flex items-center gap-2 mt-1 text-[10px] text-slate-600">
+                                {repo.language && <span>{repo.language}</span>}
+                                <span>Updated {timeAgo(repo.updated_at)}</span>
+                              </div>
+                            </div>
+                          </button>
+                        );
+                      })
+                    )}
+                  </div>
+
+                  {selectedRepoFullName && (
+                    <p className="text-[10px] text-slate-500">
+                      Selected <span className="text-slate-300 font-mono">{selectedRepoFullName}</span> — private repos import automatically using your connected account, no token needed.
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {/* Manual paste — default when not connected, or explicitly chosen when connected */}
+              {(githubConnected !== true || repoMode === 'manual') && (
+                <div className="space-y-4">
+                  <div className="p-3 bg-blue-500/10 border border-blue-500/20 rounded-lg text-blue-300 text-xs leading-relaxed">
+                    <strong>GitHub Integration:</strong> We will clone the repository to your workspace.
+                    Use a Token if the repo is private.
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-400 uppercase tracking-wide mb-1.5">Repository URL</label>
+                    <input
+                        type="url" required={repoMode === 'manual' || githubConnected !== true}
+                        className="input-primary w-full font-mono text-xs"
+                        placeholder="https://github.com/username/repo"
+                        value={repoUrl}
+                        onChange={e => { setRepoUrl(e.target.value); setSelectedRepoFullName(null); }}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-400 uppercase tracking-wide mb-1.5">Personal Access Token (Optional)</label>
+                    <input
+                        type="password"
+                        className="input-primary w-full font-mono text-xs"
+                        placeholder="ghp_xxxxxxxxxxxx"
+                        value={githubToken}
+                        onChange={e => setGithubToken(e.target.value)}
+                    />
+                    <p className="text-[10px] text-slate-500 mt-1">Required for private repositories not visible to a connected GitHub account. Not stored permanently.</p>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 

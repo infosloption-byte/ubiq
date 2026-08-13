@@ -6,12 +6,12 @@ scope from what was originally planned.
 
 Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 
-**Status as of 2026-08-12: Phases A–E complete. Phase F (Enhancement
-Roadmap) in progress — F0 (P0 sandbox slot leak) done, F0c (Terminal
-panel using stale pre-F0b container name) done, F3 (GitHub OAuth) done
-except F3e stretch, G1 (usage dashboard) done except G1d stretch,
-F1a/F1c/F1d/F1e/F1f/F1g done, F1b reverted (see notes), F1h (new
-Sandboxes list page) done, G2 next.**
+**Status as of 2026-08-13: Phases A–E complete. Phase F (Enhancement
+Roadmap) in progress — F0 (P0 sandbox slot leak) done including live
+smoke test, F0c (Terminal panel using stale pre-F0b container name)
+done, F3 (GitHub OAuth) fully done including F3e repo picker, G1
+(usage dashboard) fully done including G1d, F1a/F1c/F1d/F1e/F1f/F1g/F1h
+done, F1b reverted (see notes), G2 next.**
 Phase F tracks `UBIQ_ENHANCEMENT_ROADMAP.md` — prioritized and broken
 into implementable tasks below. Work it top-to-bottom; the order
 already reflects priority (retention-critical → differentiation →
@@ -193,12 +193,13 @@ team plan that doesn't exist yet).
         `docker-compose.yml` so it can resolve sandbox containers by
         name — a static compose network membership, unaffected by the
         socket-proxy either.
-  - [ ] Not yet done: the same real-Docker-host smoke test F0c's entry
-        flagged as missing — no Docker in this environment to run one.
-        Before shipping: start a project, confirm the "Exec listener up
-        on :7411" line appears in Live Server Logs, run a command in the
-        Terminal panel, then stop the sandbox and confirm the panel falls
-        back to its "click RUN"/"click RESTART" messages correctly.
+  - [x] Real-Docker-host smoke test confirmed working on the live
+        server (2026-08-13, tested by product owner directly — start →
+        "Exec listener up on :7411" appears → Terminal command runs →
+        stop → panel falls back to "click RUN" correctly). No sandbox
+        environment here has Docker to reproduce this locally, so this
+        was always going to need a live-server check rather than
+        something verifiable in this repo's own tooling.
 
 - [x] **F3 — GitHub OAuth (replace pasted PATs)** — 2026-08-09, F3a–F3d done, F3e stretch not started
   - [x] F3a — Register GitHub OAuth App; add `GET /auth/github/redirect`
@@ -220,10 +221,8 @@ team plan that doesn't exist yet).
   - [x] F3d — Migration path: on first Source Control action post-ship,
         detect a legacy `localStorage` token, prompt one-time re-auth
         via the new OAuth flow, then clear the old `localStorage` value.
-  - [ ] F3e — Stretch: repo picker UI using the real OAuth token scopes,
-        instead of pasting a repo URL by hand. *(Not started — the
-        connect/disconnect plumbing this depends on is now in place,
-        so this is a smaller follow-up whenever it's prioritized.)*
+  - [x] F3e — Repo picker UI using the real OAuth token scopes, instead
+        of pasting a repo URL by hand. — 2026-08-13, see notes below
 
 - [x] **G1 — Usage transparency dashboard** — 2026-08-09. Most of this
       turned out to already be built under Phase C1/C2/E2b, before the
@@ -254,13 +253,13 @@ team plan that doesn't exist yet).
         every 429/403 with a `reason` field and shows a mapped message
         via a shared modal, regardless of which action triggered it.
         Nothing added here; G1b above now reuses this same table.)*
-  - [ ] G1d — (stretch, low priority) Confirm G1a's aggregation query
-        generalizes cleanly instance-wide, to save rework when Bucket
-        3's admin analytics gets picked up. *(Not re-verified — the
-        recent-denials query added for G1a is a plain per-user
-        `WHERE user_id = ?`, would need an instance-wide variant with
-        its own pagination/limits when Bucket 3 gets picked up, not
-        just dropping the WHERE clause.)*
+  - [x] G1d — Confirm G1a's aggregation query generalizes cleanly
+        instance-wide, to save rework when Bucket 3's admin analytics
+        gets picked up. — 2026-08-13, see notes below. **Verdict: not
+        quite free as originally assumed** — needed a new index, not
+        just dropping the `WHERE user_id` clause. Fixed and refactored
+        into a reusable query; see notes for what specifically was
+        missing and what's still deliberately left for Bucket 3 itself.
 
 - [ ] **F1 — Full-stack sandbox parity + portable export**
   - [x] F1a — Externalize the real Dockerfile: generate it from the
@@ -2706,3 +2705,64 @@ Decisions made 2026-08-08 (previously open questions):
   endpoints this controller needs — the proxy's allowlist was never the
   problem, worth ruling out explicitly since it's the least obvious
   place to look and the most likely-looking suspect at first glance.
+
+- 2026-08-13 — F3e: repo picker for CreateProjectDialog.tsx's GitHub
+  tab, replacing "paste a URL by hand" as the default when the account
+  is connected (manual paste stays available as a fallback tab for
+  repos the token can't see, or when not connected at all).
+
+  Backend: new `GET /user/github/repos` on `GithubOAuthController`
+  (`repos()`). Calls GitHub's `GET /user/repos` with the stored OAuth
+  token (`affiliation=owner,collaborator,organization_member`, sorted
+  by `updated`), walking up to 3 pages (300 repos) — covers the
+  overwhelming majority of individual/small-org accounts without an
+  unbounded synchronous fetch; a real "load more" flow would be the
+  honest next step past that, not attempted here. Distinguishes a
+  revoked/expired token (GitHub 401 → our own `token_invalid` error, so
+  the frontend can prompt reconnect specifically) from a generic
+  GitHub API failure (502). Deliberately did NOT touch
+  `ProjectController::store()`/`importFromGithub()` — they already
+  accept a plain `repository_url` string and already prefer the stored
+  OAuth token over a pasted one (F3c). This endpoint only supplies that
+  URL; nothing about how it's consumed changed.
+
+  Frontend: `CreateProjectDialog.tsx`'s GitHub tab now checks
+  `githubAuthAPI.status()` lazily (only once that tab is actually
+  opened, not on every dialog mount — most project creations never
+  touch it) and, if connected, loads `githubAuthAPI.repos()` into a
+  searchable picker (client-side filter, same pattern as the Sandboxes
+  list search). Selecting a repo sets the same `repoUrl` state the
+  manual-paste field already fed into `payload.repository_url` — no
+  change needed to the submit path itself, just a second way to fill
+  that one field. Not connected → same manual paste fields as before,
+  now with a "Connect GitHub" button above them.
+
+- 2026-08-13 — G1d: went back to actually check the claim in G1a's own
+  note ("would need an instance-wide variant... not just dropping the
+  WHERE clause") rather than leaving it as an assumption. Confirmed
+  it was right to be suspicious: `plan_action_logs` was indexed on
+  `(user_id, created_at)` and `(action_key, allowed, created_at)` only
+  (see that table's original migration) — neither covers a plain
+  `WHERE allowed = false ORDER BY created_at DESC` scan across every
+  user, which is exactly what an instance-wide "recent denials, any
+  user" query needs. Dropping the `user_id` filter alone would have
+  been a full table scan the moment Bucket 3 tried it.
+
+  Fixed properly rather than just documenting the gap: migration
+  `2026_08_13_000001` adds the missing `(allowed, created_at)` index
+  while the table's still small, and the query itself moved out of
+  `planUsage()` into `UsageController::recentDenialsQuery(?int $userId,
+  int $limit = 10)` — `$userId = null` now genuinely returns "any
+  user's" denials using the new index, proven by the code existing and
+  being exercised by the current per-user caller (`$userId =
+  $user->id`), not just asserted in a comment. Now also selects
+  `id`/`user_id` (the per-user caller's own `->map()` just ignores
+  them) so a future admin caller can tell whose denial each row is.
+
+  Still deliberately NOT exposing this as an actual admin
+  endpoint/route — that's real Bucket 3 scope: who's authorized to
+  query other users' denial history, pagination past a flat `limit`,
+  joining user identity for display. This pass only proves the query
+  underneath generalizes without rework, which was the entire point of
+  G1d as scoped ("confirm... to save rework", not "build the admin
+  view now").

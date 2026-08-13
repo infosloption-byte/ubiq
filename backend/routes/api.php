@@ -253,6 +253,13 @@ Route::prefix('v1')->group(function () {
             Route::post('/auth/github/connect', [GithubOAuthController::class, 'connect']);
             Route::get('/user/github',          [GithubOAuthController::class, 'status']);
             Route::delete('/user/github',       [GithubOAuthController::class, 'disconnect']);
+            // F3e: repo picker for CreateProjectDialog.tsx's GitHub tab —
+            // separate throttle since each call fans out to 1-3 GitHub
+            // API requests server-side, unlike the single-row lookups
+            // status()/disconnect() do.
+            Route::middleware('throttle:20,1')->group(function () {
+                Route::get('/user/github/repos', [GithubOAuthController::class, 'repos']);
+            });
         });
     });
 });
