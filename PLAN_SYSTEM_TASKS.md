@@ -2670,3 +2670,39 @@ Decisions made 2026-08-08 (previously open questions):
   log content or a storage key at stop-time) — flagged here rather
   than attempted, since it's a meaningfully bigger scope than what was
   asked for this pass.
+
+- 2026-08-12 — F1h bugfix: sandbox list showing "crashed" + no vitals
+  for containers that were actually running fine. Root cause was in
+  `SandboxController::dockerHealth()`, not the container itself:
+  `docker inspect -f '{{.State.Status}}|{{.State.Health.Status}}'`
+  dereferences `.State.Health.Status` unconditionally, and
+  `.State.Health` is nil on any container whose image never defines a
+  HEALTHCHECK — true for every sandbox here, since nothing in
+  `generateStartupScript()`/the Dockerfile template sets one up. Go's
+  text/template aborts the *entire* template execution on a nil-pointer
+  field access (not just that one field), so `docker inspect` exited
+  non-zero with empty stdout and a template-parsing error on stderr —
+  which the trailing `2>/dev/null` was silently swallowing. From
+  `dockerHealth()`'s perspective that was indistinguishable from "this
+  container doesn't exist at all", so it returned `docker_status:
+  missing` for every healthy sandbox, `index()`/`show()` mapped that to
+  `status: crashed`, and `dockerStats()` never ran at all since it's
+  gated on `status === 'running'` — one root cause, both symptoms
+  (false "crashed" + missing vitals) at once.
+
+  Fix: guard the field access with Go template's own conditional,
+  `{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}`, so
+  a genuinely-absent Health block resolves to the literal string
+  "none" (normalized to `null` same as before) instead of aborting the
+  whole `docker inspect` call. Verified `ProjectController`'s own
+  `docker inspect` calls (`getBuildLog()`'s `{{.State.Status}}`,
+  `crashSummary()`'s `ExitCode`/`OOMKilled`/`Error`/`FinishedAt`) don't
+  reference `.State.Health` anywhere, so this was isolated to
+  `dockerHealth()` — nothing else needed the same guard.
+
+  Side note while investigating: confirmed `docker-compose.yml`'s
+  socket-proxy (`CONTAINERS: 1`) already permits both the
+  `/containers/{id}/json` (inspect) and `/containers/{id}/stats`
+  endpoints this controller needs — the proxy's allowlist was never the
+  problem, worth ruling out explicitly since it's the least obvious
+  place to look and the most likely-looking suspect at first glance.

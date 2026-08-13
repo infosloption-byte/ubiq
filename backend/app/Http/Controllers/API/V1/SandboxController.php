@@ -289,11 +289,29 @@ class SandboxController extends Controller
      * exist at all (already removed, crashed and reaped, or the row
      * predates this project ever having run) — that maps to the
      * "crashed" status shown in the list rather than a raw error.
+     *
+     * Bug fixed 2026-08-12: this used to read
+     * `{{.State.Status}}|{{.State.Health.Status}}` directly. `.State.Health`
+     * is nil on any container whose image never defines a HEALTHCHECK
+     * — true for every one of these sandboxes, since nothing here sets
+     * one up — and Go's text/template aborts the *entire* execution on
+     * a nil-pointer field access rather than just that field: `docker
+     * inspect -f` exited non-zero with nothing on stdout and the
+     * template error on stderr, which the trailing `2>/dev/null` was
+     * quietly swallowing. That was indistinguishable from "container
+     * doesn't exist" here, so every perfectly healthy sandbox without a
+     * HEALTHCHECK reported as `docker_status: missing` → shown as
+     * "crashed", and `dockerStats()` never ran (it's gated on
+     * `status === 'running'`, which this bug prevented from ever being
+     * true) — same root cause explains both symptoms at once. Fix:
+     * guard the access with `{{if .State.Health}}...{{else}}none{{end}}`
+     * so a genuinely-missing Health block resolves to the literal
+     * string "none" instead of aborting the whole inspect call.
      */
     private function dockerHealth(string $containerName): array
     {
         $inspect = Process::run(
-            "docker inspect -f '{{.State.Status}}|{{.State.Health.Status}}' {$containerName} 2>/dev/null"
+            "docker inspect -f '{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' {$containerName} 2>/dev/null"
         );
         $output = trim($inspect->output());
 
@@ -305,10 +323,10 @@ class SandboxController extends Controller
 
         return [
             'docker_status' => $status ?: 'unknown',
-            // Containers without a HEALTHCHECK report the literal
-            // string "<no value>" from the Go template — normalize
-            // that to null rather than showing it to the user.
-            'health' => ($health && $health !== '<no value>') ? $health : null,
+            // 'none' is our own sentinel from the {{if}} above (not a
+            // literal Docker value) — normalize it to null same as the
+            // old "<no value>" case this replaces.
+            'health' => ($health && $health !== 'none') ? $health : null,
         ];
     }
 
