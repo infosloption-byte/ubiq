@@ -2892,3 +2892,27 @@ Decisions made 2026-08-08 (previously open questions):
   **per user access token**, not a single limit shared across every
   Ubiq user — so this doesn't get tighter as more people connect their
   accounts; each connected user's usage is independent.
+
+- 2026-08-13 — F3e polish, prompted by a direct product question ("do
+  we still need all these fields now that the picker works"):
+
+  - Selecting a repo now auto-fills Project Name and Description from
+    the repo's own `name`/`description` (only into fields still blank
+    — re-browsing after already typing a custom name/description never
+    silently overwrites it). Previously the picker only set `repoUrl`,
+    so picking a repo still left you retyping its name by hand right
+    after GitHub had just told us what it was.
+  - Clarified, in-UI, that **Visibility (Private/Public) is unrelated
+    to the GitHub repo's own visibility** — it's Ubiq's own sharing
+    setting (whether other Ubiq users can see this project on the
+    platform), gated by `sharing.enable`, and has nothing to do with
+    whatever the picked GitHub repo's privacy setting already is on
+    GitHub's side. Added a short clarifying line under the toggle,
+    shown only on the GitHub tab (where the two concepts sitting right
+    next to each other is what actually invites the mix-up — the
+    Blank/Import tabs don't have a GitHub repo above it to compare
+    against).
+  - Paste URL / PAT fields confirmed still needed as-is, not removed:
+    fallback for repos the connected account can't see (someone else's
+    public repo, an unaffiliated org repo) — already correctly hidden
+    while in picker mode, nothing to change there.

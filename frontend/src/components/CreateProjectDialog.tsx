@@ -202,6 +202,12 @@ export default function CreateProjectDialog({ isOpen, onClose, onSuccess }: Crea
   const selectRepo = (repo: GithubRepo) => {
     setSelectedRepoFullName(repo.full_name);
     setRepoUrl(repo.clone_url);
+    // Auto-fill Name/Description from the repo so picking one doesn't
+    // also mean retyping what GitHub already told us — but only into
+    // fields still blank, so re-browsing after already typing a custom
+    // name/description never silently overwrites it.
+    if (!name.trim()) setName(repo.name);
+    if (!description.trim() && repo.description) setDescription(repo.description);
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -565,6 +571,18 @@ export default function CreateProjectDialog({ isOpen, onClose, onSuccess }: Crea
                    </div>
                 </label>
              </div>
+             {/* This is Ubiq's own sharing setting — whether other Ubiq
+                 users can see this project on the platform — and is
+                 entirely separate from whether the underlying GitHub
+                 repo itself is private or public. Worth spelling out
+                 explicitly right here since it's easy to assume this
+                 mirrors the repo you just picked above, when it
+                 doesn't and isn't meant to. */}
+             {activeTab === 'github' && (
+               <p className="text-[10px] text-slate-600 mt-2">
+                 This controls who can see the project <em>on Ubiq</em> — separate from your GitHub repo's own visibility, which stays whatever it already is on GitHub.
+               </p>
+             )}
           </div>
 
         </form>
