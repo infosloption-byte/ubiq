@@ -42,7 +42,15 @@
 
 body {
   @apply bg-ubiq-950 text-stone-200 font-sans antialiased selection:bg-ubiq-accent/30 selection:text-white;
-  overflow: hidden; 
+  /* Was `overflow: hidden` here — the app shell (Layout.tsx) doesn't
+     actually need it: its own root div is independently `h-screen
+     ...overflow-hidden`, self-contained regardless of body's own
+     overflow. This global rule was dead weight until the marketing
+     pages (Landing/Features/Pricing/UseCases) landed relying on
+     natural document scroll instead of an internal scroll container —
+     at which point it silently blocked scrolling on every one of
+     them. Removed rather than scoped, since nothing in the app
+     actually depended on it. */
 }
 
 /* Scrollbar: Thin & Warm */

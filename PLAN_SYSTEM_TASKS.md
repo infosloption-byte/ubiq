@@ -3009,3 +3009,21 @@ Decisions made 2026-08-08 (previously open questions):
   No backend changes at all — `/plans` was already public and already
   returned everything needed; this was purely a frontend
   content/structure project.
+
+- 2026-08-12 — Follow-up to the marketing-pages split above: every one
+  of the new pages (Home, Features, Use Cases, Pricing) couldn't
+  scroll at all. Root cause was a single global rule in `index.css`:
+  `body { overflow: hidden; }`. This predates the marketing split by a
+  long way and was never actually load-bearing — `Layout.tsx`'s own
+  root div is independently `h-screen w-full ... overflow-hidden`,
+  fully self-contained regardless of what `body` itself does, so the
+  app shell was never relying on this rule. It simply never mattered
+  until now, because every page that existed before this one relied on
+  Layout's internal scroll region rather than natural document scroll.
+  The four new marketing pages don't use Layout at all — they're plain
+  tall divs meant to scroll the normal way — so this global rule
+  silently blocked every one of them at once. Fix: removed the rule
+  outright rather than scoping it, since nothing in the app actually
+  depended on it (confirmed no `document.body.style.overflow` usage
+  anywhere that might have assumed a hidden baseline). No other files
+  needed to change.
