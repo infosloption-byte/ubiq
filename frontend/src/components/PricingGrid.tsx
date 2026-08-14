@@ -1,25 +1,9 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import api, { authAPI, subscriptionApi } from '../services/api';
 import { useAuthStore } from '../stores/authStore';
-import { Check, Sparkles, RefreshCw, UserCheck, Clock } from 'lucide-react';
-
-interface PlanFeature {
-    feature_key: string;
-    feature_value: string;
-    value_type: 'int' | 'bool' | 'string';
-}
-
-interface Plan {
-    id: number;
-    key: string;
-    name: string;
-    price_cents: number;
-    currency: string;
-    billing_interval: string;
-    paypal_plan_id: string | null;
-    sort_order: number;
-    features: PlanFeature[];
-}
+import { Check, RefreshCw, UserCheck, Clock } from 'lucide-react';
+import type { Plan } from '../lib/planDisplay';
+import { planBullets, formatPrice } from '../lib/planDisplay';
 
 const ACTIVE_STATUSES = ['active', 'past_due'];
 
@@ -41,42 +25,11 @@ function loadPayPalSdk(): Promise<void> {
 }
 
 /**
- * C3 — Curated marketing labels for a subset of plan_features. Raw DB
- * values stay the single source of truth; this is purely a display
- * concern (which keys to show, and how to phrase them), same separation
- * as any product's pricing page copy vs. its billing system's raw limits.
- * Booleans return null to hide the bullet entirely when the value is
- * false, rather than showing "Sharing: No" as a bullet.
+ * C3 — Curated marketing labels for a subset of plan_features. Moved to
+ * lib/planDisplay.ts (castValue/FEATURE_LABEL/FEATURE_ORDER/planBullets)
+ * so the new public /pricing page (PricingPage.tsx) shares the exact
+ * same logic instead of a second copy that could drift.
  */
-function castValue(f: PlanFeature): any {
-    if (f.value_type === 'int') return parseInt(f.feature_value, 10);
-    if (f.value_type === 'bool') return f.feature_value === 'true' || f.feature_value === '1';
-    return f.feature_value;
-}
-
-const FEATURE_LABEL: Record<string, (value: any) => string | null> = {
-    'sandbox.max_concurrent': (v) => `${v} concurrent sandbox${v === 1 ? '' : 'es'}`,
-    'ai.requests_per_hour':   (v) => v === -1 ? 'Unlimited AI requests' : `${v.toLocaleString()} AI requests / hour`,
-    'storage.max_mb':         (v) => v === -1 ? 'Unlimited storage' : (v >= 1024 ? `${(v / 1024).toFixed(0)} GB storage` : `${v} MB storage`),
-    'projects.max_count':     (v) => v === -1 ? 'Unlimited projects' : `${v} projects`,
-    'sharing.enabled':        (v) => v ? 'Public project sharing' : null,
-};
-const FEATURE_ORDER = ['sandbox.max_concurrent', 'ai.requests_per_hour', 'storage.max_mb', 'projects.max_count', 'sharing.enabled'];
-
-function planBullets(plan: Plan): string[] {
-    const byKey = new Map(plan.features.map(f => [f.feature_key, castValue(f)]));
-    return FEATURE_ORDER
-        .map(key => {
-            const labelFn = FEATURE_LABEL[key];
-            const value = byKey.get(key);
-            return (labelFn && value !== undefined) ? labelFn(value) : null;
-        })
-        .filter((s): s is string => s !== null);
-}
-
-function formatPrice(cents: number): string {
-    return cents === 0 ? 'Free' : `$${(cents / 100).toFixed(0)}`;
-}
 
 /**
  * E2c (PLAN_SYSTEM_TASKS.md Phase E) — optional filter so this grid can

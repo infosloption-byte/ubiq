@@ -381,6 +381,18 @@ team plan that doesn't exist yet).
         collapsible history list covers recently-stopped runs. Polls
         `GET /sandboxes` every 10s for live vitals/health drift.
 
+- [x] **M1 — Marketing site overhaul: multi-page split + content accuracy**
+      *(direct product ask, not from the original roadmap doc — same
+      category as F1h: inserted here because it's real work that
+      landed, not because it was pre-planned)* — 2026-08-13, see notes
+      below. Old single-page `LandingPage.tsx` (Hero + Features + Use
+      Cases + How It Works + Comparison + FAQ + CTA, all one file, one
+      route) split into 4 real pages (`/`, `/features`, `/use-cases`,
+      `/pricing`), plus content corrected to match what the platform
+      actually does today — the old copy predated Sandboxes (F1) and
+      GitHub Connectors (F3) entirely, and contained a factual claim
+      (direct Anthropic/Grok support) the backend has never had.
+
 - [ ] **G2 — Multi-file diff review screen + user-controlled autonomy**
   - [ ] G2a — Build the batch review screen: file list with
         +added/−removed stat and New/Modified/Deleted badge per file;
@@ -2916,3 +2928,84 @@ Decisions made 2026-08-08 (previously open questions):
     fallback for repos the connected account can't see (someone else's
     public repo, an unaffiliated org repo) — already correctly hidden
     while in picker mode, nothing to change there.
+
+- 2026-08-13 — M1: marketing site overhaul, prompted directly ("a lot
+  of things changed on the platform since [the landing page] was
+  created... I prefer multiple page, because this is act as my
+  platform website").
+
+  **What was wrong with the old site (audit before touching anything):**
+  1. Zero mention of Sandboxes (F1) or GitHub Connectors (F3) anywhere
+     — both are now major, already-shipped features with zero
+     marketing-site presence.
+  2. Hero copy claimed "Connect Ollama, Grok, Claude, and Gemini" —
+     `AiKeyController::ALLOWED_PROVIDERS` is actually
+     `['google', 'openai', 'openrouter', 'mistral']`; Anthropic/Grok
+     have never been supported as direct BYOK providers. A live,
+     public, factually wrong claim about what the product does.
+  3. The comparison table said "Privacy: Keys on Device" while the FAQ
+     directly below it (correctly, per the D8 fix already in place)
+     said keys are "encrypted at rest on our servers... never sent
+     back to your browser" — a direct on-page contradiction about
+     credential handling, not a cosmetic issue.
+  4. `GET /plans` already existed, explicitly commented `// C3 —
+     public pricing page data` when it was built, but nothing had ever
+     actually consumed it on a public page — the only place plans
+     rendered was `PricingGrid.tsx`, buried in the logged-in
+     Settings > Billing tab.
+  5. Single mega-scroll page, no real navigation between sections
+     beyond same-page anchors.
+
+  **Structure decision (asked, not assumed):** offered 3 options
+  (Pricing-only split / Home+Features+Pricing / Home+Features+Pricing
+  +Use-Cases) — chose the most granular, 4-page structure.
+
+  **What was built:**
+  - `components/marketing/MarketingNavbar.tsx` /
+    `MarketingFooter.tsx` — shared across all 4 pages (previously the
+    nav/footer were inlined once, since there was only ever one page).
+    Not used on `GuidePage.tsx` (its own docs-sidebar nav, different
+    page shape) or the legal pages (Terms/Privacy/Refund — minimal
+    single-purpose, not in scope here).
+  - `lib/planDisplay.ts` — `castValue`/`FEATURE_LABEL`/`FEATURE_ORDER`/
+    `planBullets`/`formatPrice` extracted from `PricingGrid.tsx` so the
+    new public Pricing page and the existing logged-in billing grid
+    share one source of truth for "which plan features to show and how
+    to phrase them" instead of two copies that could drift.
+    `PricingGrid.tsx` now imports from here; its own behavior is
+    unchanged.
+  - `pages/PricingPage.tsx` (new, `/pricing`) — real `/plans` data,
+    same bullets as Settings/Billing. Deliberately does NOT embed
+    `PricingGrid.tsx`'s live PayPal checkout directly: that component
+    assumes an authenticated user and renders a real payment button —
+    doing that on a public page would let an anonymous visitor start a
+    real PayPal checkout and then hit an auth error on confirmation,
+    a broken pay-then-fail flow. Logged-out visitors get "Get Started"
+    → `/register` instead; an already-logged-in visitor who lands here
+    gets routed to `/settings?tab=billing` (the real, unchanged
+    checkout) rather than a duplicate checkout UI on the marketing
+    site. Includes an FAQ section (pricing-specific questions, not a
+    copy of the old general FAQ).
+  - `pages/FeaturesPage.tsx` (new, `/features`) — real sections for
+    Sandboxes (live logs, health, vitals, stop/remove) and GitHub
+    Connectors (repo picker, OAuth, push) that never existed on the
+    site before. Provider list and comparison table both corrected
+    (see points 2-3 above) rather than carried over as-is.
+  - `pages/UseCasesPage.tsx` (new, `/use-cases`) — kept the original
+    three personas (Students/Professionals/Indie Hackers, still
+    accurate), added a fourth ("Small Teams Shipping Fast") built
+    specifically around Sandboxes + GitHub Connectors working
+    together — a genuinely different use case from the original
+    three, not just a features list restated as a persona.
+  - `pages/LandingPage.tsx` (`/`) — rewritten from the old mega-page
+    into an actual homepage: hero + a 3-pillar teaser (Local+Cloud AI,
+    Live Sandboxes, GitHub Connectors) + short teasers linking into
+    Use Cases and Pricing + final CTA. Old FAQ/Comparison content
+    moved to FeaturesPage.tsx/PricingPage.tsx respectively, not
+    duplicated here.
+  - `App.tsx` — added `/features`, `/use-cases`, `/pricing` routes,
+    lazy-loaded same as the existing public pages.
+
+  No backend changes at all — `/plans` was already public and already
+  returned everything needed; this was purely a frontend
+  content/structure project.

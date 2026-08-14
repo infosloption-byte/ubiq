@@ -19,6 +19,9 @@ const ProjectEditorPage = lazy(() => import('./pages/ProjectEditorPage'));
 const ProjectInfoPage  = lazy(() => import('./pages/ProjectInfoPage'));
 const AuthCallbackPage = lazy(() => import('./pages/AuthCallbackPage'));
 const GuidePage        = lazy(() => import('./pages/GuidePage'));
+const FeaturesPage     = lazy(() => import('./pages/FeaturesPage'));
+const UseCasesPage     = lazy(() => import('./pages/UseCasesPage'));
+const PricingPage      = lazy(() => import('./pages/PricingPage'));
 const AdminPage        = lazy(() => import('./pages/AdminPage'));
 const TermsOfService   = lazy(() => import('./pages/TermsOfService'));
 const PrivacyPolicy    = lazy(() => import('./pages/PrivacyPolicy'));
@@ -39,6 +42,9 @@ function App() {
                 <Routes>
                     {/* Public routes */}
                     <Route path="/" element={<LandingPage />} />
+                    <Route path="/features" element={<FeaturesPage />} />
+                    <Route path="/use-cases" element={<UseCasesPage />} />
+                    <Route path="/pricing" element={<PricingPage />} />
                     <Route path="/guide" element={<GuidePage />} />
                     <Route path="/auth/callback" element={<AuthCallbackPage />} />
                     <Route path="/terms" element={<TermsOfService />} />
