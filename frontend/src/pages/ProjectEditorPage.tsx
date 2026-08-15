@@ -574,7 +574,28 @@ export default function ProjectEditorPage() {
     };
 
     /**
-     * G2a — opens the batch review screen for a set of path-tagged file
+     * G2c — client-side mirror of AiAutonomyService::isSensitivePath().
+     * Deliberately just a UX decision (does the review screen show at
+     * all for this file), NOT a security boundary — protected-scaffold
+     * enforcement happens unconditionally server-side in
+     * FileController::isProtectedAiProposal() regardless of what this
+     * function guesses. Worst case of this list drifting from the real
+     * one: a file shows the review screen when it could've auto-applied,
+     * or vice versa — a UX inconsistency, not a way to bypass
+     * protection. Kept in sync manually for now; a proper fix would
+     * expose this classification via the same ai-autonomy endpoint
+     * instead of duplicating the rule — flagged in PLAN_SYSTEM_TASKS.md
+     * as a follow-up, same spirit as G2a's original protected-path
+     * heuristic caveat.
+     */
+    const isSensitivePathClientSide = (path: string): boolean => {
+        const basename = path.split('/').pop() || path;
+        if (basename === 'package.json' || basename === '.env') return true;
+        return path.split('/').includes('migrations');
+    };
+
+    /**
+     * G2c — opens the batch review screen for a set of path-tagged file
      * proposals parsed out of a chat message (see
      * utils/multiFileProposals.ts). For each proposed path, looks up
      * whether it matches an existing project file: if so, fetches that
@@ -583,6 +604,17 @@ export default function ProjectEditorPage() {
      * `handleFileSelect` below does its own fetch when opening a file)
      * so the diff has real "before" content instead of diffing against
      * nothing; if not, treats it as a new file with empty oldContent.
+     *
+     * G2c: also fetches this project's resolved autonomy mode and, for
+     * `auto_apply_except_protected`/`fully_autonomous`, writes eligible
+     * files immediately instead of opening the review screen for them —
+     * "eligible" meaning not protected (never auto-written in ANY mode)
+     * and, for the `except_protected` mode specifically, not sensitive
+     * either (`.env`/`package.json`/anything under a `migrations`
+     * directory always stops for review in that mode; `fully_autonomous`
+     * has no such exception). Only whatever's left after that opens
+     * `MultiFileReviewScreen` — if nothing's left, a toast summarizes
+     * what happened instead of opening an empty screen.
      */
     const handleReviewFiles = async (proposals: { path: string; language: string; newContent: string }[]) => {
         try {
@@ -608,7 +640,49 @@ export default function ProjectEditorPage() {
                     } as ReviewFile;
                 })
             );
-            setMultiFileProposals(reviewFiles);
+
+            let mode = 'always_review';
+            try {
+                const res = await projectAPI.getAiAutonomyMode(projectId);
+                mode = res.data.mode || 'always_review';
+            } catch (e) {
+                // Fails safe to always_review — an unreachable
+                // autonomy-mode check should never silently skip review,
+                // only ever fall back to the more conservative behavior.
+                console.error('Failed to resolve AI autonomy mode, defaulting to always_review', e);
+            }
+
+            if (mode === 'always_review') {
+                setMultiFileProposals(reviewFiles);
+                return;
+            }
+
+            const autoEligible = reviewFiles.filter(f =>
+                !f.isProtected && (mode === 'fully_autonomous' || !isSensitivePathClientSide(f.path))
+            );
+            const stillNeedsReview = reviewFiles.filter(f => !autoEligible.includes(f));
+
+            let autoAppliedCount = 0;
+            const failedToAutoApply: ReviewFile[] = [];
+            for (const file of autoEligible) {
+                try {
+                    await writeReviewFile(file);
+                    autoAppliedCount++;
+                } catch (e) {
+                    console.error(`Auto-apply failed for ${file.path}, falling back to manual review`, e);
+                    failedToAutoApply.push(file);
+                }
+            }
+            if (autoAppliedCount > 0) await refreshFiles();
+
+            const toReview = [...stillNeedsReview, ...failedToAutoApply];
+            if (toReview.length > 0) {
+                setMultiFileProposals(toReview);
+            }
+            if (autoAppliedCount > 0) {
+                const suffix = toReview.length > 0 ? `; ${toReview.length} file(s) still need your review` : '';
+                showToast(`Auto-applied ${autoAppliedCount} file(s)${suffix}.`);
+            }
         } catch (e) {
             console.error('Failed to prepare file review', e);
             showToast('Could not load file review — please try again.');

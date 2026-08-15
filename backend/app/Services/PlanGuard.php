@@ -107,6 +107,15 @@ class PlanGuard
             'type' => 'tier_compare',
             'feature_key' => 'ai.max_model_tier',
         ],
+        // G2c — read-only gate, checked via check() not authorize(): this
+        // isn't a consumable resource with a counter to increment, it's
+        // "is this user's plan even allowed to pick a non-default AI
+        // autonomy mode." Same boolean shape as sharing.enable/
+        // preview.enable above.
+        'ai.autonomy_auto_apply' => [
+            'type' => 'boolean',
+            'feature_key' => 'ai.autonomy_auto_apply',
+        ],
         ];
     }
 

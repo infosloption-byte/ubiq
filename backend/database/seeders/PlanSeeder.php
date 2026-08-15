@@ -39,6 +39,14 @@ class PlanSeeder extends Seeder
                     'ai.max_model_tier' => ['free', 'string'],
                     'projects.max_count' => ['3', 'int'],
                     'sharing.enabled' => ['false', 'bool'],
+                    // G2c — gates BOTH non-default autonomy modes (Auto-apply
+                    // except protected, and Fully autonomous), not just the
+                    // fully-autonomous one — "Always review" is the only mode
+                    // Free/Starter can select, enforced server-side in
+                    // AiAutonomyService regardless of what's stored in a
+                    // user's own preferences (e.g. a downgraded former
+                    // Creator/Pro user's stale saved setting).
+                    'ai.autonomy_auto_apply' => ['false', 'bool'],
 
                     'preview.enabled' => ['true', 'bool'],
                     'storage.max_mb' => ['512', 'int'],
@@ -59,6 +67,7 @@ class PlanSeeder extends Seeder
                     'ai.max_model_tier' => ['starter', 'string'],
                     'projects.max_count' => ['10', 'int'],
                     'sharing.enabled' => ['false', 'bool'],
+                    'ai.autonomy_auto_apply' => ['false', 'bool'],
 
                     'preview.enabled' => ['true', 'bool'],
                     'storage.max_mb' => ['1024', 'int'],
@@ -79,6 +88,7 @@ class PlanSeeder extends Seeder
                     'ai.max_model_tier' => ['creator', 'string'],
                     'projects.max_count' => ['30', 'int'],
                     'sharing.enabled' => ['true', 'bool'],
+                    'ai.autonomy_auto_apply' => ['true', 'bool'],
 
                     'preview.enabled' => ['true', 'bool'],
                     'storage.max_mb' => ['5120', 'int'],
@@ -99,6 +109,7 @@ class PlanSeeder extends Seeder
                     'ai.max_model_tier' => ['pro', 'string'],
                     'projects.max_count' => ['-1', 'int'],
                     'sharing.enabled' => ['true', 'bool'],
+                    'ai.autonomy_auto_apply' => ['true', 'bool'],
 
                     'preview.enabled' => ['true', 'bool'],
                     'storage.max_mb' => ['10240', 'int'],

@@ -147,6 +147,8 @@ export const projectAPI = {
     delete: (id: number) => api.delete(`/projects/${id}`),
     archive: (id: number) => api.post(`/projects/${id}/archive`),
     restore: (id: number) => api.post(`/projects/${id}/restore`),
+    /** G2c — resolved (tier-clamped) autonomy mode for this project. */
+    getAiAutonomyMode: (id: number) => api.get(`/projects/${id}/ai-autonomy`),
     scaffold: (projectId: number, files: any[]) =>
         api.post(`/projects/${projectId}/scaffold`, { files }),
     seedChat: (projectId: number, prompt: string, aiResponse: string, model: string) =>

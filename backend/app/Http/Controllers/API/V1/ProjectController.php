@@ -64,9 +64,34 @@ class ProjectController extends Controller
     private const VITE_ALLOWED_HOSTS_EXPORT =
         "export __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS='.ubiq-editor.space,ubiq-editor.space'";
 
-    public function __construct(private PlanGuard $planGuard, private PlanService $planService)
-    {
+    public function __construct(
+        private PlanGuard $planGuard,
+        private PlanService $planService,
+        private \App\Services\AiAutonomyService $aiAutonomy,
+    ) {
     }
+
+    /**
+     * G2c — GET /projects/{project}/ai-autonomy
+     *
+     * Returns the mode that ACTUALLY applies right now, after tier
+     * clamping — never the raw stored preference. This is deliberately
+     * the only way the frontend learns the effective mode; it must not
+     * read `preferences.editor_settings.aiAutonomy` directly and
+     * re-derive tier logic itself, or it'll drift from
+     * AiAutonomyService's own clamping the moment either one changes.
+     */
+    public function getAiAutonomyMode(Request $request, Project $project)
+    {
+        if ($project->user_id !== $request->user()->id) {
+            return response()->json(['error' => 'Unauthorized'], 403);
+        }
+
+        return response()->json([
+            'mode' => $this->aiAutonomy->resolve($request->user(), $project),
+        ]);
+    }
+
 
     /**
      * Helper: Get the physical workspace path for a project

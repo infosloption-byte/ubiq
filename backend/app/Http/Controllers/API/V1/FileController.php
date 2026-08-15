@@ -4,18 +4,21 @@ namespace App\Http\Controllers\API\V1;
 
 use App\Http\Controllers\Controller;
 use App\Models\File;
+use App\Models\PlanActionLog;
 use App\Models\Project;
 use App\Services\BoilerplateManager;
 use App\Services\PlanGuard;
+use App\Services\PlanService;
 use App\Exceptions\PlanLimitExceededException;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\File as FileSystem; 
 use Illuminate\Support\Facades\URL;
 
 class FileController extends Controller
 {
-    public function __construct(private PlanGuard $planGuard)
+    public function __construct(private PlanGuard $planGuard, private PlanService $planService)
     {
     }
 
@@ -127,6 +130,51 @@ class FileController extends Controller
         return in_array($path, BoilerplateManager::getProtectedPaths($project->boilerplate_key), true);
     }
 
+    /**
+     * G2c — "Log every AI-initiated write to plan_action_logs with
+     * before/after content references in every mode, including
+     * fully-autonomous." This is that log, called from both the
+     * blocked-as-protected case and the successful-write case in
+     * store()/update() below — same allowed/denied pattern
+     * PlanGuard::log() already uses for every OTHER guarded action in
+     * this app, reused here rather than inventing a second logging
+     * convention for one more table this app already has.
+     *
+     * Content is capped, not stored in full, unbounded — a large file
+     * accepted via G2a shouldn't turn this table's `metadata` column
+     * into something that bloats without limit. 20KB per side is
+     * generous for a diff/revert reference while still bounded.
+     */
+    private function logAiFileWrite(Project $project, string $path, string $status, bool $allowed, ?string $oldContent, ?string $newContent, ?string $reason = null): void
+    {
+        $cap = fn (?string $s) => $s === null ? null : (strlen($s) > 20000 ? substr($s, 0, 20000) . '…[truncated]' : $s);
+
+        try {
+            PlanActionLog::query()->create([
+                'user_id' => $project->user_id,
+                'plan_id_at_time' => optional($this->planService->planFor($project->user))->id,
+                'action_key' => 'ai.file_write',
+                'allowed' => $allowed,
+                'limit_value' => null,
+                'current_usage' => null,
+                'reason' => $reason,
+                'metadata' => [
+                    'project_id' => $project->id,
+                    'path' => $path,
+                    'status' => $status, // 'new' | 'modified'
+                    'old_content' => $cap($oldContent),
+                    'new_content' => $cap($newContent),
+                ],
+                'created_at' => now(),
+            ]);
+        } catch (\Throwable $e) {
+            // Same "never break the guarded action itself" principle as
+            // PlanGuard::log() — a failed insert here shouldn't turn an
+            // otherwise-successful file write into a 500.
+            Log::warning("FileController: failed to write plan_action_logs entry for AI file write: {$e->getMessage()}");
+        }
+    }
+
     public function store(Request $request, Project $project)
     {
         if ($project->user_id !== $request->user()->id) return response()->json(['error' => 'Unauthorized'], 403);
@@ -142,6 +190,7 @@ class FileController extends Controller
         if ($validator->fails()) return response()->json(['error' => $validator->errors()], 422);
 
         if ($this->isProtectedAiProposal($request, $project, $request->path)) {
+            $this->logAiFileWrite($project, $request->path, 'new', false, null, $request->content, 'protected_scaffold_file');
             return response()->json(['error' => "\"{$request->path}\" is a protected scaffold file and can't be created or overwritten by an AI proposal."], 403);
         }
 
@@ -155,6 +204,10 @@ class FileController extends Controller
 
         $this->syncToDisk($project, $request->path, $request->content ?? '');
 
+        if ($request->boolean('ai_proposal')) {
+            $this->logAiFileWrite($project, $request->path, 'new', true, null, $request->content);
+        }
+
         return response()->json(['file' => $file], 201);
     }
 
@@ -167,11 +220,17 @@ class FileController extends Controller
         
         if ($request->has('content')) {
             if ($this->isProtectedAiProposal($request, $file->project, $file->path)) {
+                $this->logAiFileWrite($file->project, $file->path, 'modified', false, $file->content, $request->content, 'protected_scaffold_file');
                 return response()->json(['error' => "\"{$file->path}\" is a protected scaffold file and can't be overwritten by an AI proposal."], 403);
             }
+            $oldContent = $file->content;
             $file->content    = $request->content;
             $file->size_bytes = strlen($request->content);
             $this->syncToDisk($file->project, $file->path, $request->content);
+
+            if ($request->boolean('ai_proposal')) {
+                $this->logAiFileWrite($file->project, $file->path, 'modified', true, $oldContent, $request->content);
+            }
         }
 
         $file->save();

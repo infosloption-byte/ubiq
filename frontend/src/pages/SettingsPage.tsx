@@ -74,6 +74,13 @@ export default function SettingsPage() {
   // footgun for the next person reading this file.
   const PAID_TIERS = ['starter', 'creator', 'pro'];
   const isOnPaidTier = !!user?.subscription_tier && PAID_TIERS.includes(user.subscription_tier);
+  // G2c — matches PlanSeeder's ai.autonomy_auto_apply seed values
+  // (false for free/starter, true for creator/pro). Purely a UI hint
+  // for graying out the two upgrade-gated options here — the real
+  // enforcement is server-side in AiAutonomyService::resolve(), which
+  // clamps regardless of what this says, so a stale/wrong value here
+  // is a UX inconsistency at worst, never a way to bypass the gate.
+  const canUseAutoApply = user?.subscription_tier === 'creator' || user?.subscription_tier === 'pro';
   const isTrialing   = isOnPaidTier && user?.subscription_status === 'trialing';
   const isActive     = isOnPaidTier && user?.subscription_status === 'active';
   const isPastDue    = isOnPaidTier && user?.subscription_status === 'past_due';
@@ -133,6 +140,17 @@ export default function SettingsPage() {
     loadAiKeys();
   }, []);
 
+  // G2c — global default autonomy mode. Seeded from
+  // `editor_settings.aiAutonomy.global`, same JSON blob the rest of
+  // this page's editor preferences already live in — no new column,
+  // per the plan's own "extend existing JSON column, no new table"
+  // instruction. Per-project override isn't exposed in this UI yet
+  // (deferred, same kind of scope cut G2a/G2b each made once already;
+  // the backend already supports it via
+  // `aiAutonomy.perProject[projectId]`, just nothing here sets it).
+  const [aiAutonomyMode, setAiAutonomyMode] = useState<'always_review' | 'auto_apply_except_protected' | 'fully_autonomous'>('always_review');
+  const [savingAutonomy, setSavingAutonomy] = useState(false);
+
   useEffect(() => {
     if (user?.preferences) {
       const prefs = user.preferences.editor_settings || {};
@@ -144,6 +162,7 @@ export default function SettingsPage() {
         formatOnSave: prefs.formatOnSave !== false,
         code_suggestions: user.preferences.code_suggestions !== false
       });
+      setAiAutonomyMode(prefs.aiAutonomy?.global || 'always_review');
     }
   }, [user]);
 
@@ -280,6 +299,34 @@ export default function SettingsPage() {
       alert("Failed to save settings");
     } finally {
       setSaving(false);
+    }
+  };
+
+  /**
+   * G2c — separate save action from handleSaveEditor above rather than
+   * folding into the same button: picking an autonomy mode is a
+   * meaningfully different kind of decision (how much the AI can do
+   * without asking) than font size/word wrap, worth its own explicit
+   * save rather than only taking effect if the person happens to also
+   * hit "Save Editor Preferences" while on this tab. Only sends the
+   * `aiAutonomy` sub-key — safe to do in isolation now that
+   * AuthController::updatePreferences() merges instead of replacing
+   * the whole editor_settings blob.
+   */
+  const handleSaveAutonomyMode = async (mode: typeof aiAutonomyMode) => {
+    setSavingAutonomy(true);
+    try {
+      await userAPI.updatePreferences({
+        editor_settings: { aiAutonomy: { global: mode } },
+      });
+      setAiAutonomyMode(mode);
+      const res = await authAPI.me();
+      if (res.data.user) setUser(res.data.user);
+      showSuccess("AI autonomy mode updated.");
+    } catch (e) {
+      alert("Failed to save AI autonomy mode");
+    } finally {
+      setSavingAutonomy(false);
     }
   };
 
@@ -468,6 +515,51 @@ export default function SettingsPage() {
                           className="w-4 h-4 rounded border-white/20 bg-black/30 text-indigo-500 focus:ring-0" />
                       </label>
                     ))}
+                  </div>
+                  <div className="pt-6 border-t border-white/5">
+                    <h3 className="text-sm font-bold text-white mb-1">AI Autonomy Mode</h3>
+                    <p className="text-xs text-slate-500 mb-4">
+                      Controls how much the AI can do without asking first, in the coding chat's multi-file review screen.
+                      Protected scaffold files (like <code className="text-slate-400">package.json</code>, framework config)
+                      are never auto-applied, in any mode.
+                    </p>
+                    <div className="space-y-2">
+                      {([
+                        { key: 'always_review', label: 'Always review', sub: 'Every proposed change opens the review screen. Default.', gated: false },
+                        { key: 'auto_apply_except_protected', label: 'Auto-apply except protected', sub: 'Most files apply immediately. Protected and sensitive files (.env, package.json, migrations) still stop for review.', gated: true },
+                        { key: 'fully_autonomous', label: 'Fully autonomous', sub: 'Everything applies immediately except protected scaffold files. No review screen.', gated: true },
+                      ] as const).map((opt) => {
+                        const locked = opt.gated && !canUseAutoApply;
+                        return (
+                          <label
+                            key={opt.key}
+                            className={`flex items-start justify-between gap-3 p-3 rounded-lg border transition-colors ${
+                              locked
+                                ? 'bg-white/[0.02] border-white/5 opacity-50 cursor-not-allowed'
+                                : `bg-white/5 border-white/5 hover:border-indigo-500/30 cursor-pointer ${aiAutonomyMode === opt.key ? 'border-indigo-500/50' : ''}`
+                            }`}
+                          >
+                            <div className="flex items-start gap-3">
+                              <input
+                                type="radio"
+                                name="aiAutonomyMode"
+                                checked={aiAutonomyMode === opt.key}
+                                disabled={locked || savingAutonomy}
+                                onChange={() => handleSaveAutonomyMode(opt.key)}
+                                className="mt-1 w-4 h-4 border-white/20 bg-black/30 text-indigo-500 focus:ring-0"
+                              />
+                              <div>
+                                <span className="block text-sm text-slate-300">{opt.label}</span>
+                                <span className="text-[11px] text-slate-500">{opt.sub}</span>
+                              </div>
+                            </div>
+                            {locked && (
+                              <span className="text-[10px] font-bold uppercase tracking-wide text-indigo-400 shrink-0 mt-1">Creator+</span>
+                            )}
+                          </label>
+                        );
+                      })}
+                    </div>
                   </div>
                   <div className="pt-6 border-t border-white/5">
                     <button onClick={handleSaveEditor} disabled={saving} className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white px-6 py-2.5 rounded-lg text-sm font-bold transition-all">

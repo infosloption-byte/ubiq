@@ -160,6 +160,8 @@ Route::prefix('v1')->group(function () {
             Route::get('projects/{project}/download',        [ProjectController::class, 'download']);
             Route::get('projects/{project}/files/{file}/serve', [FileController::class, 'serve']);
             Route::get('projects/{project}/build-log',       [ProjectController::class, 'getBuildLog']);
+            // G2c — resolved (tier-clamped) autonomy mode for this project.
+            Route::get('projects/{project}/ai-autonomy',     [ProjectController::class, 'getAiAutonomyMode']);
 
             // Storage stats
             Route::get('/user/storage', [ProjectController::class, 'storageStats']);

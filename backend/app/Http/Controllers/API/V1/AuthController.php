@@ -580,10 +580,22 @@ class AuthController extends Controller
         
         $data = $request->all();
 
-        // FIX: If editor_settings is passed as an array (from frontend JSON),
-        // we must encode it to a string before saving to the database.
+        // G2c fix: this used to json_encode() the incoming editor_settings
+        // and write it straight over the existing column — a REPLACE, not a
+        // merge. That meant saving font size from the Settings page's
+        // "Editor Preferences" section (which only ever sends
+        // {fontSize, wordWrap, minimap, formatOnSave}) would silently wipe
+        // out any OTHER sub-key stored in the same JSON blob, including
+        // G2c's new `aiAutonomy` setting the very first time someone
+        // touched an unrelated editor preference afterward. Decode what's
+        // already there, merge the incoming partial object on top of it,
+        // re-encode — every existing sub-key not present in this request
+        // survives untouched.
         if (isset($data['editor_settings']) && is_array($data['editor_settings'])) {
-            $data['editor_settings'] = json_encode($data['editor_settings']);
+            $existing = is_string($preference->editor_settings)
+                ? (json_decode($preference->editor_settings, true) ?? [])
+                : (is_array($preference->editor_settings) ? $preference->editor_settings : []);
+            $data['editor_settings'] = json_encode(array_replace_recursive($existing, $data['editor_settings']));
         }
 
         // Update the database

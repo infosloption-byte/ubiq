@@ -451,7 +451,7 @@ team plan that doesn't exist yet).
         pre-existing bug while wiring protected-path checks through
         `FileController` — see notes for the actual severity of that
         one, it's not just cleanup.
-  - [ ] G2c — User-controlled autonomy setting (per-project + global
+  - [x] G2c — User-controlled autonomy setting (per-project + global
         default in Settings), three modes: **Always review** (default;
         only mode on Free/Starter), **Auto-apply except protected/
         user-marked-sensitive files** (`.env`, migrations,
@@ -462,6 +462,22 @@ team plan that doesn't exist yet).
         override. Log every AI-initiated write to `plan_action_logs`
         with before/after content references in every mode, including
         fully-autonomous.
+        Landed as specified, with two deliberate, flagged scope cuts
+        (see notes for the full story): (1) "user-marked-sensitive" is
+        currently the FIXED baseline the spec names explicitly
+        (`.env`/`package.json`/`migrations`), not yet something a
+        person can extend themselves — that's its own small feature
+        (somewhere to store and edit the list), not the mode mechanism
+        itself. (2) per-project override is fully supported
+        server-side (`AiAutonomyService` reads
+        `aiAutonomy.perProject[id]`) but has no UI control anywhere
+        yet — only the global default is settable today, from
+        Settings' Editor tab. Tier-gating (Creator/Pro only for the
+        two non-default modes) is real and server-side via a new
+        `ai.autonomy_auto_apply` `PlanGuard` action, not just a
+        disabled radio button — confirmed by tracing
+        `AiAutonomyService::resolve()`'s clamp, which ignores whatever
+        a downgraded user's stale stored preference says.
   - [ ] G2d — UX polish (after a–c are functionally solid): AI
         activity indicator during multi-file generation (extend the
         existing single-file "Reading: App.jsx" pattern); one-click
@@ -3249,3 +3265,98 @@ Decisions made 2026-08-08 (previously open questions):
       — protected-file enforcement is now real and server-side, not
       just a disabled button, for exactly the one path it should ever
       apply to.
+
+- 2026-08-15 — G2c: the autonomy-mode setting, built on top of G2a/G2b.
+
+    - **New `AiAutonomyService`** — the one place that decides the
+      mode that actually applies. `resolve(user, project)` reads the
+      stored preference (per-project override wins over the global
+      default, which falls back to `always_review`), then clamps to
+      `always_review` if the user's plan doesn't have
+      `ai.autonomy_auto_apply` — regardless of what's stored. That
+      clamp matters concretely for a downgraded former Creator/Pro
+      user: their saved preference can keep saying
+      `fully_autonomous` forever, `resolve()` just silently overrides
+      it every time rather than erroring or needing a migration to
+      fix stale data.
+    - **New `ai.autonomy_auto_apply` `PlanGuard` action** (boolean,
+      same shape as the existing `sharing.enable`/`preview.enable`)
+      gates BOTH non-default modes, not just `fully_antonomous` — per
+      the spec's own phrasing ("Always review... only mode on
+      Free/Starter"), Free/Starter can't pick
+      `auto_apply_except_protected` either. Seeded `false` for
+      free/starter, `true` for creator/pro in `PlanSeeder`.
+    - **New `GET /projects/{project}/ai-autonomy`** — the ONLY way the
+      frontend learns the effective mode. Deliberately doesn't expose
+      the raw stored preference at all; returns the already-clamped
+      result of `AiAutonomyService::resolve()` so there's no way for a
+      frontend re-implementation of the clamp logic to drift from the
+      real one.
+    - **Real bug fixed in `AuthController::updatePreferences()`,
+      unrelated to G2c's own logic but found while building it:** the
+      endpoint was `json_encode()`-ing the incoming `editor_settings`
+      straight over the existing column — a full REPLACE, not a
+      merge. Saving font size (Settings' Editor tab only ever sends
+      `{fontSize, wordWrap, minimap, formatOnSave}`) would have
+      silently wiped any other sub-key in that same JSON blob,
+      including this feature's own new `aiAutonomy` key the very
+      first time anyone touched an unrelated editor preference
+      afterward. Now decodes what's already stored and
+      `array_replace_recursive()`s the incoming partial object on top
+      before re-encoding — every existing sub-key not present in a
+      given request survives.
+    - **`FileController` — `plan_action_logs` writes.** Reused
+      `PlanGuard`'s own existing allowed/denied logging convention for
+      this table rather than inventing a second one: one row per
+      AI-proposal write attempt (`action_key: 'ai.file_write'`),
+      `allowed: true` for a successful write, `allowed: false` +
+      `reason: 'protected_scaffold_file'` for a blocked one, in BOTH
+      `store()` and `update()`. `metadata` carries `old_content`/
+      `new_content` (capped at 20KB each — a large accepted file
+      shouldn't make this table's rows unbounded) specifically so a
+      future one-click-revert feature (G2d) has something to revert
+      *to*, not just a record that a write happened.
+    - **Wired into the one live G2a caller (chat's "Review N files"
+      button):** `ProjectEditorPage.tsx`'s `handleReviewFiles()` now
+      fetches the resolved mode before deciding anything. For
+      `always_review`, behavior is unchanged from G2a. For the other
+      two, it partitions proposals into "auto-eligible" (not protected;
+      for `auto_apply_except_protected` specifically, also not
+      sensitive) and writes those immediately via the same
+      `writeReviewFile()`/`ai_proposal:true` path G2a's manual Accept
+      already used — only whatever's left opens
+      `MultiFileReviewScreen`, and if nothing's left, a toast
+      summarizes what got auto-applied instead of opening an empty
+      screen. If the mode-check request itself fails, this fails safe
+      to `always_review` rather than guessing — an unreachable check
+      should never silently skip review.
+    - **Settings UI** — new "AI Autonomy Mode" section on the Editor
+      tab, three radio options with the two gated ones visibly
+      dimmed + "Creator+" labeled for Free/Starter (a UI hint only;
+      the real gate is server-side, confirmed above). Saves
+      immediately on selection via its own small handler, not folded
+      into the existing "Sync Preferences" button — deliberately: this
+      is a meaningfully different kind of decision (how much
+      autonomy to grant) than font size, and shouldn't only take
+      effect if someone happens to also click Save while on this tab.
+    - **Scope cuts, both flagged rather than silently skipped:**
+      "user-marked-sensitive" is currently only the fixed baseline the
+      spec names explicitly, not yet something a person can extend
+      with their own paths — a real but separate feature (needs
+      somewhere to store and edit a custom list) from the mode
+      mechanism itself. Per-project override is fully supported
+      server-side (`aiAutonomy.perProject[projectId]`,
+      `AiAutonomyService` already reads it) but has no UI control
+      anywhere — only the global default is settable today.
+    - **Known duplication, same spirit as G2a's original protected-
+      path caveat:** `ProjectEditorPage.tsx` has its own small
+      `isSensitivePathClientSide()` mirroring
+      `AiAutonomyService::isSensitivePath()`, needed so the frontend
+      can decide whether to even SHOW the review screen before any
+      write call happens. Explicitly not a security boundary — the
+      real protected-file block is server-side and unconditional
+      regardless of this guess — but it's a second copy of one rule
+      that could still drift on its wording (not its safety). A
+      cleaner fix would have the ai-autonomy endpoint return
+      classifications alongside the mode instead of the frontend
+      guessing; deferred rather than done here.
