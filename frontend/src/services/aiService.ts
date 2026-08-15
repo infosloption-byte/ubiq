@@ -141,7 +141,31 @@ async function chatCloud(message: string, history: ChatMessage[], model: string,
 
     } catch (error: any) {
         console.error("Cloud AI Error:", error.response?.data || error.message);
-        const errorMessage = error.response?.data?.message || "Cloud generation failed. Check your API keys in Settings.";
+
+        // BUG FIX: CompletionController::chat()'s own catch block returns
+        // `{'error' => $e->getMessage()}` — a plain string under the key
+        // `error`, never `message`. Reading `.data.message` here was
+        // always undefined regardless of what actually failed, so EVERY
+        // chat failure — invalid key, quota exceeded, network issue,
+        // provider overload, anything — fell through to the same
+        // generic "Check your API keys" text below, even when the real
+        // cause had nothing to do with API keys at all.
+        const rawMessage: string | undefined = error.response?.data?.error;
+
+        // Providers return a 503 with a body like Gemini's
+        // `{"error":{"code":503,"status":"UNAVAILABLE",...}}` when
+        // they're simply overloaded — a transient, expected condition,
+        // not a real error. `$e->getMessage()` on the backend just
+        // stringifies that provider body as-is (prefixed with "AI
+        // Provider Error: "), so surfacing it raw here would mean
+        // dumping escaped JSON at the person instead of something
+        // they can actually act on.
+        const isProviderOverloaded = rawMessage
+            && (/"status"\s*:\s*"UNAVAILABLE"/i.test(rawMessage) || /"code"\s*:\s*503/.test(rawMessage));
+
+        const errorMessage = isProviderOverloaded
+            ? "The AI model is currently overloaded on the provider's end. This isn't an issue with your API key — please wait a moment and try again."
+            : rawMessage || "Cloud generation failed. Check your API keys in Settings.";
         throw new Error(errorMessage);
     }
 }

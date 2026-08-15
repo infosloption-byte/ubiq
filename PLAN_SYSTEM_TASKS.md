@@ -3105,3 +3105,38 @@ Decisions made 2026-08-08 (previously open questions):
   code path — that state is threaded through unsaved-edit warnings,
   tab-close handling, and more from D1, and forcing G2a through all of
   that risked breaking flows that have nothing to do with it.
+
+- 2026-08-15 — Chat always showed "Cloud generation failed. Check your
+  API keys in Settings." on any failure, regardless of actual cause.
+  Reported as a real provider overload (Gemini's `flash` model
+  returning a 503 `UNAVAILABLE`, exactly the transient "high demand,
+  try again later" condition Google itself describes) showing up as a
+  false API-key error, which sent the wrong signal entirely for a
+  situation that had nothing to do with keys and needed no action
+  beyond waiting.
+    - **Root cause:** `aiService.ts`'s `chatCloud()` read
+      `error.response?.data?.message`. `CompletionController::chat()`'s
+      own catch block returns `{'error' => $e->getMessage()}` — always
+      a plain string under the key `error`, never `message`. That read
+      was `undefined` on literally every chat failure that ever
+      happened, not just this one — invalid key, quota exceeded,
+      network error, provider overload, anything — all silently fell
+      through to the same generic fallback text. This wasn't a wording
+      problem, it was a key mismatch that had been swallowing every
+      real error message chat ever produced.
+    - **Fix:** read `.data.error` (matching what the backend actually
+      sends — confirmed the same key is used consistently by grepping
+      every `response()->json(['error' => ...])` in
+      `CompletionController.php`). Also added a small, specific
+      special-case: if the surfaced string matches a provider-overload
+      shape (`"status":"UNAVAILABLE"` or `"code":503` — Gemini's own
+      overloaded-model response body, stringified as-is by
+      `$e->getMessage()` on the backend), show a plain "the model is
+      overloaded, not your key, try again shortly" message instead of
+      either the old wrong text or a raw escaped-JSON dump. Any other
+      failure now surfaces the real backend message directly rather
+      than a generic fallback, which is a strictly more honest default
+      even without special-casing every possible provider error shape.
+    - Checked the file's other cloud-facing function for the same
+      bug — it already read `.data?.error` correctly; only `chatCloud()`
+      had the wrong key.
