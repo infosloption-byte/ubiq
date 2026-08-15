@@ -421,12 +421,36 @@ team plan that doesn't exist yet).
         AI-scaffold-merge path, where protected-file correctness
         actually matters. G2b should expose `getProtectedPaths()` (or
         equivalent) via API and have this screen call it instead.
-  - [ ] G2b — Rewire `CompletionController::generate()`'s final step
+  - [x] G2b — Rewire `CompletionController::generate()`'s final step
         from immediate `file_put_contents()` to "return proposed file
         set to frontend, open G2a with it." Extend `chat()` so
         multi-file-implying responses also return a structured
         multi-file payload routed through G2a, instead of only ever
         offering one Apply button for the currently-open file.
+        **Scope actually landed, see notes for the full story:**
+        `generate()`'s AI-file merge step now returns a `proposals`
+        array (same shape as G2a's `ReviewFile[]`) instead of writing
+        anything — but **discovered this endpoint has zero callers in
+        the current frontend** (`AiGeneratorModal.tsx`, the only
+        "Generate with AI" entry point that exists today, does its own
+        separate client-side generation and never calls `/ai/generate`
+        at all). Confirmed with Sriya before proceeding: rewire
+        `generate()` only, do NOT migrate `AiGeneratorModal` to call it
+        — that's a materially bigger, separate decision (replacing the
+        live project-creation flow) than "finish G2b" implied, left
+        for its own future task if wanted. The `chat()` extension half
+        of this line turned out to already be satisfied by G2a's own
+        approach (a frontend `path=` parsing convention, no backend
+        `chat()` change needed) — not done via chat() itself as this
+        line originally envisioned, but the end result (multi-file
+        payload routed through G2a) is already true.
+        Closed G2a's own flagged caveat as a side effect: added a
+        `projects.boilerplate_key` column (new migration) so a
+        project's framework is a stored fact instead of re-detected
+        from prompt text on every call, and discovered + fixed a real
+        pre-existing bug while wiring protected-path checks through
+        `FileController` — see notes for the actual severity of that
+        one, it's not just cleanup.
   - [ ] G2c — User-controlled autonomy setting (per-project + global
         default in Settings), three modes: **Always review** (default;
         only mode on Free/Starter), **Auto-apply except protected/
@@ -3140,3 +3164,88 @@ Decisions made 2026-08-08 (previously open questions):
     - Checked the file's other cloud-facing function for the same
       bug — it already read `.data?.error` correctly; only `chatCloud()`
       had the wrong key.
+
+- 2026-08-15 — G2b. Started as "rewire generate()'s final step to
+  review instead of write" and turned up two things bigger than that
+  framing on its own: an endpoint with no live caller, and a
+  protected-file bug that's been silently under-protecting scaffolds
+  since before G2 existed at all.
+
+    - **`generate()` has zero callers.** Traced every path — the only
+      "Generate with AI" entry point in the product today
+      (`AiGeneratorModal.tsx`, launched from the Dashboard/Projects
+      page) does its own client-side generation via `aiService`
+      directly and never calls `/ai/generate`. `aiAPI.generateProject()`
+      exists in `api.ts` as a wrapper but nothing invokes it. Asked
+      Sriya directly before writing more code rather than guessing:
+      confirmed scope is rewiring `generate()` itself only, NOT
+      migrating `AiGeneratorModal` to call it — that's genuinely a
+      different, bigger task (touching the live project-creation flow)
+      than "finish G2b" implied on its own.
+
+    - **The rewire itself:** Step 6 (merging AI-authored files) no
+      longer calls `file_put_contents()`/`updateOrCreate()` at all —
+      it builds a `proposals` array in the exact shape G2a's
+      `ReviewFile[]` already expects (`path`, `language`,
+      `old_content`, `new_content`, `status`, `is_protected`) and
+      returns that instead. Protected files are included in the list,
+      not silently dropped the way the old code did (`continue`d past
+      them with only a log line) — the whole point of surfacing them
+      is so a person can SEE the AI tried to touch a protected file,
+      not have it vanish with zero record anywhere the UI could ever
+      show. Scaffold files (Step 2/3) are untouched by this — those
+      are deterministic template output, never went through review
+      before, still don't; only the AI-authored merge step changed.
+
+    - **New `projects.boilerplate_key` column** (migration
+      `2026_08_15_000001`, nullable, same null-means-old-behavior
+      precedent as `db_engine` right above it in the schema).
+      `generate()` used to call
+      `BoilerplateManager::detectFromPrompt()` fresh on every single
+      call for a project, including the 2nd/3rd/etc — a follow-up
+      prompt not containing whatever keywords the first one did could
+      silently detect a DIFFERENT framework than what's actually
+      scaffolded on disk, computing the wrong protected-paths list
+      against an already-built project. Now detected once and stored;
+      every later call reuses the stored value.
+
+    - **The bug this surfaced, which matters well beyond G2b:**
+      `CompletionController` had its OWN private `getProtectedPaths()`
+      — a hardcoded duplicate of `BoilerplateManager::getProtectedPaths()`
+      (the one `ProjectController.php` has always called directly,
+      correctly) that had quietly drifted into a materially different,
+      LESS COMPLETE list. Missing entirely from `CompletionController`'s
+      copy: `config/auth.php`, `config/mail.php`, `config/queue.php`,
+      `config/services.php`, `config/filesystems.php`,
+      `config/logging.php`, and `app/Http/Controllers/Controller.php`
+      for Laravel — and Angular's protected set was flat-out WRONG
+      (`angular.json`/`src/index.html` instead of the real
+      `vite.config.ts`/`tsconfig.json`/`src/styles.css`). This means
+      `generate()` has been silently under-protecting scaffold files
+      relative to what `ProjectController` already enforced correctly,
+      for as long as these two copies existed — independent of
+      anything G2 did; this was already true before G2a's first line
+      of code. Deleted the duplicate outright; `generate()`'s one call
+      site now calls `BoilerplateManager::getProtectedPaths()` directly,
+      same as `ProjectController` always has. Exactly one list now,
+      not two that can drift again.
+
+    - **`FileController` enforcement — and a real regression caught
+      before it shipped, not after.** First pass added the protected-
+      path check directly to `store()`/`update()`'s content-write path
+      unconditionally whenever `boilerplate_key` was set. Caught before
+      committing: `update()` is the SAME endpoint a person's own
+      Ctrl+S in the editor calls (`handleSave()` → `fileAPI.update()`)
+      — that first version would have blocked a human from editing
+      their OWN `vite.config.js` directly, for every project with a
+      `boilerplate_key`, the exact kind of manual scaffold edit walked
+      through by hand earlier this same week. Fixed by scoping the
+      check to only fire when the request explicitly carries
+      `ai_proposal: true` — a flag ONLY `ProjectEditorPage.tsx`'s
+      `writeReviewFile()` (G2a's own accept path) ever sends; the
+      normal save flow never does and is completely unaffected. This
+      also finally closes G2a's own flagged caveat (client-side-only
+      `isLikelyProtectedPath()` heuristic, two lists that could drift)
+      — protected-file enforcement is now real and server-side, not
+      just a disabled button, for exactly the one path it should ever
+      apply to.

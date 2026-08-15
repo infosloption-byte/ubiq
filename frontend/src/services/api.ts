@@ -173,10 +173,10 @@ export const terminalAPI = {
 
 export const fileAPI = {
     getAll: (projectId: number) => api.get(`/projects/${projectId}/files`),
-    create: (projectId: number, data: { name: string; path: string; content?: string; language?: string }) =>
+    create: (projectId: number, data: { name: string; path: string; content?: string; language?: string; ai_proposal?: boolean }) =>
         api.post(`/projects/${projectId}/files`, data),
     get: (id: number) => api.get(`/files/${id}`),
-    update: (id: number, data: { name?: string; content?: string }) => api.put(`/files/${id}`, data),
+    update: (id: number, data: { name?: string; content?: string; ai_proposal?: boolean }) => api.put(`/files/${id}`, data),
     delete: (id: number) => api.delete(`/files/${id}`),
     upload: (projectId: number, formData: FormData, onProgress?: (e: ProgressEvent) => void) =>
         api.post(`/projects/${projectId}/files/upload`, formData, {

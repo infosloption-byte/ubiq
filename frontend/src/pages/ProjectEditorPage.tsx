@@ -618,14 +618,21 @@ export default function ProjectEditorPage() {
     /** Writes one accepted file to disk (create if new, update if it already existed) and syncs local state. */
     const writeReviewFile = async (file: ReviewFile) => {
         const existing = files.find((f: any) => f.path === file.path);
+        // `ai_proposal: true` — see FileController::isProtectedAiProposal()
+        // on the backend. This is the ONE thing distinguishing an
+        // AI-proposal acceptance from an ordinary manual save through
+        // the exact same create/update endpoints, so protected-scaffold
+        // enforcement only ever blocks this path, never a person's own
+        // Ctrl+S on their own vite.config.js or similar.
         if (existing) {
-            await fileAPI.update(existing.id, { content: file.newContent });
+            await fileAPI.update(existing.id, { content: file.newContent, ai_proposal: true });
         } else {
             await fileAPI.create(projectId, {
                 name: file.path.split('/').pop() || file.path,
                 path: file.path,
                 content: file.newContent,
                 language: file.language,
+                ai_proposal: true,
             });
         }
         // If the file being written is the one currently open in the

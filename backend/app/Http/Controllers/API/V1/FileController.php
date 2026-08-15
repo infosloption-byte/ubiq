@@ -5,6 +5,7 @@ namespace App\Http\Controllers\API\V1;
 use App\Http\Controllers\Controller;
 use App\Models\File;
 use App\Models\Project;
+use App\Services\BoilerplateManager;
 use App\Services\PlanGuard;
 use App\Exceptions\PlanLimitExceededException;
 use Illuminate\Http\Request;
@@ -95,18 +96,54 @@ class FileController extends Controller
         return response()->json(['file' => $file]);
     }
 
+    /**
+     * G2b follow-up: server-side enforcement, not just a UI hint. G2a's
+     * review screen (frontend/src/components/MultiFileReviewScreen.tsx)
+     * disables its own Accept button for a protected file, and
+     * generate() flags proposals the same way — but both of those are
+     * only ever advisory unless something actually blocks the write
+     * itself.
+     *
+     * CRITICAL SCOPING: this must NOT fire on an ordinary manual save.
+     * `update()` below is the exact same endpoint a person's own
+     * Ctrl+S in the editor calls (`handleSave()` →
+     * `fileAPI.update()`) — a project's `boilerplate_key` being set
+     * doesn't mean the human editing their own `vite.config.js`
+     * directly should ever be blocked from doing so; only an
+     * AI-proposal acceptance should be. That's why this only checks
+     * when `$request->boolean('ai_proposal')` is explicitly true — a
+     * flag ONLY `ProjectEditorPage.tsx`'s `writeReviewFile()` (G2a's
+     * accept path) ever sends, never the normal save flow.
+     *
+     * `$project->boilerplate_key` null (pre-dates the column, or the
+     * project never went through `generate()`) means "unknown
+     * framework" — deliberately NOT restricted rather than guessed at,
+     * same null-semantics as the migration that added the column.
+     */
+    private function isProtectedAiProposal(Request $request, Project $project, string $path): bool
+    {
+        if (!$request->boolean('ai_proposal')) return false;
+        if (!$project->boilerplate_key) return false;
+        return in_array($path, BoilerplateManager::getProtectedPaths($project->boilerplate_key), true);
+    }
+
     public function store(Request $request, Project $project)
     {
         if ($project->user_id !== $request->user()->id) return response()->json(['error' => 'Unauthorized'], 403);
 
         $validator = Validator::make($request->all(), [
-            'name'     => 'required|string|max:191',
-            'path'     => ['required', 'string', 'max:400', 'not_regex:/(\.\.[\/\\\\])|^[\/\\\\]/'],
-            'content'  => 'nullable|string',
-            'language' => 'nullable|string|max:50',
+            'name'        => 'required|string|max:191',
+            'path'        => ['required', 'string', 'max:400', 'not_regex:/(\.\.[\/\\\\])|^[\/\\\\]/'],
+            'content'     => 'nullable|string',
+            'language'    => 'nullable|string|max:50',
+            'ai_proposal' => 'nullable|boolean',
         ]);
 
         if ($validator->fails()) return response()->json(['error' => $validator->errors()], 422);
+
+        if ($this->isProtectedAiProposal($request, $project, $request->path)) {
+            return response()->json(['error' => "\"{$request->path}\" is a protected scaffold file and can't be created or overwritten by an AI proposal."], 403);
+        }
 
         $file = $project->files()->create([
             'name'       => $request->name,
@@ -129,6 +166,9 @@ class FileController extends Controller
         if ($request->has('language')) $file->language = $request->language;
         
         if ($request->has('content')) {
+            if ($this->isProtectedAiProposal($request, $file->project, $file->path)) {
+                return response()->json(['error' => "\"{$file->path}\" is a protected scaffold file and can't be overwritten by an AI proposal."], 403);
+            }
             $file->content    = $request->content;
             $file->size_bytes = strlen($request->content);
             $this->syncToDisk($file->project, $file->path, $request->content);

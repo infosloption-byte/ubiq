@@ -334,8 +334,22 @@ class CompletionController extends Controller
         $userPrompt     = $request->prompt;
 
         // ── STEP 1: Detect framework ─────────────────────────────────────────
-        $boilerplateKey = \App\Services\BoilerplateManager::detectFromPrompt($userPrompt);
-        Log::info("[Ubiq] generate() — detected boilerplate: {$boilerplateKey} for project {$project->id}");
+        // G2b: only detect-from-prompt on a project's FIRST generate() call.
+        // Once scaffolded, the framework is a stored fact (see the migration
+        // adding this column), not something to re-derive from whatever the
+        // user happens to type in a follow-up prompt — a second prompt with
+        // different wording silently detecting a DIFFERENT boilerplate key
+        // than what's actually on disk would compute the wrong
+        // protected-paths list against an already-scaffolded project.
+        if ($project->boilerplate_key) {
+            $boilerplateKey = $project->boilerplate_key;
+            Log::info("[Ubiq] generate() — using stored boilerplate: {$boilerplateKey} for project {$project->id}");
+        } else {
+            $boilerplateKey = \App\Services\BoilerplateManager::detectFromPrompt($userPrompt);
+            $project->boilerplate_key = $boilerplateKey;
+            $project->save();
+            Log::info("[Ubiq] generate() — detected and stored boilerplate: {$boilerplateKey} for project {$project->id}");
+        }
 
         // ── STEP 2 & 3: Write hardcoded scaffold files to disk + sync to DB ────
         // write() generates all scaffold files from the in-memory template
@@ -440,12 +454,27 @@ SYSTEMPROMPT;
                 throw new \Exception("AI response was not valid JSON. Raw: " . substr($content, 0, 150) . "...");
             }
 
-            // ── STEP 6: Merge AI files ON TOP of boilerplate ─────────────────
-            // Protected files cannot be overwritten by AI — these are the scaffold
-            // files we wrote in Step 2 that must remain exactly as written.
-            $protected = $this->getProtectedPaths($boilerplateKey);
-
-            $aiSavedCount = 0;
+            // ── STEP 6: Build proposed file set for review — NOT written yet ──
+            // G2b: this used to file_put_contents() + DB-sync every AI file
+            // immediately, same principle violation G2a was built specifically
+            // to close on the chat path — the user never saw or approved
+            // anything the AI wrote before it was already on disk. Same shape
+            // as G2a's `ReviewFile[]` (frontend/src/components/
+            // MultiFileReviewScreen.tsx) so this can feed the exact same
+            // screen once something calls this endpoint — see
+            // PLAN_SYSTEM_TASKS.md's G2b entry for why nothing does yet.
+            //
+            // Protected files are included here, not silently dropped — the
+            // point of surfacing them is so the person can SEE the AI tried
+            // to touch a protected scaffold file, not have it vanish with
+            // only a log line as the only record. `isProtected: true` is
+            // enforced again, independently, server-side in
+            // FileController::store()/update() when a proposal is actually
+            // accepted — the flag here is informational for the review
+            // screen, not the only thing standing between a protected file
+            // and being overwritten.
+            $protected = \App\Services\BoilerplateManager::getProtectedPaths($boilerplateKey);
+            $proposals = [];
 
             foreach ($aiFiles as $filePath => $code) {
                 // Sanitize path
@@ -456,47 +485,36 @@ SYSTEMPROMPT;
                     continue;
                 }
 
-                if (in_array($filePath, $protected, true)) {
-                    Log::info("[Ubiq] AI tried to overwrite protected scaffold file: {$filePath} — skipping");
-                    continue;
-                }
+                $existing = $project->files()->where('path', $filePath)->where('is_deleted', false)->first();
 
-                // Write to disk
-                $fullPath = $workspacePath . '/' . $filePath;
-                if (!is_dir(dirname($fullPath))) mkdir(dirname($fullPath), 0755, true);
-                file_put_contents($fullPath, $code);
-
-                // Sync to DB
-                $project->files()->updateOrCreate(
-                    ['path' => $filePath],
-                    [
-                        'name'       => basename($filePath),
-                        'content'    => $code,
-                        'language'   => $this->detectLanguage($filePath),
-                        'size_bytes' => strlen($code),
-                        'is_deleted' => false,
-                    ]
-                );
-
-                $aiSavedCount++;
+                $proposals[] = [
+                    'path'         => $filePath,
+                    'language'     => $this->detectLanguage($filePath),
+                    'old_content'  => $existing?->content ?? '',
+                    'new_content'  => $code,
+                    'status'       => $existing ? 'modified' : 'new',
+                    'is_protected' => in_array($filePath, $protected, true),
+                ];
             }
 
-            Log::info("[Ubiq] generate() complete — boilerplate: {$boilerplateKey}, ai files: {$aiSavedCount}, project: {$project->id}");
+            $proposalCount = count($proposals);
+            Log::info("[Ubiq] generate() complete — boilerplate: {$boilerplateKey}, {$proposalCount} file(s) proposed for review, project: {$project->id}");
 
-            // FIX: Return the full project file list so the frontend can refresh
-            // the editor tree. Previously only a message string was returned, so
-            // the UI had no way to know which files were saved and never updated.
-            $allFiles = $project->files()
+            // Scaffold files (Step 2/3) are already written and synced —
+            // those are deterministic template output, not AI content, so
+            // they never went through review and still don't. Only the
+            // AI-authored proposals above are gated behind acceptance.
+            $scaffoldFiles = $project->files()
                 ->where('is_deleted', false)
                 ->get(['id', 'path', 'name', 'language', 'size_bytes'])
                 ->toArray();
 
             return response()->json([
-                'message'     => "Generated {$aiSavedCount} application files on {$boilerplateKey} scaffold",
-                'boilerplate' => $boilerplateKey,
-                'model_used'  => $model,
-                'files_saved' => $aiSavedCount,
-                'files'       => $allFiles,
+                'message'      => "Scaffolded {$boilerplateKey} and proposed {$proposalCount} file(s) for review",
+                'boilerplate'  => $boilerplateKey,
+                'model_used'   => $model,
+                'proposals'    => $proposals,
+                'files'        => $scaffoldFiles,
             ]);
 
         } catch (\Exception $e) {
@@ -505,76 +523,22 @@ SYSTEMPROMPT;
         }
     }
 
-    /**
-     * Returns file paths that must NOT be overwritten by AI output.
-     * Delegates to BoilerplateManager which is the single source of truth.
-     */
-    private function getProtectedPaths(string $boilerplateKey): array
-    {
-        // Common to all
-        $common = ['ubiq.json'];
-
-        return match(true) {
-            str_starts_with($boilerplateKey, 'laravel@11') => array_merge($common, [
-                'bootstrap/app.php',
-                'bootstrap/providers.php',
-                'public/index.php',
-                'artisan',
-                'composer.json',
-                '.env.example',
-                'config/app.php',
-                'config/database.php',
-                'config/cache.php',
-                'config/session.php',
-                'app/Providers/AppServiceProvider.php',
-                'app/Models/User.php',
-                'routes/console.php',
-            ]),
-            str_starts_with($boilerplateKey, 'laravel@10') => array_merge($common, [
-                'bootstrap/app.php',
-                'public/index.php',
-                'artisan',
-                'composer.json',
-                '.env.example',
-                'config/app.php',
-                'config/database.php',
-                'config/cache.php',
-                'config/session.php',
-                'app/Http/Kernel.php',
-                'app/Console/Kernel.php',
-                'app/Exceptions/Handler.php',
-                'app/Providers/AppServiceProvider.php',
-                'app/Models/User.php',
-                'routes/console.php',
-            ]),
-            in_array($boilerplateKey, ['react', 'vue']) => array_merge($common, [
-                'package.json',
-                'vite.config.js',
-                'index.html',
-                'src/main.jsx',
-                'src/main.js',
-            ]),
-            $boilerplateKey === 'nextjs' => array_merge($common, [
-                'package.json',
-                'next.config.mjs',
-                'app/layout.jsx',
-            ]),
-            $boilerplateKey === 'node' => array_merge($common, ['package.json']),
-            $boilerplateKey === 'angular' => array_merge($common, [
-                'package.json',
-                'angular.json',
-                'src/main.ts',
-                'src/index.html',
-            ]),
-            in_array($boilerplateKey, ['flask', 'fastapi']) => array_merge($common, ['requirements.txt']),
-            $boilerplateKey === 'django' => array_merge($common, [
-                'manage.py',
-                'requirements.txt',
-                'config/settings.py',
-            ]),
-            default => $common,
-        };
-    }
+    // NOTE: getProtectedPaths() used to live here as a private method with
+    // its own hardcoded, independently-maintained copy of this list — one
+    // that had quietly drifted from BoilerplateManager::getProtectedPaths()
+    // (the version ProjectController.php has always called directly) into
+    // a materially DIFFERENT, less complete list: missing several
+    // Laravel config files (auth.php, mail.php, queue.php, services.php,
+    // filesystems.php, logging.php) and app/Http/Controllers/Controller.php
+    // entirely, and protecting the wrong set of Angular files altogether
+    // (angular.json + src/index.html here vs. vite.config.ts + tsconfig.json
+    // + src/styles.css in the real list). generate() has been silently
+    // under-protecting scaffold files relative to what ProjectController
+    // already enforces correctly, for as long as these two copies existed.
+    // Removed rather than fixed-in-place — see generate()'s call site
+    // and FileController's new enforcement below, both now call
+    // BoilerplateManager::getProtectedPaths() directly, so there is
+    // exactly one list to ever get out of sync with itself again.
 
     private function detectLanguage($filename)
     {

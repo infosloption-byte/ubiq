@@ -22,6 +22,7 @@ class Project extends Model
         'github_token',
         'storage_path',
         'db_engine', // F1c — null | 'mysql' | 'postgres', opt-in real DB in the sandbox
+        'boilerplate_key', // G2b — which BoilerplateManager template this project was scaffolded with; null = unknown/pre-dates this column
     ];
 
     protected $casts = [
