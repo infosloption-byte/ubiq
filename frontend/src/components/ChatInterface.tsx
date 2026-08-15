@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { useAuthStore } from '../stores/authStore';
 import { chatAPI, generateTitle } from '../services/api';
 import { aiService, AiApiConfig } from '../services/aiService';
+import { parseMultiFileProposals } from '../utils/multiFileProposals';
 import ModelSelector from './ModelSelector';
 import ReactMarkdown from 'react-markdown';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
@@ -11,7 +12,7 @@ import {
   ClipboardIcon, CheckIcon, ArrowPathIcon, PhotoIcon,
   DocumentTextIcon, ArrowDownOnSquareIcon, XMarkIcon,
   CommandLineIcon, WrenchScrewdriverIcon, AcademicCapIcon, RocketLaunchIcon,
-  Cog6ToothIcon
+  Cog6ToothIcon, Square3Stack3DIcon
 } from '@heroicons/react/24/outline';
 
 interface Message {
@@ -35,6 +36,14 @@ interface ChatInterfaceProps {
     currentFile?: { name: string; content: string };
   };
   onApplyCode?: (code: string) => void;
+  /**
+   * G2a — called with every path-tagged file proposal parsed out of an
+   * assistant message (see utils/multiFileProposals.ts), when there are
+   * 2+ of them in that message. A single path-tagged block is left to
+   * the existing per-block "Apply" button instead — this is additive,
+   * not a replacement for onApplyCode.
+   */
+  onReviewFiles?: (proposals: { path: string; language: string; newContent: string }[]) => void;
   autoPrompt?: string | null;
   onAutoPromptClear?: () => void;
   aiMode?: string;
@@ -45,6 +54,7 @@ export default function ChatInterface({
   onSessionUpdate,
   activeContext,
   onApplyCode,
+  onReviewFiles,
   autoPrompt,
   onAutoPromptClear,
   aiMode = 'cloud'
@@ -83,10 +93,12 @@ export default function ChatInterface({
    * and never captures stale prop values.
    */
   const onApplyCodeRef = useRef(onApplyCode);
+  const onReviewFilesRef = useRef(onReviewFiles);
   const onSessionUpdateRef = useRef(onSessionUpdate);
   const activeContextRef = useRef(activeContext);
 
   useEffect(() => { onApplyCodeRef.current = onApplyCode; }, [onApplyCode]);
+  useEffect(() => { onReviewFilesRef.current = onReviewFiles; }, [onReviewFiles]);
   useEffect(() => { onSessionUpdateRef.current = onSessionUpdate; }, [onSessionUpdate]);
   useEffect(() => { activeContextRef.current = activeContext; }, [activeContext]);
 
@@ -209,6 +221,15 @@ export default function ChatInterface({
         let systemPrompt = "You are an expert AI coding assistant. \n";
         if (ctx.projectStructure) {
           systemPrompt += `\n[PROJECT CONTEXT & FILE STRUCTURE]:\n${ctx.projectStructure}\n`;
+          // G2a: only worth asking for when there's actual project
+          // context to place files against — a context-free chat has
+          // no file tree for "path=" to mean anything relative to.
+          systemPrompt += "\nWhen you propose changes to one or more actual project files (not a standalone snippet), "
+            + "tag each code block's fence with path=<relative/path/from/project/root> immediately after the "
+            + "language name, for example a fence opened as: tsx path=src/components/Button.tsx "
+            + "(then the code, then the closing fence as normal). Use one fenced block per file. Only use this "
+            + "tag for real files in the project structure above — never for illustrative snippets, "
+            + "partial examples, or terminal commands.\n";
         }
         if (ctx.currentFile) {
           systemPrompt += `\n[CURRENTLY OPEN FILE]: ${ctx.currentFile.name}\n\`\`\`\n${ctx.currentFile.content}\n\`\`\`\n`;
@@ -405,6 +426,23 @@ export default function ChatInterface({
                       img: ({ src, alt }) => <img src={src} alt={alt} className="max-w-[300px] h-auto rounded-lg border border-white/10 my-2 object-cover" />
                     }}>{msg.content}</ReactMarkdown>
                   </div>
+
+                  {/* G2a: only when 2+ path-tagged blocks are present —
+                      a single one is left to that block's own existing
+                      "Apply" button (CodeBlockHeader above) instead of
+                      opening a whole review screen for one file. */}
+                  {msg.role === 'assistant' && onReviewFilesRef.current && (() => {
+                    const proposals = parseMultiFileProposals(msg.content);
+                    if (proposals.length < 2) return null;
+                    return (
+                      <button
+                        onClick={() => onReviewFilesRef.current!(proposals)}
+                        className="mt-2 flex items-center gap-1.5 text-xs font-medium text-ubiq-accent hover:text-white bg-ubiq-accent/10 hover:bg-ubiq-accent/20 border border-ubiq-accent/20 rounded-lg px-3 py-1.5 transition-colors self-start"
+                      >
+                        <Square3Stack3DIcon className="w-3.5 h-3.5" /> Review {proposals.length} files
+                      </button>
+                    );
+                  })()}
                   <div className={`flex gap-2 mt-1 px-1 ${msg.role === 'user' ? 'justify-end' : 'justify-start'} opacity-50 hover:opacity-100 transition-opacity`}>
                     {msg.role === 'assistant' && idx === messages.length - 1 && !isLoading && (
                       <button onClick={handleRetry} className="p-1 rounded text-slate-500 hover:text-ubiq-accent transition-colors" title="Regenerate"><ArrowPathIcon className="w-3 h-3" /></button>

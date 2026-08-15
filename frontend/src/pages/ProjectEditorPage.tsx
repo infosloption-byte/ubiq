@@ -4,6 +4,8 @@ import { projectAPI, fileAPI, chatAPI, aiAPI } from '../services/api';
 import Layout from '../components/Layout';
 import FileTree from '../components/FileTree';
 import ChatInterface from '../components/ChatInterface';
+import MultiFileReviewScreen, { type ReviewFile } from '../components/MultiFileReviewScreen';
+import { isLikelyProtectedPath } from '../utils/multiFileProposals';
 import InputDialog from '../components/InputDialog';
 import ConfirmDialog from '../components/ConfirmDialog';
 import EditorTabs from '../components/EditorTabs';
@@ -83,6 +85,16 @@ export default function ProjectEditorPage() {
     const [activeFile, setActiveFile] = useState<FileNode | null>(null);
     const [fileContent, setFileContent] = useState('');
     const [proposedContent, setProposedContent] = useState<string | null>(null);
+
+    // G2a — multi-file diff review screen. Deliberately separate state
+    // from `proposedContent` above rather than trying to unify them:
+    // that one is scoped to "the currently open file" throughout this
+    // whole component (see D1's unsaved-edit warnings, tab-close
+    // handling, etc.), and threading N-file review through all of that
+    // existing logic would risk breaking flows that have nothing to do
+    // with G2a. This stays fully self-contained instead.
+    const [multiFileProposals, setMultiFileProposals] = useState<ReviewFile[] | null>(null);
+    const [reviewProcessingPath, setReviewProcessingPath] = useState<string | null>(null);
     const [loading, setLoading] = useState(true);
     const [chatSessionId, setChatSessionId] = useState<number | null>(null);
     const [isSaving, setIsSaving] = useState(false);
@@ -561,6 +573,131 @@ export default function ProjectEditorPage() {
         setTimeout(() => { setProposedContent(null); setShowEditor(true); }, 100);
     };
 
+    /**
+     * G2a — opens the batch review screen for a set of path-tagged file
+     * proposals parsed out of a chat message (see
+     * utils/multiFileProposals.ts). For each proposed path, looks up
+     * whether it matches an existing project file: if so, fetches that
+     * file's full current content via `fileAPI.get()` (the `files` list
+     * itself only ever carries metadata, not content — same reason
+     * `handleFileSelect` below does its own fetch when opening a file)
+     * so the diff has real "before" content instead of diffing against
+     * nothing; if not, treats it as a new file with empty oldContent.
+     */
+    const handleReviewFiles = async (proposals: { path: string; language: string; newContent: string }[]) => {
+        try {
+            const reviewFiles: ReviewFile[] = await Promise.all(
+                proposals.map(async (p) => {
+                    const existing = files.find((f: any) => f.path === p.path);
+                    let oldContent = '';
+                    if (existing) {
+                        try {
+                            const res = await fileAPI.get(existing.id);
+                            oldContent = res.data.file?.content ?? res.data.content ?? '';
+                        } catch (e) {
+                            console.error(`Failed to fetch current content for ${p.path}`, e);
+                        }
+                    }
+                    return {
+                        path: p.path,
+                        language: p.language,
+                        oldContent,
+                        newContent: p.newContent,
+                        status: existing ? 'modified' : 'new',
+                        isProtected: isLikelyProtectedPath(p.path),
+                    } as ReviewFile;
+                })
+            );
+            setMultiFileProposals(reviewFiles);
+        } catch (e) {
+            console.error('Failed to prepare file review', e);
+            showToast('Could not load file review — please try again.');
+        }
+    };
+
+    /** Writes one accepted file to disk (create if new, update if it already existed) and syncs local state. */
+    const writeReviewFile = async (file: ReviewFile) => {
+        const existing = files.find((f: any) => f.path === file.path);
+        if (existing) {
+            await fileAPI.update(existing.id, { content: file.newContent });
+        } else {
+            await fileAPI.create(projectId, {
+                name: file.path.split('/').pop() || file.path,
+                path: file.path,
+                content: file.newContent,
+                language: file.language,
+            });
+        }
+        // If the file being written is the one currently open in the
+        // editor, reflect the new content immediately rather than
+        // leaving the open tab showing stale content until a manual
+        // re-select.
+        if (activeFile && activeFile.path === file.path) {
+            setFileContent(file.newContent);
+            savedContentRef.current = file.newContent;
+        }
+    };
+
+    const handleAcceptReviewFile = async (path: string) => {
+        const file = multiFileProposals?.find(f => f.path === path);
+        if (!file || file.isProtected) return;
+        setReviewProcessingPath(path);
+        try {
+            await writeReviewFile(file);
+            await refreshFiles();
+            setMultiFileProposals(prev => {
+                const remaining = (prev ?? []).filter(f => f.path !== path);
+                return remaining.length > 0 ? remaining : null;
+            });
+        } catch (e) {
+            console.error(`Failed to accept ${path}`, e);
+            showToast(`Failed to save ${path} — it's still pending review.`);
+        } finally {
+            setReviewProcessingPath(null);
+        }
+    };
+
+    const handleRejectReviewFile = (path: string) => {
+        setMultiFileProposals(prev => {
+            const remaining = (prev ?? []).filter(f => f.path !== path);
+            return remaining.length > 0 ? remaining : null;
+        });
+    };
+
+    const handleAcceptAllReviewFiles = async () => {
+        const toAccept = (multiFileProposals ?? []).filter(f => !f.isProtected);
+        if (toAccept.length === 0) return;
+
+        const failedPaths = new Set<string>();
+        // Sequential, not Promise.all — these are real disk writes to a
+        // project's files; running them one at a time avoids N
+        // concurrent fileAPI.create/update calls racing against each
+        // other or against refreshFiles(), for a batch size that's
+        // realistically a handful of files, not hundreds.
+        for (const file of toAccept) {
+            setReviewProcessingPath(file.path);
+            try {
+                await writeReviewFile(file);
+            } catch (e) {
+                console.error(`Failed to accept ${file.path}`, e);
+                failedPaths.add(file.path);
+            }
+        }
+        setReviewProcessingPath(null);
+        await refreshFiles();
+
+        setMultiFileProposals(prev => {
+            const remaining = (prev ?? []).filter(f => f.isProtected || failedPaths.has(f.path));
+            return remaining.length > 0 ? remaining : null;
+        });
+
+        if (failedPaths.size > 0) {
+            showToast(`${failedPaths.size} file(s) failed to save and are still pending review.`);
+        }
+    };
+
+    const handleRejectAllReviewFiles = () => setMultiFileProposals(null);
+
     const handleEditorMount: OnMount = (editor, monaco) => {
         editorRef.current = editor;
         monacoRef.current = monaco;
@@ -949,6 +1086,7 @@ export default function ProjectEditorPage() {
                                             sessionId={chatSessionId}
                                             activeContext={{ projectStructure: projectStructureContext, currentFile: activeFile ? { name: activeFile.name, content: fileContent } : undefined }}
                                             onApplyCode={handleApplyCode}
+                                            onReviewFiles={handleReviewFiles}
                                             autoPrompt={autoPrompt}
                                             onAutoPromptClear={() => setAutoPrompt(null)}
                                             aiMode={aiMode}
@@ -967,6 +1105,21 @@ export default function ProjectEditorPage() {
                 <InputDialog isOpen={createModal.isOpen} onClose={() => setCreateModal(p => ({ ...p, isOpen: false }))} onSubmit={submitCreate} title={`New ${createModal.type === 'folder' ? 'Folder' : 'File'}`} message={`Enter name for new ${createModal.type} inside '${createModal.parentPath || 'root'}':`} placeholder={createModal.type === 'folder' ? "components" : "App.tsx"} />
                 <ConfirmDialog isOpen={deleteModal.isOpen} onClose={() => setDeleteModal({ isOpen: false, node: null })} onConfirm={submitDelete} title="Delete Item?" message={`Are you sure you want to delete '${deleteModal.node?.name}'? This action cannot be undone.`} confirmText="Delete" isDestructive={true} />
                 <ConfirmDialog isOpen={confirmDiscardModal.isOpen} onClose={() => setConfirmDiscardModal({ isOpen: false, message: '', onConfirm: () => {} })} onConfirm={() => { confirmDiscardModal.onConfirm(); setConfirmDiscardModal({ isOpen: false, message: '', onConfirm: () => {} }); }} title="Discard Changes?" message={confirmDiscardModal.message} confirmText="Discard Changes" isDestructive={true} />
+
+                {/* G2a — multi-file diff review, opened from ChatInterface's
+                    "Review N files" button. Renders nothing when null, same
+                    as every other modal here. */}
+                {multiFileProposals && (
+                    <MultiFileReviewScreen
+                        files={multiFileProposals}
+                        processingPath={reviewProcessingPath}
+                        onAcceptFile={handleAcceptReviewFile}
+                        onRejectFile={handleRejectReviewFile}
+                        onAcceptAll={handleAcceptAllReviewFiles}
+                        onRejectAll={handleRejectAllReviewFiles}
+                        onClose={handleRejectAllReviewFiles}
+                    />
+                )}
 
                 {/* D5 FIX: replaces alert() — non-blocking, auto-dismisses after 3s */}
                 {toast && (

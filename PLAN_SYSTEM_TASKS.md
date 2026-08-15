@@ -394,15 +394,33 @@ team plan that doesn't exist yet).
       (direct Anthropic/Grok support) the backend has never had.
 
 - [ ] **G2 — Multi-file diff review screen + user-controlled autonomy**
-  - [ ] G2a — Build the batch review screen: file list with
+  - [x] G2a — Build the batch review screen: file list with
         +added/−removed stat and New/Modified/Deleted badge per file;
         click opens diff in the existing Monaco `DiffEditor` (reused,
         not rebuilt); per-file Accept/Reject plus Accept All/Reject
-        All; protected-scaffold files (`getProtectedPaths()`) visually
-        flagged and blocked from silent overwrite regardless of
-        autonomy mode. Nothing writes to disk until confirmed. Prove
-        this on the already-safe single-file chat Apply path before
-        touching `generate()`.
+        All; protected-scaffold files visually flagged and blocked
+        from silent overwrite regardless of autonomy mode. Nothing
+        writes to disk until confirmed. Proven on the already-safe
+        chat path exactly as planned, NOT on `generate()` — see G2b.
+        New: `MultiFileReviewScreen.tsx`,
+        `utils/multiFileProposals.ts`. Chat gets a new `path=` fence
+        convention (`ChatInterface.tsx`'s systemPrompt, only added when
+        project context is present) and a "Review N files" button
+        under any assistant message with 2+ tagged blocks — additive,
+        the existing single-block "Apply to current file" button is
+        untouched and still there for the common one-snippet case.
+        **Caveat carried forward to G2b, not fully solved here:**
+        protected-file detection is currently a short client-side
+        hardcoded basename list
+        (`utils/multiFileProposals.ts:isLikelyProtectedPath`), NOT the
+        real, framework-aware `getProtectedPaths()` — that method
+        isn't exposed through any endpoint today. Good enough for this
+        chat-proof stage (chat rarely touches scaffold files by
+        accident), but two lists that can silently drift apart isn't
+        acceptable once G2b wires this into `generate()`'s actual
+        AI-scaffold-merge path, where protected-file correctness
+        actually matters. G2b should expose `getProtectedPaths()` (or
+        equivalent) via API and have this screen call it instead.
   - [ ] G2b — Rewire `CompletionController::generate()`'s final step
         from immediate `file_put_contents()` to "return proposed file
         set to frontend, open G2a with it." Extend `chat()` so
@@ -3027,3 +3045,63 @@ Decisions made 2026-08-08 (previously open questions):
   depended on it (confirmed no `document.body.style.overflow` usage
   anywhere that might have assumed a hidden baseline). No other files
   needed to change.
+
+- 2026-08-12 — G2a: multi-file diff review screen, proven on the chat
+  path per the plan's own staging (not `generate()` — that's G2b).
+
+  **New files:**
+    - `utils/multiFileProposals.ts` — `parseMultiFileProposals()` reads
+      a chat message for fenced code blocks tagged
+      `path=<relative/path>` in the info string (e.g. a fence opened as
+      `tsx path=src/App.tsx`) — a brand-new convention, since the
+      existing single-file Apply flow (`ChatInterface.tsx`'s
+      `CodeBlockHeader`) never needed one; it just applies a block's
+      raw content to whichever file is already open, no path
+      awareness at all. `diffLineStats()` — genuine LCS-based
+      added/removed line counts for the review screen's badges (not
+      just a length delta, so e.g. one changed line in a 500-line file
+      reads as "+1 −1" correctly), with a capped fallback past 2000
+      lines to avoid O(n·m) jank on a click. `isLikelyProtectedPath()`
+      — see the caveat on G2a's task-list line above; short hardcoded
+      basename list, explicitly NOT the real `getProtectedPaths()`.
+    - `components/MultiFileReviewScreen.tsx` — the actual screen.
+      Structurally the same idea as `ProjectEditorPage.tsx`'s existing
+      single-file `proposedContent` + `DiffEditor` flow, generalized
+      to a file list instead of one implicit "current file." Built as
+      its own component rather than folded into `ProjectEditorPage`
+      directly, since this exact shape is what G2b will need once
+      `generate()` routes through it too.
+
+  **Edited:**
+    - `ChatInterface.tsx` — new `onReviewFiles` prop (same
+      stale-closure-safe `useRef` pattern already used for
+      `onApplyCode`); systemPrompt gets the `path=` convention
+      explained to the model, but ONLY inside the `if
+      (ctx.projectStructure)` branch — a context-free chat has no file
+      tree for a path to mean anything relative to, so this doesn't
+      change behavior for chats without project context. A "Review N
+      files" button renders under any assistant message where
+      `parseMultiFileProposals()` finds 2+ tagged blocks; deliberately
+      does nothing for exactly 1 (left to that block's own existing
+      Apply button — one file isn't worth a whole review screen over).
+    - `ProjectEditorPage.tsx` — `handleReviewFiles()` resolves each
+      proposed path against the already-loaded `files` list; for a
+      match, fetches that file's real current content via
+      `fileAPI.get()` (list entries are metadata-only, same reason
+      `loadFileContent()` already does its own fetch on file-open) so
+      the diff has genuine "before" content instead of diffing against
+      nothing — no match means `status: 'new'`, empty oldContent.
+      Accept/reject writes go through `fileAPI.create`/`update`
+      exactly like every other file write in this component already
+      does; Accept All runs sequentially, not `Promise.all`, since
+      these are real disk writes for what's realistically a handful of
+      files, not a case where parallelism is worth the race risk. If
+      the accepted file happens to be the one currently open, its
+      content updates in place immediately rather than needing a
+      manual re-select to see it.
+
+  Kept deliberately separate from the existing `proposedContent` state
+  rather than trying to unify "one file" and "N files" into a single
+  code path — that state is threaded through unsaved-edit warnings,
+  tab-close handling, and more from D1, and forcing G2a through all of
+  that risked breaking flows that have nothing to do with it.
