@@ -24,6 +24,8 @@ export interface ReviewFile {
 
 interface MultiFileReviewScreenProps {
   files: ReviewFile[];
+  /** G2d — the AI's own lead-in prose (see utils/multiFileProposals.ts's extractSummaryText), shown above the file list. */
+  summary: string;
   /** True while a specific file's accept/reject is in flight (disables that row + Accept All/Reject All so a second click can't race the first). */
   processingPath: string | null;
   onAcceptFile: (path: string) => void;
@@ -53,6 +55,7 @@ const STATUS_META: Record<FileChangeStatus, { label: string; color: string; icon
  */
 export default function MultiFileReviewScreen({
   files,
+  summary,
   processingPath,
   onAcceptFile,
   onRejectFile,
@@ -81,9 +84,13 @@ export default function MultiFileReviewScreen({
 
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-3.5 border-b border-white/5 shrink-0">
-          <div>
+          <div className="min-w-0">
             <h2 className="text-sm font-semibold text-white">Review {files.length} proposed file {files.length === 1 ? 'change' : 'changes'}</h2>
-            <p className="text-xs text-slate-500 mt-0.5">Nothing is written until you accept — reject any file to discard it instead.</p>
+            {summary ? (
+              <p className="text-xs text-slate-400 mt-0.5 line-clamp-2" title={summary}>{summary}</p>
+            ) : (
+              <p className="text-xs text-slate-500 mt-0.5">Nothing is written until you accept — reject any file to discard it instead.</p>
+            )}
           </div>
           <div className="flex items-center gap-2">
             <button

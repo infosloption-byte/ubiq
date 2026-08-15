@@ -154,6 +154,8 @@ Route::prefix('v1')->group(function () {
             // rather than being silently settable via a generic update.
             Route::patch('/projects/{project}/db-engine', [ProjectController::class, 'setDbEngine']);
             Route::apiResource('projects.files', FileController::class)->shallow();
+            // G2d — one-click revert for an already-accepted AI change.
+            Route::post('files/{file}/revert-last-ai-write', [FileController::class, 'revertLastAiWrite']);
             Route::delete('projects/{project}/files/path',   [FileController::class, 'destroyPath']);
             Route::post('projects/import',                   [ProjectController::class, 'import']);
             Route::post('projects/{project}/files/upload',   [FileController::class, 'upload']);

@@ -478,12 +478,14 @@ team plan that doesn't exist yet).
         disabled radio button — confirmed by tracing
         `AiAutonomyService::resolve()`'s clamp, which ignores whatever
         a downgraded user's stale stored preference says.
-  - [ ] G2d — UX polish (after a–c are functionally solid): AI
+  - [x] G2d — UX polish (after a–c are functionally solid): AI
         activity indicator during multi-file generation (extend the
         existing single-file "Reading: App.jsx" pattern); one-click
         revert for an already-accepted change using G2c's before/after
         log; short natural-language change summary above the G2a file
         list.
+        All three landed — see notes for what each one actually turned
+        into. G2 (all of a–d) is now fully done.
 
 - [ ] **G3 — Self-hosted / on-prem tier** *(after 1–5 above are live with real users)*
   - [ ] G3a — Audit the existing `docker-compose.yml` end to end for
@@ -3360,3 +3362,61 @@ Decisions made 2026-08-08 (previously open questions):
       cleaner fix would have the ai-autonomy endpoint return
       classifications alongside the mode instead of the frontend
       guessing; deferred rather than done here.
+
+- 2026-08-15 — G2d, the last piece of G2. All three items, plus what
+  each one actually turned into once built:
+
+    - **Change summary.** NOT a second AI call to summarize the
+      first response — that's real latency + tokens for something the
+      model usually already gives away for free: a well-formed
+      multi-file response naturally has explanatory prose before its
+      first fenced block. `utils/multiFileProposals.ts`'s new
+      `extractSummaryText()` just extracts that prose as-given (capped
+      at ~240 chars, cut at a sentence boundary where possible), never
+      fabricating a summary the model didn't actually write. Falls
+      back to a generic "Proposed changes to N files" line only when
+      there's genuinely no lead-in text at all. Threaded through
+      `ChatInterface.tsx`'s "Review N files" button →
+      `handleReviewFiles()` → `MultiFileReviewScreen`'s header,
+      replacing the old generic reassurance line when present.
+    - **Activity indicator.** Turned into something more honest than
+      "extend the Reading: chip" literally would have implied — there's
+      no streaming/token-by-token reveal in this chat pipeline to hook
+      a live per-file counter into, so a truly live "processing file
+      2 of 5..." indicator isn't actually buildable without a much
+      bigger change to how `chat()` itself works. What WAS genuinely
+      invisible before this: the async gap between clicking "Review N
+      files" and the screen opening (fetching each proposed file's
+      current content, resolving the autonomy mode from G2c) — that's
+      several real await calls with zero feedback previously. The
+      button itself now shows a spinner + "Preparing files for
+      review…" for that actual gap, which is a real activity
+      indicator for a real wait, not a decorative one for an
+      instantaneous action.
+    - **One-click revert.** New `POST /files/{file}/revert-last-ai-write`
+      (`FileController::revertLastAiWrite()`) restores a file's
+      `old_content` from its most recent successful `ai.file_write`
+      `plan_action_logs` entry — one step back, not a full undo stack
+      (there's one recorded `old_content` per log row, not a chain).
+      Deliberately does NOT re-check `isProtectedAiProposal()` on the
+      way in: a protected file can never have a revertible entry in
+      the first place, since protected writes are always logged
+      `allowed: false` and `findLastAiWrite()` only ever matches
+      `allowed: true` rows — the protection guarantee holds
+      transitively without needing to re-verify it here. Logs its own
+      `ai.file_write_reverted` entry for audit-trail symmetry, even
+      though nothing reads it back yet. `FileController::show()` now
+      returns a `last_ai_write` field alongside the file itself (one
+      round trip, not a separate check-if-revertible call per
+      file-open); the editor shows a "Revert AI change" button — not
+      just disabled but fully hidden — only when that field is
+      present for the currently open file. Also wired into
+      `writeReviewFile()`'s existing "sync the open tab immediately"
+      branch, so accepting a proposal for the file you already have
+      open makes the Revert button appear right away too, not only on
+      the next time that file happens to be reopened.
+
+  **G2 is now fully done — a–d.** Next up, per the roadmap: G3
+  (self-hosted/on-prem tier) is explicitly deferred until 1–5 have
+  real users; Bucket 3 (real-time collab, SSO, admin analytics) has no
+  task breakdown yet by design. Nothing else currently blocking on G2.

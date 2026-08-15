@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { useAuthStore } from '../stores/authStore';
 import { chatAPI, generateTitle } from '../services/api';
 import { aiService, AiApiConfig } from '../services/aiService';
-import { parseMultiFileProposals } from '../utils/multiFileProposals';
+import { parseMultiFileProposals, extractSummaryText } from '../utils/multiFileProposals';
 import ModelSelector from './ModelSelector';
 import ReactMarkdown from 'react-markdown';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
@@ -43,7 +43,7 @@ interface ChatInterfaceProps {
    * the existing per-block "Apply" button instead — this is additive,
    * not a replacement for onApplyCode.
    */
-  onReviewFiles?: (proposals: { path: string; language: string; newContent: string }[]) => void;
+  onReviewFiles?: (proposals: { path: string; language: string; newContent: string }[], summary: string) => void | Promise<void>;
   autoPrompt?: string | null;
   onAutoPromptClear?: () => void;
   aiMode?: string;
@@ -64,6 +64,15 @@ export default function ChatInterface({
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  // G2d — activity indicator for the async gap between clicking "Review
+  // N files" and the screen actually opening (fetching each file's
+  // current content, resolving autonomy mode — see
+  // ProjectEditorPage.tsx's handleReviewFiles). That gap was previously
+  // a silent pause with zero feedback. A single component-wide boolean
+  // rather than per-message: only one review can meaningfully be in
+  // flight at a time, and disabling every "Review" button while one is
+  // preparing is a reasonable, simple guard against double-firing.
+  const [preparingReview, setPreparingReview] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [pendingAttachments, setPendingAttachments] = useState<Attachment[]>([]);
   const [abortController, setAbortController] = useState<AbortController | null>(null);
@@ -436,10 +445,28 @@ export default function ChatInterface({
                     if (proposals.length < 2) return null;
                     return (
                       <button
-                        onClick={() => onReviewFilesRef.current!(proposals)}
-                        className="mt-2 flex items-center gap-1.5 text-xs font-medium text-ubiq-accent hover:text-white bg-ubiq-accent/10 hover:bg-ubiq-accent/20 border border-ubiq-accent/20 rounded-lg px-3 py-1.5 transition-colors self-start"
+                        onClick={async () => {
+                          if (!onReviewFilesRef.current || preparingReview) return;
+                          setPreparingReview(true);
+                          try {
+                            await onReviewFilesRef.current(proposals, extractSummaryText(msg.content, proposals.length));
+                          } finally {
+                            setPreparingReview(false);
+                          }
+                        }}
+                        disabled={preparingReview}
+                        className="mt-2 flex items-center gap-1.5 text-xs font-medium text-ubiq-accent hover:text-white bg-ubiq-accent/10 hover:bg-ubiq-accent/20 border border-ubiq-accent/20 rounded-lg px-3 py-1.5 transition-colors self-start disabled:opacity-60 disabled:cursor-wait"
                       >
-                        <Square3Stack3DIcon className="w-3.5 h-3.5" /> Review {proposals.length} files
+                        {preparingReview ? (
+                          <>
+                            <div className="w-3.5 h-3.5 border-[1.5px] border-ubiq-accent/40 border-t-ubiq-accent rounded-full animate-spin" />
+                            Preparing files for review…
+                          </>
+                        ) : (
+                          <>
+                            <Square3Stack3DIcon className="w-3.5 h-3.5" /> Review {proposals.length} files
+                          </>
+                        )}
                       </button>
                     );
                   })()}

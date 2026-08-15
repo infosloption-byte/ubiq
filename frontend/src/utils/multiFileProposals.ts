@@ -57,6 +57,35 @@ export function parseMultiFileProposals(content: string): FileProposal[] {
   return proposals;
 }
 
+/**
+ * G2d — "short natural-language change summary above the file list."
+ * Deliberately NOT a second AI call to summarize the first response —
+ * that's real latency + tokens for something the model usually already
+ * said for free: a well-formed multi-file response naturally has
+ * explanatory prose before its first fenced block ("I'll add dark mode
+ * support across two files: ..."). This just extracts that prose as
+ * given. Falls back to a generic line only when there genuinely isn't
+ * any (a bare list of fences with no lead-in text at all) — never
+ * fabricates a summary the model didn't actually write.
+ */
+export function extractSummaryText(content: string, fileCount: number): string {
+  FILE_BLOCK_RE.lastIndex = 0;
+  const firstMatch = FILE_BLOCK_RE.exec(content);
+  const lead = firstMatch ? content.slice(0, firstMatch.index).trim() : content.trim();
+
+  // Cap length — this sits in a fixed-height header, not a scrollable
+  // area; an unusually verbose lead-in shouldn't blow past a couple of
+  // lines. Cuts at the nearest sentence boundary within the cap rather
+  // than a hard mid-word truncation where possible.
+  const CAP = 240;
+  if (lead.length <= CAP) {
+    return lead || `Proposed changes to ${fileCount} file${fileCount === 1 ? '' : 's'}.`;
+  }
+  const truncated = lead.slice(0, CAP);
+  const lastSentenceEnd = Math.max(truncated.lastIndexOf('. '), truncated.lastIndexOf('.\n'));
+  return (lastSentenceEnd > CAP * 0.5 ? truncated.slice(0, lastSentenceEnd + 1) : truncated.trimEnd() + '…');
+}
+
 /** Line-diff stats for a review screen's +added/−removed badge. */
 export interface DiffStats {
   added: number;

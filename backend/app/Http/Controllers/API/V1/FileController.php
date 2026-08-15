@@ -96,6 +96,94 @@ class FileController extends Controller
     public function show(Request $request, File $file)
     {
         if ($file->project->user_id !== $request->user()->id) return response()->json(['error' => 'Unauthorized'], 403);
+
+        // G2d — "one-click revert for an already-accepted change." The
+        // editor needs to know, on opening a file, whether there's
+        // anything TO revert — folded into this same response rather
+        // than a separate round trip per file-open.
+        $lastAiWrite = $this->findLastAiWrite($file->project, $file->path);
+
+        return response()->json([
+            'file' => $file,
+            'last_ai_write' => $lastAiWrite ? [
+                'id' => $lastAiWrite->id,
+                'created_at' => $lastAiWrite->created_at,
+            ] : null,
+        ]);
+    }
+
+    /**
+     * G2d — most recent successful AI-proposal write for this exact
+     * project+path, if any. Matched on the log's own recorded path
+     * rather than the current File row's id, since a file could
+     * theoretically be deleted and recreated at the same path — the
+     * log is about the PATH's history, not any one File row's identity.
+     */
+    private function findLastAiWrite(Project $project, string $path): ?PlanActionLog
+    {
+        return PlanActionLog::query()
+            ->where('action_key', 'ai.file_write')
+            ->where('allowed', true)
+            ->where('metadata->project_id', $project->id)
+            ->where('metadata->path', $path)
+            ->latest('created_at')
+            ->first();
+    }
+
+    /**
+     * G2d — POST /files/{file}/revert-last-ai-write. Restores the
+     * `old_content` recorded on the most recent successful AI-proposal
+     * write for this file's path, i.e. undoes exactly one accepted
+     * change, not a full history walk-back. Deliberately does NOT go
+     * through `isProtectedAiProposal()` — reverting can only ever
+     * restore a state that existed immediately before an AI write that
+     * was already allowed through that same check when it happened, so
+     * a protected file can never have a revertible entry in the first
+     * place (protected writes are always `allowed: false` and thus
+     * never match `findLastAiWrite()`'s `allowed = true` filter).
+     * Logs its own `ai.file_write_reverted` entry for symmetry, though
+     * nothing currently reads it back — just keeping the audit trail
+     * honest about what actually happened to this file over time.
+     */
+    public function revertLastAiWrite(Request $request, File $file)
+    {
+        if ($file->project->user_id !== $request->user()->id) return response()->json(['error' => 'Unauthorized'], 403);
+
+        $lastAiWrite = $this->findLastAiWrite($file->project, $file->path);
+        if (!$lastAiWrite) {
+            return response()->json(['error' => 'No AI change to revert for this file.'], 404);
+        }
+
+        $revertedTo = $lastAiWrite->metadata['old_content'] ?? '';
+        $currentContent = $file->content;
+
+        $file->content = $revertedTo;
+        $file->size_bytes = strlen($revertedTo);
+        $file->save();
+        $this->syncToDisk($file->project, $file->path, $revertedTo);
+
+        try {
+            PlanActionLog::query()->create([
+                'user_id' => $file->project->user_id,
+                'plan_id_at_time' => optional($this->planService->planFor($file->project->user))->id,
+                'action_key' => 'ai.file_write_reverted',
+                'allowed' => true,
+                'limit_value' => null,
+                'current_usage' => null,
+                'reason' => null,
+                'metadata' => [
+                    'project_id' => $file->project->id,
+                    'path' => $file->path,
+                    'reverted_log_id' => $lastAiWrite->id,
+                    'old_content' => strlen($currentContent) > 20000 ? substr($currentContent, 0, 20000) . '…[truncated]' : $currentContent,
+                    'new_content' => strlen($revertedTo) > 20000 ? substr($revertedTo, 0, 20000) . '…[truncated]' : $revertedTo,
+                ],
+                'created_at' => now(),
+            ]);
+        } catch (\Throwable $e) {
+            Log::warning("FileController: failed to write plan_action_logs entry for revert: {$e->getMessage()}");
+        }
+
         return response()->json(['file' => $file]);
     }
 

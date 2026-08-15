@@ -179,6 +179,8 @@ export const fileAPI = {
         api.post(`/projects/${projectId}/files`, data),
     get: (id: number) => api.get(`/files/${id}`),
     update: (id: number, data: { name?: string; content?: string; ai_proposal?: boolean }) => api.put(`/files/${id}`, data),
+    /** G2d — one-click revert for an already-accepted AI change. */
+    revertLastAiWrite: (id: number) => api.post(`/files/${id}/revert-last-ai-write`),
     delete: (id: number) => api.delete(`/files/${id}`),
     upload: (projectId: number, formData: FormData, onProgress?: (e: ProgressEvent) => void) =>
         api.post(`/projects/${projectId}/files/upload`, formData, {

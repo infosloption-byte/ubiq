@@ -21,7 +21,7 @@ import {
     CodeBracketIcon, ChatBubbleLeftRightIcon, XMarkIcon, ArrowPathIcon,
     CheckIcon, NoSymbolIcon, PlusIcon, FolderPlusIcon, MagnifyingGlassIcon,
     CloudArrowUpIcon, EyeIcon, ServerStackIcon, CpuChipIcon, ServerIcon,
-    FolderIcon, CommandLineIcon, PlayIcon, ArrowDownOnSquareIcon, Cog6ToothIcon
+    FolderIcon, CommandLineIcon, PlayIcon, ArrowDownOnSquareIcon, Cog6ToothIcon, ArrowUturnLeftIcon
 } from '@heroicons/react/24/outline';
 
 export default function ProjectEditorPage() {
@@ -95,6 +95,17 @@ export default function ProjectEditorPage() {
     // with G2a. This stays fully self-contained instead.
     const [multiFileProposals, setMultiFileProposals] = useState<ReviewFile[] | null>(null);
     const [reviewProcessingPath, setReviewProcessingPath] = useState<string | null>(null);
+    // G2d — the AI's own lead-in prose, extracted by
+    // utils/multiFileProposals.ts's extractSummaryText(), shown above
+    // the file list in MultiFileReviewScreen.
+    const [reviewSummary, setReviewSummary] = useState<string>('');
+    // G2d — one-click revert. Non-null when the currently-open file has
+    // a revertible AI change (see FileController::show()'s
+    // last_ai_write field); null clears the button entirely rather than
+    // just disabling it, since "nothing to revert" and "something to
+    // revert but unavailable" are different states worth distinguishing.
+    const [lastAiWrite, setLastAiWrite] = useState<{ id: number; created_at: string } | null>(null);
+    const [reverting, setReverting] = useState(false);
     const [loading, setLoading] = useState(true);
     const [chatSessionId, setChatSessionId] = useState<number | null>(null);
     const [isSaving, setIsSaving] = useState(false);
@@ -486,6 +497,7 @@ export default function ProjectEditorPage() {
         if (!file.fileId) return;
         setActiveFile(file);
         latestRequestedFileIdRef.current = file.fileId; // D2 FIX: stamp this as the most recent request
+        setLastAiWrite(null); // G2d — cleared immediately so a stale revert button from the PREVIOUS file can't flash while this one loads
 
         if (isBinaryFile(file.name)) { setShowPreview(true); setShowEditor(false); }
         else { setShowPreview(false); setShowEditor(false); }
@@ -500,6 +512,7 @@ export default function ProjectEditorPage() {
             const content = res.data.file.content || '';
             setFileContent(content);
             savedContentRef.current = content; // D1 FIX: new baseline for dirty-check
+            setLastAiWrite(res.data.last_ai_write || null); // G2d
         } catch (e) {
             if (latestRequestedFileIdRef.current !== file.fileId) return; // D2 FIX: stale error, ignore
             console.error(e);
@@ -509,6 +522,31 @@ export default function ProjectEditorPage() {
                     if (latestRequestedFileIdRef.current === file.fileId) setShowEditor(true);
                 }, 50);
             }
+        }
+    };
+
+    /**
+     * G2d — one-click revert. Restores whatever the file looked like
+     * immediately before its most recent accepted AI change, then
+     * reloads the editor's content from the server's own confirmation
+     * (not just the value sent) so what's on screen matches what's
+     * actually on disk.
+     */
+    const handleRevertLastAiWrite = async () => {
+        if (!activeFile?.fileId || !lastAiWrite) return;
+        setReverting(true);
+        try {
+            const res = await fileAPI.revertLastAiWrite(activeFile.fileId);
+            const content = res.data.file?.content ?? '';
+            setFileContent(content);
+            savedContentRef.current = content;
+            setLastAiWrite(null); // this file's one revertible entry has now been consumed
+            showToast('Reverted the last AI change to this file.');
+        } catch (e: any) {
+            console.error('Failed to revert AI change', e);
+            showToast(e?.response?.data?.error || 'Failed to revert — please try again.');
+        } finally {
+            setReverting(false);
         }
     };
 
@@ -616,7 +654,8 @@ export default function ProjectEditorPage() {
      * `MultiFileReviewScreen` — if nothing's left, a toast summarizes
      * what happened instead of opening an empty screen.
      */
-    const handleReviewFiles = async (proposals: { path: string; language: string; newContent: string }[]) => {
+    const handleReviewFiles = async (proposals: { path: string; language: string; newContent: string }[], summary: string) => {
+        setReviewSummary(summary);
         try {
             const reviewFiles: ReviewFile[] = await Promise.all(
                 proposals.map(async (p) => {
@@ -712,10 +751,20 @@ export default function ProjectEditorPage() {
         // If the file being written is the one currently open in the
         // editor, reflect the new content immediately rather than
         // leaving the open tab showing stale content until a manual
-        // re-select.
+        // re-select. Also re-fetch last_ai_write (G2d) so the "Revert
+        // AI change" button appears right away too — not just on the
+        // next time this file happens to be opened.
         if (activeFile && activeFile.path === file.path) {
             setFileContent(file.newContent);
             savedContentRef.current = file.newContent;
+            if (activeFile.fileId) {
+                try {
+                    const res = await fileAPI.get(activeFile.fileId);
+                    setLastAiWrite(res.data.last_ai_write || null);
+                } catch (e) {
+                    console.error('Failed to refresh last_ai_write after accepting a proposal', e);
+                }
+            }
         }
     };
 
@@ -1045,6 +1094,26 @@ export default function ProjectEditorPage() {
                                     <span className="text-xs font-medium">{isSaving ? 'Saving...' : 'Save'}</span>
                                 </button>
 
+                                {/* G2d — one-click revert, only rendered when
+                                    this exact file actually has something to
+                                    revert (see loadFileContent's
+                                    last_ai_write capture). Not just disabled
+                                    when absent — hidden entirely, so it
+                                    doesn't become a permanent, usually-inert
+                                    fixture in the toolbar for files that have
+                                    never had an AI-accepted change. */}
+                                {lastAiWrite && (
+                                    <button
+                                        onClick={handleRevertLastAiWrite}
+                                        disabled={reverting}
+                                        title={`Revert the AI change accepted ${new Date(lastAiWrite.created_at).toLocaleString()}`}
+                                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-md transition-colors border border-amber-500/20 text-amber-400 bg-amber-500/5 hover:bg-amber-500/10 disabled:opacity-50"
+                                    >
+                                        {reverting ? <ArrowPathIcon className="w-3.5 h-3.5 animate-spin" /> : <ArrowUturnLeftIcon className="w-3.5 h-3.5" />}
+                                        <span className="text-xs font-medium hidden md:inline">{reverting ? 'Reverting...' : 'Revert AI change'}</span>
+                                    </button>
+                                )}
+
                                 <div className="w-px h-4 bg-white/10 mx-1"></div>
 
                                 <div className="flex bg-black/30 rounded-lg p-0.5 ml-2 border border-white/5">
@@ -1193,6 +1262,7 @@ export default function ProjectEditorPage() {
                 {multiFileProposals && (
                     <MultiFileReviewScreen
                         files={multiFileProposals}
+                        summary={reviewSummary}
                         processingPath={reviewProcessingPath}
                         onAcceptFile={handleAcceptReviewFile}
                         onRejectFile={handleRejectReviewFile}
