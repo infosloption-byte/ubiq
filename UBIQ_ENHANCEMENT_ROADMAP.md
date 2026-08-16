@@ -116,8 +116,8 @@ These are where "lean into what nobody else offers" actually pays off — not be
 **G1c — Surface the same reason at the point of failure, not just in the dashboard**
 - When a PlanGuard check denies an action, show that same human-readable reason right where the denial happened (the chat input, the "start sandbox" button) — the dashboard becomes a reference someone can check anytime, not the only place this information ever appears.
 
-**G1d — Stretch: seed for admin analytics (Bucket 3)**
-- The same aggregation, run instance-wide instead of per-user, is most of what the admin analytics item in Bucket 3 needs — worth building G1a in a way that generalizes cleanly rather than as a strictly per-user query, so that later item is mostly a new view over the same data instead of a second aggregation layer.
+**G1d — Stretch: generalizes cleanly for a possible future admin view**
+- The same aggregation, run instance-wide instead of per-user, would cover most of what an eventual admin-analytics view would need — worth building G1a so it generalizes cleanly rather than as a strictly per-user query, so that if such a view is ever built, it's mostly a new UI over the same data rather than a second aggregation layer. Not a commitment to build that view — just not closing the door on it for free.
 
 **Effort:** low. Genuinely one of the best effort-to-trust ratios on this whole list — the hard part (collecting the data reliably) already shipped in Phase A/B.
 
@@ -158,37 +158,6 @@ Directly per your ask — mirrors how Claude Code lets you choose your own risk 
 
 **Sequencing note:** G2a (the review screen) has to exist before G2c (autonomy modes) means anything — "always review" is the only mode that's meaningful without it, so build the screen first, prove it on the already-safe chat path, *then* rewire `generate()` into it (G2b) and add the autonomy toggle (G2c) once there's a trustworthy destination for autonomous writes to land in.
 
-### G3 — Self-hosted / on-prem tier
-**Why this is a real lever and not a copy:** literally none of Cluster A (Replit, Bolt, Lovable, v0) can offer this — they're built as multi-tenant SaaS from the ground up. It's the one column in the whole competitive table where Ubiq's architecture (already running as Docker-on-your-own-EC2) has a structural head start instead of a gap to close. Security/compliance-conscious teams — the same audience the earlier research flagged as wanting <cite index="40-1">"audit logs, permissions, SSO, and compliance templates"</cite> — are a real, underserved segment specifically *because* every fast-growing competitor is SaaS-only.
-
-**What's already there to build on:** the repo already ships `docker-compose.yml`, `setup.sh`/`setup.ps1`/`setup.bat`, and a working `nginx.conf` template — this is already most of a working local install path (used today for dev), not a from-scratch effort. G3 is about hardening and packaging that path for a paying, external operator, not inventing it.
-
-**G3a — Harden the existing compose setup for production use, not just dev**
-- The current `docker-compose.yml` already has real security thought in it (the socket-proxy sidecar restricting Docker API access is a good sign of that) — audit it end to end for anything that's fine for a trusted single-operator dev box but not for an arbitrary customer's production environment (default passwords, open ports, missing resource limits) before calling it self-hostable.
-
-**G3b — Config surface for what's currently hardcoded to *your* infra**
-- `nginx.conf`'s `server_name ubiq-editor.space` and the CORS `allowed_origins` in `backend/config/cors.php` are hardcoded to your domain, and the wildcard-subdomain preview setup from F1d assumes your own DNS/certbot — a self-hoster running on their own domain needs all of this to become a first-run setup step (interactive script or a clearly documented `.env` pass) rather than something they have to find and hand-edit in PHP/nginx config files.
-
-**G3c — Licensing/activation**
-- A lightweight license-key check against a small licensing endpoint on your own infra (a signed token, checked periodically) — enough to keep self-hosted from becoming an unpaid-forever fork of the SaaS product, without building a heavyweight DRM system for what's likely to start as a small number of customers.
-
-**G3d — Support/SLA definition**
-- Self-hosted customers reasonably expect a different support relationship than a free-tier SaaS user — this needs an actual decision (response-time SLA, support channel, what "supported version" means as the SaaS product keeps shipping) before it's sellable, not just before it's installable. This is the one sub-item here that's a business decision more than an engineering task, and it's worth having an answer before the first self-hosted sales conversation, not after.
-
-**Sequencing note:** this whole item is a sales-and-docs-heavy motion, not primarily an engineering one — put it after F1–F3 and G1–G2 are proven with real paying SaaS users, not before. Selling infrastructure control to a compliance-conscious buyer works a lot better with a track record behind it.
-
----
-
-## Bucket 3 — Later / earn it
-
-Real, but sequence these after Buckets 1–2 land, once there's actual usage data to justify them rather than guessing.
-
-**Real-time collaborative editing.** Checked `PlanSeeder` directly: `sandbox.max_concurrent` is `1` on Free/Starter/Creator and `2` on Pro — that's concurrent *sandboxes for one user* (e.g. two browser tabs, or a frontend + backend sandbox open together), not shared seats for a team. There is no multi-seat/team concept anywhere in the `Plan` model today. Building CRDT-based collab (Yjs + a sync server, presence UI, conflict handling) is real, multi-week work — solving it before there's a plan that monetizes it means shipping a team feature with no team plan to sell it into. Revisit once a team tier exists; at that point this becomes the headline feature of that tier, not a bolt-on.
-
-**SSO (SAML/OIDC).** Only matters once there's an enterprise/team tier to sell it into — pairs naturally with G3 (self-hosted), since the same buyer asking for self-hosting is the one asking for SSO. Bundle the two efforts when the time comes rather than building SSO in isolation first for a buyer segment that doesn't exist as a plan yet.
-
-**Admin analytics UI.** Builds directly on G1a's aggregation (see G1d) once that's live — the same `usage_counters`/`plan_action_logs` data, queried instance-wide instead of per-user, surfaced as denial rate by tier, usage percentiles, and which `counter_key`s are actually the binding constraint across the user base. Useful for you, not customer-facing, so it's real but appropriately behind everything customer-facing above it.
-
 ---
 
 ## Suggested build order
@@ -201,7 +170,7 @@ Real, but sequence these after Buckets 1–2 land, once there's actual usage dat
 5. **F1c** (DB service inside the sandbox) — the specific "frontend + backend + database together" capability, built directly on F1b.
 6. **F1d** (ephemeral preview links) — can run in parallel with F1b/c rather than strictly after, since it only depends on the already-existing `SandboxRun` tracking, not on multi-service support.
 7. **G2a** (multi-file diff review screen, proven on the already-safe chat path) → **G2b** (rewire `generate()` into it, retiring its unreviewed direct-write behavior) → **G2c** (autonomy modes) → **G2d** (polish) — the real differentiator, sequenced after the retention-critical items so it's not competing for engineering time against things actively costing customers today, and internally sequenced so autonomy modes only ship once there's a trustworthy review screen for "always review" to mean something.
-8. **G3a–d** (self-hosted tier) — once 1–7 are live and there's a track record to sell against; G3d (support/SLA) needs an answer before the first sales conversation, not just before the first install.
-9. **Bucket 3** (collab, SSO, admin analytics) — revisit once there's a team/enterprise tier to justify them; admin analytics can move earlier opportunistically since it's mostly free once G1a exists.
 
-The two things most worth explicitly *not* front-loading: custom domains and full production hosting (deliberately dropped from F1 entirely, not just deferred — see the correction note at the top of F1) and SSO/collab (Bucket 3), which is naturally gated by a team plan that doesn't exist yet.
+The one thing most worth explicitly *not* front-loading: custom domains and full production hosting (deliberately dropped from F1 entirely, not just deferred — see the correction note at the top of F1).
+
+**2026-08-16 note:** this doc previously carried a G3 (self-hosted/on-prem tier) and a Bucket 3 (real-time collab, SSO, admin analytics) — both removed outright, not deferred. Neither had committed scope beyond a rough sketch, and both were explicitly gated on a precondition (a track record with real paying users; a team/enterprise plan existing to sell into) that doesn't exist yet. If either precondition is actually met later, re-scope fresh at that point rather than resurrecting this version — what "harden for self-hosted" or "SSO" should even mean by then may look different from this sketch.

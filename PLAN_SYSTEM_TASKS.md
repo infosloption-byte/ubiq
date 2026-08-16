@@ -132,18 +132,19 @@ duplicate all of it.
    items above so it's not competing for time against things actively
    losing customers right now. Internal order a→b→c→d is load-bearing
    (see sequencing note under G2) — do not start G2c before G2a/b ship.
-6. **G3 — Self-hosted/on-prem tier.** Sales-and-docs-heavy, wants a
-   track record from 1–5 behind it first.
-7. **Bucket 3 — Later/earn it** (collab, SSO, admin analytics). No
-   task breakdown yet on purpose — revisit once a team/enterprise plan
-   exists to sell them into. Admin analytics is the one item that can
-   move earlier opportunistically since G1a's aggregation makes it
-   nearly free once G1 ships.
 
 Explicitly *not* front-loaded, per the roadmap: custom domains / full
 production hosting (deliberately cut from F1, not deferred — see the
-correction note in the roadmap's F1 intro), and SSO/collab (gated on a
-team plan that doesn't exist yet).
+correction note in the roadmap's F1 intro). G3 (self-hosted/on-prem)
+and Bucket 3 (real-time collab, SSO, admin analytics) were both
+removed outright from this tracker and the roadmap doc on 2026-08-16
+— not deferred, cut. Neither had committed scope beyond a rough
+sketch, and both were explicitly gated on a precondition (a track
+record with real users; a team/enterprise plan existing to sell into)
+that doesn't exist. Reintroduce as fresh, re-scoped items if/when
+either precondition is actually met, rather than resurrecting this
+version — a lot can change about what "harden for self-hosted" or
+"SSO" should even mean by then.
 
 - [x] **F0 — Fix concurrent sandbox slot leak on re-run** *(P0, do first)* — 2026-08-09, commit `<fill in after commit>`
   - [x] F0a — In `runProject()` (`ProjectController`), close out any
@@ -486,33 +487,6 @@ team plan that doesn't exist yet).
         list.
         All three landed — see notes for what each one actually turned
         into. G2 (all of a–d) is now fully done.
-
-- [ ] **G3 — Self-hosted / on-prem tier** *(after 1–5 above are live with real users)*
-  - [ ] G3a — Audit the existing `docker-compose.yml` end to end for
-        anything fine on a trusted single-operator dev box but not an
-        arbitrary customer's production environment (default
-        passwords, open ports, missing resource limits).
-  - [ ] G3b — Turn hardcoded infra values into a first-run setup step:
-        `nginx.conf`'s `server_name ubiq-editor.space`, the CORS
-        `allowed_origins` in `backend/config/cors.php`, and the
-        wildcard-subdomain preview assumption from F1d — interactive
-        script or documented `.env` pass, not hand-edited config files.
-  - [ ] G3c — Lightweight license-key check (signed token, checked
-        periodically) against a licensing endpoint on your own infra —
-        no heavyweight DRM.
-  - [ ] G3d — Decide and document support/SLA terms for self-hosted
-        customers before the first sales conversation (response-time
-        SLA, support channel, what "supported version" means).
-
-- [ ] **Bucket 3 — Later / earn it** *(no task breakdown yet — revisit once a team/enterprise plan exists)*
-  - [ ] Real-time collaborative editing (Yjs + sync server, presence,
-        conflict handling) — gated on a team/multi-seat plan existing;
-        none does today (`Plan` model has no multi-seat concept).
-  - [ ] SSO (SAML/OIDC) — bundle with G3 (self-hosted); same buyer
-        segment.
-  - [ ] Admin analytics UI — builds on G1a's aggregation (G1d) once
-        live; instance-wide view over the same `usage_counters`/
-        `plan_action_logs` data. Can move earlier opportunistically.
 
 ---
 
@@ -3416,7 +3390,8 @@ Decisions made 2026-08-08 (previously open questions):
       open makes the Revert button appear right away too, not only on
       the next time that file happens to be reopened.
 
-  **G2 is now fully done — a–d.** Next up, per the roadmap: G3
-  (self-hosted/on-prem tier) is explicitly deferred until 1–5 have
-  real users; Bucket 3 (real-time collab, SSO, admin analytics) has no
-  task breakdown yet by design. Nothing else currently blocking on G2.
+  **G2 is now fully done — a–d.** G3 (self-hosted/on-prem) and
+  Bucket 3 (real-time collab, SSO, admin analytics) were removed
+  outright from this tracker and the roadmap doc on 2026-08-16, not
+  deferred — see the priority-order note near the top of this phase
+  for why. Nothing else currently queued.
