@@ -132,19 +132,29 @@ duplicate all of it.
    items above so it's not competing for time against things actively
    losing customers right now. Internal order a→b→c→d is load-bearing
    (see sequencing note under G2) — do not start G2c before G2a/b ship.
+6. **H — Competitive gap response.** Triaged from a full platform vs.
+   competitor gap analysis (2026-08-16) — only 4 of 9 named gaps are
+   actually engineering work; the rest are reaffirmed cuts or out of
+   engineering's remit. See Phase H itself for the full triage and why
+   each of H1–H4 is scoped as an integration/add-on rather than a
+   from-scratch build.
 
-Explicitly *not* front-loaded, per the roadmap: custom domains / full
-production hosting (deliberately cut from F1, not deferred — see the
-correction note in the roadmap's F1 intro). G3 (self-hosted/on-prem)
-and Bucket 3 (real-time collab, SSO, admin analytics) were both
-removed outright from this tracker and the roadmap doc on 2026-08-16
-— not deferred, cut. Neither had committed scope beyond a rough
-sketch, and both were explicitly gated on a precondition (a track
-record with real users; a team/enterprise plan existing to sell into)
-that doesn't exist. Reintroduce as fresh, re-scoped items if/when
-either precondition is actually met, rather than resurrecting this
-version — a lot can change about what "harden for self-hosted" or
-"SSO" should even mean by then.
+Custom domains / full production hosting were deliberately cut from
+F1 outright, not deferred (see the correction note in the roadmap's
+F1 intro) — Phase H revisits the *outcome* (a deploy path) via a much
+smaller integration (H1), not by reopening that original from-scratch
+hosting scope. G3 (self-hosted/on-prem) and Bucket 3 (real-time
+collab, SSO, admin analytics) were both removed outright from this
+tracker and the roadmap doc on 2026-08-16 — not deferred, cut. Neither
+had committed scope beyond a rough sketch, and both were explicitly
+gated on a precondition (a track record with real users; a team/
+enterprise plan existing to sell into) that doesn't exist. Reintroduce
+as fresh, re-scoped items if/when either precondition is actually
+met, rather than resurrecting this version — a lot can change about
+what "harden for self-hosted" or "SSO" should even mean by then. Phase
+H's own "explicitly declined" list reaffirms the collab/SSO half of
+this specifically, in case a competitor-matrix reading makes it look
+reopened.
 
 - [x] **F0 — Fix concurrent sandbox slot leak on re-run** *(P0, do first)* — 2026-08-09, commit `<fill in after commit>`
   - [x] F0a — In `runProject()` (`ProjectController`), close out any
@@ -267,7 +277,7 @@ version — a lot can change about what "harden for self-hosted" or
         into a reusable query; see notes for what specifically was
         missing and what's still deliberately left for Bucket 3 itself.
 
-- [ ] **F1 — Full-stack sandbox parity + portable export**
+- [x] **F1 — Full-stack sandbox parity + portable export**
   - [x] F1a — Externalize the real Dockerfile: generate it from the
         same framework-detection logic currently only living as an
         in-memory PHP array in `runProject()`, write it into the
@@ -394,7 +404,7 @@ version — a lot can change about what "harden for self-hosted" or
       GitHub Connectors (F3) entirely, and contained a factual claim
       (direct Anthropic/Grok support) the backend has never had.
 
-- [ ] **G2 — Multi-file diff review screen + user-controlled autonomy**
+- [x] **G2 — Multi-file diff review screen + user-controlled autonomy**
   - [x] G2a — Build the batch review screen: file list with
         +added/−removed stat and New/Modified/Deleted badge per file;
         click opens diff in the existing Monaco `DiffEditor` (reused,
@@ -487,6 +497,115 @@ version — a lot can change about what "harden for self-hosted" or
         list.
         All three landed — see notes for what each one actually turned
         into. G2 (all of a–d) is now fully done.
+
+- [ ] **H — Competitive gap response** *(planned 2026-08-16, from
+      `Ubiq_Platform_Analysis_and_Competitive_Gap_Analysis.md` — see
+      that doc's Part 3 feature matrix and §4.2 for the full source
+      material this phase is triaged from)*
+
+      Of the nine gaps that doc's §4.2 named against Replit/Bolt/
+      Lovable/v0/Base44, only four are actually engineering work worth
+      doing. The other five are either already-decided cuts being
+      reaffirmed, out of engineering's remit entirely, or actively
+      wrong for what Ubiq is — logged below as **explicitly declined**,
+      not silently dropped, so nobody re-litigates them from a cold
+      read of the gap-analysis doc alone.
+
+  - [ ] H1 — Production deploy, via integration, not by building
+        hosting. The gap ("no path from working sandbox to live
+        production app") is real — every one of the five competitors
+        profiled treats one-click deploy as core. The wrong fix is
+        building and operating elastic hosting, TLS-per-custom-domain,
+        and abuse handling for arbitrary internet-facing user apps on
+        a shared EC2 box — a fundamentally different ops burden than
+        ephemeral dev preview links, and disproportionate to current
+        scale.
+        **How:** one provider first (Vercel — best-documented deploy
+        API of the three obvious choices), OAuth-connect the same
+        shape as GitHub's existing connect flow, "Deploy" button pushes
+        the current project's files via their API, surfaces the
+        resulting URL back in Ubiq. No new hosting infrastructure of
+        Ubiq's own. Same BYOK-shaped pattern as AI provider keys —
+        Ubiq orchestrates, someone else's infrastructure serves the
+        traffic.
+        **Why worth it:** closes the single most consistently-missing
+        row in the competitive matrix, for materially less engineering
+        and zero new ops liability than the alternative.
+  - [ ] H2 — Backend-as-a-service, via BYO-Supabase, not by building
+        one. The gap ("no managed auth/storage/realtime") is real —
+        it's the specific reason Lovable/Bolt/Base44's proposition
+        feels instant for non-infra developers. Building an
+        auth/storage/RLS/realtime system from scratch is a multi-month
+        project with no edge over the incumbent that already owns this
+        space.
+        **How:** a "Connect Supabase" flow — user supplies their own
+        project URL + anon/service key (their own Supabase project,
+        their own bill), stored the same way AI provider keys already
+        are (`AiKeyController`'s encrypted-at-rest pattern). Scaffold
+        templates get an opt-in Supabase client wiring, same tier as
+        choosing React vs. Vue vs. Laravel today.
+        **Why worth it:** this doesn't contradict Ubiq's "bring your
+        own everything" identity, it extends it — more consistent with
+        existing BYOK positioning than a walled-garden BaaS would be.
+  - [ ] H3 — Build/test-check on multi-file proposals, NOT an
+        autonomous agent loop. The named gap (Replit Agent 3's
+        self-testing) is real, but building a full planning-and-
+        self-verification agent is a deep, open-ended R&D bet that
+        pulls in the opposite direction from G2's whole premise
+        (safety via review, not autonomy via unsupervised execution).
+        Chasing this head-on risks diluting the actual differentiator
+        the gap analysis itself identified.
+        **How, scoped small on purpose:** after a G2 multi-file
+        proposal is generated (either autonomy mode), run the
+        project's own build/test command (already know how — same
+        mechanism `ProjectController::runProject()` uses to boot a
+        sandbox) against the proposed files in a throwaway container,
+        surface pass/fail next to the diff in `MultiFileReviewScreen`.
+        Informs the accept decision; does not act on its own.
+        **Why worth it, at this size only:** meaningfully improves
+        review quality for near-zero incremental architecture: no new
+        agent subsystem, reuses the sandbox-boot path that already
+        exists.
+  - [ ] H4 — Resource-ceiling alerting, NOT elastic multi-region
+        scaling. The gap (single shared EC2 host, ~2-3 concurrent
+        sandbox ceiling) is real and will eventually matter, but
+        building elastic infra ahead of actual growth is the exact
+        premature optimization this roadmap has consistently avoided
+        elsewhere (see G3/Bucket 3's removal this same week, gated on
+        the identical "real users first" reasoning).
+        **How:** a simple threshold check (concurrent sandbox count
+        vs. host capacity) that alerts before the ceiling is hit, not
+        during an incident — cheap, and worth doing regardless of
+        growth timing, since it's the difference between finding out
+        from a dashboard vs. from a user complaint.
+        **Why worth it now even though scaling isn't:** near-zero cost
+        insurance against the one gap on this list with a real
+        "found out the hard way" failure mode.
+
+      **Explicitly declined, not silently dropped — logged so this
+      doc doesn't get re-litigated from the gap-analysis doc alone:**
+        - **Real-time collaboration + SSO** — this is exactly Bucket 3,
+          removed from this same file on 2026-08-16 because no team/
+          enterprise plan exists to sell either into. The gap-analysis
+          doc naming them again doesn't change that reasoning; re-open
+          only if a team plan actually gets built, not because a
+          competitor matrix has the row.
+        - **Market presence** (5–8M users vs. near zero) — not an
+          engineering task at all; no code change in this phase or any
+          other closes a distribution gap. Needs a GTM plan, not a
+          line item here.
+        - **Visual/no-code editing mode** — declined on purpose, not
+          just unprioritized: this targets a different buyer
+          (non-technical founders) than Ubiq's actual differentiators
+          already signal (multi-framework backend choice is a
+          developer-facing decision a visual-only tool would never
+          ask). Building it dilutes the positioning the gap analysis
+          itself identified as a strength, it doesn't close a gap.
+        - **Mobile app for building on the go** — low value, narrow
+          precedent (mainly a Replit-specific nicety, not a broad
+          category expectation). If ever revisited, a responsive
+          mobile-web pass is the cheap version; a native app is not on
+          any plan.
 
 ---
 
